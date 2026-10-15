@@ -113,6 +113,23 @@ if (result.status !== VerificationStatus.OK) {
 }
 ```
 
+### Proof status hints (pending / expired / unknown)
+
+When asked with `getInclusionProof(stateId, { includeStatus: true })`, an aggregator that supports it answers `{ proof, status }`
+with `status` one of `included`, `pending`, `expired`, `unknown`; `proof` is the unchanged result and `response.status` carries
+the hint (`null` for a server that sends a plain string, which is the legacy behavior, or for a value this SDK does not know).
+Without the option the request and the result are exactly as before. `waitInclusionProof` asks for the hint: `pending` keeps
+waiting at the poll interval, `expired` fails at once with `InclusionProofExpiredError`, and `unknown` fails with
+`InclusionProofUnknownError` once it has persisted for a grace period (default two intervals, `unknownGraceMs` in the last
+argument), because a wait that starts right after submission can hit an HA instance that has not seen the request yet. After
+either error the same signed request may be submitted again. Consolidation reports the batch details `state_pending`
+(retryable), `state_expired`, `state_unknown` and `state_not_in_root` (not retryable) as the `unavailable` reasons of the same
+names, with `proofIndexes` naming the outer proofs concerned when the service sent request indexes.
+
+**The status is an unauthenticated hint.** It is not signed, not part of any proof, and never changes how a proof, token or
+transaction is verified (a proof that is present is verified whatever the status says). `unknown` or `expired` is **not** a
+proof of absence and must never be used to conclude that a state is unspent.
+
 ### Prepare a token for EVM or zkVM verification
 
 `TokenProofClient.consolidate(token, { timeoutMs, signal })` rebuilds the replaceable outer-history proofs of a token so

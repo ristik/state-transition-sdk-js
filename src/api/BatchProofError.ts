@@ -28,6 +28,8 @@ export class BatchProofError extends Error {
    * @param {object} [info] Details echoed from the response.
    * @param {number} [info.code] JSON-RPC error code, if the failure was a JSON-RPC error.
    * @param {string} [info.detail] Service detail, e.g. `view_not_retained`, `busy:pinned_views`, `state_count`.
+   * @param {number[]} [info.indexes] Positions in the request's state id list the service names as offending (state
+   *   status details only).
    * @param {boolean} [info.retryable] Whether a new attempt may succeed.
    * @param {unknown} [info.cause] Underlying error.
    */
@@ -38,6 +40,7 @@ export class BatchProofError extends Error {
       readonly cause?: unknown;
       readonly code?: number;
       readonly detail?: string;
+      readonly indexes?: readonly number[];
       readonly retryable?: boolean;
     } = {},
   ) {
@@ -59,9 +62,38 @@ export class BatchProofError extends Error {
   }
 
   /**
+   * @returns {number[]|undefined} Positions in the request's state id list that the service names as the cause of a
+   *   state status failure, when it sent them.
+   */
+  public get indexes(): number[] | undefined {
+    return this.info.indexes ? this.info.indexes.slice() : undefined;
+  }
+
+  /**
    * @returns {boolean} Whether a new attempt may succeed. Never a promise that the same root will be served again.
    */
   public get retryable(): boolean {
     return this.info.retryable ?? false;
   }
+}
+
+/**
+ * Details of the state status errors of `get_inclusion_proofs.v1` (`proof_unavailable`). Like the single proof status
+ * they are **unauthenticated hints** about what one aggregator knows, never proof of absence.
+ *
+ * - `state_pending`: accepted and not certified yet in the latest view; retryable.
+ * - `state_expired`: the request was dropped before inclusion; not retryable.
+ * - `state_unknown`: this aggregator never saw it (misrouted, lost, restarted, other HA instance); not retryable.
+ * - `state_not_in_root`: the state is not a leaf of the requested exact root; not retryable.
+ */
+export const BATCH_STATE_DETAILS = ['state_expired', 'state_not_in_root', 'state_pending', 'state_unknown'] as const;
+
+export type BatchStateDetail = (typeof BATCH_STATE_DETAILS)[number];
+
+/**
+ * @param {string|undefined} detail Detail of a batch error.
+ * @returns {boolean} True for one of the state status details.
+ */
+export function isBatchStateDetail(detail: string | undefined): detail is BatchStateDetail {
+  return (BATCH_STATE_DETAILS as readonly string[]).includes(detail ?? '');
 }

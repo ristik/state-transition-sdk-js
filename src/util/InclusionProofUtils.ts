@@ -1,6 +1,7 @@
 import { RootTrustBase } from '../api/bft/RootTrustBase.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
+import { InclusionProofExpiredError, InclusionProofUnknownError } from '../api/InclusionProofStatusError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
 import { PredicateVerifierService } from '../predicate/verification/PredicateVerifierService.js';
@@ -147,6 +148,17 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
+ * Options of {@link waitInclusionProof}.
+ */
+export interface IWaitInclusionProofOptions {
+  /**
+   * How long an `unknown` status hint is tolerated, counted from the start of the wait, before the wait fails with
+   * {@link InclusionProofUnknownError}. Defaults to two poll intervals; `0` fails at the first `unknown`.
+   */
+  readonly unknownGraceMs?: number;
+}
+
+/**
  * Poll the aggregator until a valid inclusion proof for the given transaction
  * is available, or the abort signal fires.
  *
@@ -161,8 +173,20 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
  * @param {AbortSignal} signal Abort signal that terminates polling. Defaults to a 10s timeout.
  * @param {number} interval Delay between polls in milliseconds. Defaults to 1000.
+ * @param {IWaitInclusionProofOptions} [options] Handling of the aggregator's status hint.
  * @returns {Promise<InclusionProof>} Verified inclusion proof.
  * @throws {SleepError} If the abort signal fires before a proof is available.
+ * @throws {InclusionProofExpiredError} If the aggregator reports the request as expired (no proof): it was dropped
+ *   before inclusion. Fails fast instead of polling until the deadline.
+ * @throws {InclusionProofUnknownError} If the aggregator keeps reporting the request as unknown (no proof) for longer
+ *   than `unknownGraceMs` since the wait began.
+ *
+ * The wait asks the aggregator for its status hint (`includeStatus`). `pending` keeps waiting. The hint is
+ * **unauthenticated**: it only decides when to stop waiting, it never makes a proof valid or invalid (a proof that is
+ * present is verified exactly as before whatever the status says), and `unknown`/`expired` is not a proof of absence.
+ * A server that does not send a status, or an unrecognized one, behaves as before. `unknown` is rechecked for a grace
+ * period, because the wait normally starts right after submission and an HA instance that has not seen the request yet
+ * answers `unknown`; the signed request can be submitted again after either error (the aggregator deduplicates).
  */
 export async function waitInclusionProof(
   client: StateTransitionClient,
@@ -172,15 +196,29 @@ export async function waitInclusionProof(
   transaction: ITransaction,
   signal: AbortSignal = AbortSignal.timeout(10000),
   interval: number = 1000,
+  options: IWaitInclusionProofOptions = {},
 ): Promise<InclusionProof> {
   const stateId = await StateId.fromTransaction(transaction);
   const transactionHash = await transaction.calculateTransactionHash();
+  const unknownGraceMs = options.unknownGraceMs ?? 2 * interval;
+  const started = Date.now();
 
   const poll = async (requestSignal: AbortSignal): Promise<InclusionProof | null> => {
-    const { inclusionProof } = await client.getInclusionProof(stateId, { signal: requestSignal });
+    const { inclusionProof, status } = await client.getInclusionProof(stateId, {
+      includeStatus: true,
+      signal: requestSignal,
+    });
     // The aggregator has not certified this state yet. The response type is what says so; by the
     // time a proof exists it is complete, so there is nothing else here to poll through.
     if (inclusionProof == null) {
+      // Unauthenticated hints decide only when to stop waiting. No status, `pending`, `included` without a proof, and
+      // a status this SDK does not know keep the legacy behavior: poll on.
+      if (status === 'expired') {
+        throw new InclusionProofExpiredError(stateId);
+      }
+      if (status === 'unknown' && Date.now() - started >= unknownGraceMs) {
+        throw new InclusionProofUnknownError(stateId, Date.now() - started);
+      }
       return null;
     }
 

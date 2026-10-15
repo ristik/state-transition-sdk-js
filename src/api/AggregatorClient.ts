@@ -1,4 +1,4 @@
-import { BatchProofError } from './BatchProofError.js';
+import { BatchProofError, isBatchStateDetail } from './BatchProofError.js';
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
@@ -7,11 +7,12 @@ import { CertificationResponse } from './CertificationResponse.js';
 import { IAggregatorClient } from './IAggregatorClient.js';
 import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
-import { IRequestOptions } from './IRequestOptions.js';
+import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
+import { parseProofStatus } from './ProofStatus.js';
 import { StateId } from './StateId.js';
 import { HexConverter } from '../util/HexConverter.js';
 
@@ -106,6 +107,17 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
   }
 
+  /** Offending request indexes of a state status error: `data.indexes`, or the list under the state class name. */
+  private static offendingIndexes(data: Record<string, unknown>, detail: string): number[] | undefined {
+    const klass = detail.replace(/^state_/, '');
+    const raw = Array.isArray(data.indexes) ? data.indexes : data[klass];
+    if (!Array.isArray(raw) || raw.length > AggregatorClient.BATCH_MAX_STATE_IDS) {
+      return undefined;
+    }
+    const indexes = raw.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
+    return indexes.length === raw.length ? indexes : undefined;
+  }
+
   private static rpcFailure(e: JsonRpcDataError): BatchProofError {
     const data = typeof e.data === 'object' && e.data !== null ? (e.data as Record<string, unknown>) : {};
     const detail = typeof data.detail === 'string' ? data.detail : undefined;
@@ -113,6 +125,15 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     const code = e.code;
     switch (code) {
       case -32008: // proof unavailable
+        if (isBatchStateDetail(detail)) {
+          // by the contract only a pending state is worth another attempt, whatever else the data says
+          return new BatchProofError('unavailable', e.message, {
+            code,
+            detail,
+            indexes: AggregatorClient.offendingIndexes(data, detail),
+            retryable: detail === 'state_pending',
+          });
+        }
         return detail === 'unsupported_configuration'
           ? new BatchProofError('unsupported', e.message, { code, detail })
           : new BatchProofError('unavailable', e.message, { code, detail, retryable });
@@ -137,13 +158,26 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
   /**
    * @inheritDoc
    */
-  public async getInclusionProof(stateId: StateId, options?: IRequestOptions): Promise<InclusionProofResponse> {
-    const data = { stateId: HexConverter.encode(stateId.data) };
-    return InclusionProofResponse.fromCBOR(
-      HexConverter.decode(
-        (await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options)) as string,
-      ),
-    );
+  public async getInclusionProof(
+    stateId: StateId,
+    options?: IInclusionProofRequestOptions,
+  ): Promise<InclusionProofResponse> {
+    const data: { includeStatus?: true; stateId: string } = { stateId: HexConverter.encode(stateId.data) };
+    if (options?.includeStatus === true) {
+      data.includeStatus = true;
+    }
+    const result = await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options);
+
+    // a plain string is the legacy result (and the answer of a server that ignores the flag): no status
+    if (typeof result === 'string') {
+      return InclusionProofResponse.fromCBOR(HexConverter.decode(result));
+    }
+    if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
+      throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
+    }
+    const { proof, status } = result as { proof: string; status?: unknown };
+    // an unrecognized status value is treated like no status at all
+    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatus(parseProofStatus(status));
   }
 
   /**
