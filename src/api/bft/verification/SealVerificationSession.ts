@@ -46,6 +46,7 @@ export class SealVerificationSession implements ISealAuthenticator {
   private readonly authorityId: string;
   private readonly completed = new Map<string, VerificationResult<VerificationStatus>>();
   private readonly counters = { inFlightJoins: 0, memoHits: 0, quorumChecks: 0 };
+  private readonly customRule: boolean;
   private readonly identityText: string;
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
   private readonly source: RootTrustBase;
@@ -82,6 +83,8 @@ export class SealVerificationSession implements ISealAuthenticator {
     // cannot make the verdicts and the keys disagree, and a new operation sees the new state.
     this.source = trustBase;
     this.trustBase = trustBase.snapshot();
+    // a customized rule is not wrapped: it is asked about the caller's own object and its verdicts are never remembered
+    this.customRule = Object.getPrototypeOf(quorumRule) !== UnicitySealQuorumSignaturesVerificationRule.prototype;
     this.authorityId = authorityIdentity(this.trustBase);
     this.identityText = JSON.stringify([options.policy ?? '', this.authorityId]);
   }
@@ -198,6 +201,10 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
   public async verifyQuorum(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
+    if (this.customRule) {
+      this.counters.quorumChecks++;
+      return this.quorumRule.verify(this.source, seal);
+    }
     const key = await this.keyFor(seal);
     const done = this.completed.get(key);
     if (done) {
