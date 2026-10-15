@@ -2,6 +2,7 @@ import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
 import { UnicitySeal } from '../../../../src/api/bft/UnicitySeal.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../../src/api/bft/verification/SealVerificationSession.js';
+import { VerifiedSealCache } from '../../../../src/api/bft/verification/VerifiedSealCache.js';
 import { NetworkId } from '../../../../src/api/NetworkId.js';
 import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { SigningService } from '../../../../src/crypto/secp256k1/SigningService.js';
@@ -34,13 +35,13 @@ function trustBase(
 
 function seal(
   by: SigningService,
-  options: { epoch?: bigint; network?: NetworkId; round?: bigint } = {},
+  options: { epoch?: bigint; network?: NetworkId; round?: bigint; timestamp?: bigint } = {},
 ): Promise<UnicitySeal> {
   return UnicitySeal.create(
     options.network ?? NetworkId.LOCAL,
     options.round ?? 5n,
     options.epoch ?? 0n,
-    1n,
+    options.timestamp ?? 1700000000n,
     null,
     HASH,
     new Map([['NODE', by]]),
@@ -145,6 +146,58 @@ describe('SealVerificationSession', () => {
     expect(small.stats).toMatchObject({ memoHits: 2, quorumChecks: 3 });
     await small.authenticate(seals[0]);
     expect(small.stats.quorumChecks).toEqual(4);
+  });
+
+  it('applies the native seal structure checks before success or memoization', async () => {
+    const before = await seal(node, { timestamp: 1n });
+    expect((await session.authenticate(before)).status).toEqual(VerificationStatus.FAIL);
+    expect((await session.authenticate(await seal(node, { timestamp: 1681971083n }))).status).toEqual(
+      VerificationStatus.FAIL,
+    );
+    expect((await session.authenticate(await seal(node, { timestamp: 1681971084n }))).status).toEqual(
+      VerificationStatus.OK,
+    );
+
+    // a validly signed quorum plus an unsigned-payload-irrelevant entry without signer id
+    const extra = await UnicitySeal.create(
+      NetworkId.LOCAL,
+      5n,
+      0n,
+      1700000000n,
+      null,
+      HASH,
+      new Map([
+        ['NODE', node],
+        ['', node],
+      ]),
+    );
+    expect((await session.authenticate(extra)).status).toEqual(VerificationStatus.FAIL);
+    expect(verifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('binds the memo to the actual signer lookup entries of a mutated trust base', async () => {
+    const tb = trustBase(node.publicKey);
+    const mutable = new SealVerificationSession(tb, rule);
+    const s = await seal(node);
+    expect((await mutable.authenticate(s)).status).toEqual(VerificationStatus.OK);
+
+    // same node value, other lookup key: trust base JSON is unchanged but "NODE" no longer resolves
+    const info = tb._rootNodes.get('NODE');
+    tb._rootNodes.delete('NODE');
+    tb._rootNodes.set('OTHER', info as NonNullable<typeof info>);
+    expect((await mutable.authenticate(s)).status).toEqual(VerificationStatus.FAIL);
+    expect(mutable.stats.memoHits).toEqual(0);
+  });
+
+  it('binds the inner seal cache to the actual signer lookup entries too', async () => {
+    const cached = new UnicitySealQuorumSignaturesVerificationRule(verifier, new VerifiedSealCache(8));
+    const tb = trustBase(node.publicKey);
+    const s = await seal(node);
+    expect((await cached.verify(tb, s)).status).toEqual(VerificationStatus.OK);
+    const info = tb._rootNodes.get('NODE');
+    tb._rootNodes.delete('NODE');
+    tb._rootNodes.set('OTHER', info as NonNullable<typeof info>);
+    expect((await cached.verify(tb, s)).status).toEqual(VerificationStatus.FAIL);
   });
 
   it('rejects an invalid memo size', () => {

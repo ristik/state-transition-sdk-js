@@ -5,6 +5,7 @@ import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
 import { ISealAuthenticator } from './verification/ISealAuthenticator.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
+import { SealVerificationSession } from './verification/SealVerificationSession.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
@@ -89,11 +90,14 @@ export class PartitionViewLeaf {
     }
 
     const ir = this.inputRecord;
-    const hash = ir.hash;
+    const hash = ir.nullableHash ?? new Uint8Array(0);
     const previousHash = ir.previousHash ?? new Uint8Array(0);
     const blockHash = ir.blockHash ?? new Uint8Array(0);
 
     // same rules as the native input record validation
+    if (ir.roundNumber !== 0n && ir.nullableSummaryValue === null) {
+      throw new PartitionViewError('bounds', 'Input record summary value is nil.');
+    }
     if (ir.roundNumber !== 0n && ir.timestamp === 0n) {
       throw new PartitionViewError('bounds', 'Input record timestamp is unassigned.');
     }
@@ -535,6 +539,11 @@ export class PartitionView {
         'enclosing_certificate_mismatch',
         'Enclosing certificate shard configuration hash does not match the view leaf.',
       );
+    }
+
+    const sealFailure = SealVerificationSession.checkSealStructure(enclosingUc.unicitySeal);
+    if (sealFailure !== null) {
+      throw new PartitionViewError('seal_invalid', `Enclosing certificate: ${sealFailure}`);
     }
 
     // the view's own tree through the partition path of the enclosing certificate must be the sealed hash

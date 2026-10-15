@@ -10,3 +10,5 @@ Source of truth: `unicitynetwork/bft-go-base`, branch `uc-consolidation`, merge 
 
 `assembly-*.json` is a cross-implementation check for the tree reconstruction and certificate assembly only. It is NOT the
 F1 fixture corpus (aggregator-go `testdata/uc-consolidation/v1`), which replaces it once frozen.
+
+`assembly-4-initial.json` is the four shard case where leaf 1 is an initial-state native IR (`&InputRecord{Version: 1}`: null hash and null summary value, mixed with active leaves), added after review.

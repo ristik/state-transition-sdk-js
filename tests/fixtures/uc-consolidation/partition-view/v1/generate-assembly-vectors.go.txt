@@ -34,10 +34,14 @@ func Test_ZZ_DumpJSVectors(t *testing.T) {
 		NodeID        string     `json:"nodeId"`
 		SigKey        string     `json:"sigKey"`
 	}
-	for name, bits := range map[string]int{"shards-1": 0, "shards-4": 2, "shards-8": 3} {
+	for name, bits := range map[string]int{"shards-1": 0, "shards-4": 2, "shards-8": 3, "shards-4-initial": 2} {
 		scheme := pvScheme(bits)
 		topo := pvTopology(scheme)
 		view := pvView(t, scheme)
+		if name == "shards-4-initial" {
+			// leaf 1 is a shard in its initial state: native IR with null hash and summary value
+			view.Leaves[1].InputRecord = &InputRecord{Version: 1}
+		}
 		f := pvEnclose(t, view, topo)
 		ucs, err := view.AssembleCertificates(f.uc, pvTestPartition, topo, TrustBaseSealVerifier(f.tb), crypto.SHA256)
 		require.NoError(t, err)

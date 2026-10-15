@@ -45,7 +45,7 @@ interface IAssemblyVector {
   readonly view: string;
 }
 
-function assemblyVector(shards: number): IAssemblyVector {
+function assemblyVector(shards: number | string): IAssemblyVector {
   return JSON.parse(readFileSync(join(DIR, `assembly-${shards}.json`), 'utf8')) as IAssemblyVector;
 }
 
@@ -129,11 +129,11 @@ function irWith(ir: InputRecord, change: Partial<Record<string, bigint | Uint8Ar
     blockHash: ir.blockHash,
     epoch: ir.epoch,
     executedTransactionsHash: ir.executedTransactionsHash,
-    hash: ir.hash,
+    hash: ir.nullableHash,
     previousHash: ir.previousHash,
     roundNumber: ir.roundNumber,
     sumOfEarnedFees: ir.sumOfEarnedFees,
-    summaryValue: ir.summaryValue,
+    summaryValue: ir.nullableSummaryValue,
     timestamp: ir.timestamp,
     ...change,
   };
@@ -464,7 +464,8 @@ describe.each([
   [1, 0],
   [4, 2],
   [8, 3],
-])('assembly of %i shards against Go', (shards, bits) => {
+  ['4-initial', 2],
+])('assembly of %s shards against Go', (shards, bits) => {
   const v = assemblyVector(shards);
   const view = PartitionView.fromCBOR(HexConverter.decode(v.view));
   const topology = topologyOf(v, bits);
@@ -491,6 +492,17 @@ describe.each([
       );
     }
     expect(session.stats.quorumChecks).toEqual(1);
+  });
+
+  it('preserves null versus empty native IR fields', () => {
+    expect(HexConverter.encode(view.toCBOR())).toEqual(v.view);
+    if (shards === '4-initial') {
+      const initial = view.leaves[1].inputRecord;
+      expect(initial.nullableHash).toBeNull();
+      expect(initial.nullableSummaryValue).toBeNull();
+      expect(initial.previousHash).toBeNull();
+      expect(view.leaves[0].inputRecord.nullableSummaryValue).toEqual(new Uint8Array(0));
+    }
   });
 
   it('does not modify the inputs', async () => {
@@ -531,6 +543,45 @@ describe.each([
     await expectReason(
       view.assembleCertificates(enclosing, PARTITION, topology, newSession(trustBaseOf(v, { sigKey: other }))),
       'seal_invalid',
+    );
+  });
+});
+
+describe('PartitionView seal structure', () => {
+  it('rejects the enclosing certificate of a seal that fails native structural validation', async () => {
+    const v = assemblyVector(4);
+    const view = PartitionView.fromCBOR(HexConverter.decode(v.view));
+    const enclosing = PartitionView.decodeEnclosingCertificate(HexConverter.decode(v.enclosingUc));
+    const old = new UnicityCertificate(
+      enclosing.inputRecord,
+      enclosing.technicalRecordHash,
+      enclosing.shardConfigurationHash,
+      enclosing.shardTreeCertificate,
+      enclosing.unicityTreeCertificate,
+      UnicitySeal.fromCBOR(
+        replaceItem(enclosing.unicitySeal.toCBOR(), 4, CborSerializer.encodeUnsignedInteger(1), true),
+      ),
+    );
+    await expectReason(view.verifyTree(old, PARTITION, topologyOf(v, 2)), 'seal_invalid');
+  });
+
+  it('rejects a leaf with a null summary value on a non-initial record', () => {
+    const v = assemblyVector('4-initial');
+    const view = PartitionView.fromCBOR(HexConverter.decode(v.view));
+    expectReasonSync(
+      () =>
+        withLeaf(
+          view,
+          1,
+          (l) =>
+            new PartitionViewLeaf(
+              l.shardId,
+              irWith(l.inputRecord, { roundNumber: 1n, timestamp: 1n }),
+              l.technicalRecordHash,
+              l.shardConfigurationHash,
+            ),
+        ),
+      'bounds',
     );
   });
 });

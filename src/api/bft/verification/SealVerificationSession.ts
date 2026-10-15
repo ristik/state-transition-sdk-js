@@ -1,3 +1,4 @@
+import { authorityIdentity } from './authorityIdentity.js';
 import { ISealAuthenticator } from './ISealAuthenticator.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
@@ -38,6 +39,9 @@ export interface ISealVerificationSessionStats {
  * operations and no verified flag can be supplied from outside.
  */
 export class SealVerificationSession implements ISealAuthenticator {
+  /** Minimum seal timestamp: Thursday, April 20, 2023 6:11:24 AM GMT+00:00. */
+  public static readonly GENESIS_TIME = 1681971084n;
+
   private readonly completed = new Map<string, VerificationResult<VerificationStatus>>();
   private readonly counters = { inFlightJoins: 0, memoHits: 0, quorumChecks: 0 };
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
@@ -77,14 +81,9 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @returns {string|null} Failure description or null if the seal is within the authority.
    */
   public static checkAuthority(trustBase: RootTrustBase, seal: UnicitySeal): string | null {
-    if (!seal.hash.length) {
-      return 'Seal hash is missing.';
-    }
-    if (seal.rootChainRoundNumber < 1n) {
-      return 'Seal root chain round is invalid.';
-    }
-    if (!seal.signatures?.size) {
-      return 'Seal has no signatures.';
+    const structure = SealVerificationSession.checkSealStructure(seal);
+    if (structure !== null) {
+      return structure;
     }
     if (!seal.networkId.equals(trustBase.networkId)) {
       return `Seal is of network ${seal.networkId.id}, trust base is of network ${trustBase.networkId.id}.`;
@@ -94,6 +93,40 @@ export class SealVerificationSession implements ISealAuthenticator {
     }
     if (seal.rootChainRoundNumber < trustBase.epochStartRound) {
       return `Seal round ${seal.rootChainRoundNumber} is before the start of epoch ${trustBase.epoch} (round ${trustBase.epochStartRound}).`;
+    }
+    return null;
+  }
+
+  /**
+   * Native seal structural validation (bft-go-base `UnicitySeal.IsValid`): hash present, root round at least 1,
+   * timestamp not before the genesis time, signatures present with a signer id and bytes each. Independent of any
+   * trust base; signer map entries are outside the signed payload, so this must hold before a success is returned or
+   * remembered.
+   *
+   * @param {UnicitySeal} seal Seal.
+   * @returns {string|null} Failure description or null if the seal is structurally valid.
+   */
+  public static checkSealStructure(seal: UnicitySeal): string | null {
+    if (!seal.hash.length) {
+      return 'Seal hash is missing.';
+    }
+    if (seal.rootChainRoundNumber < 1n) {
+      return 'Seal root chain round is invalid.';
+    }
+    if (seal.timestamp < SealVerificationSession.GENESIS_TIME) {
+      return 'Seal timestamp is invalid.';
+    }
+    const signatures = seal.signatures;
+    if (!signatures?.size) {
+      return 'Seal has no signatures.';
+    }
+    for (const [signer, signature] of signatures) {
+      if (signer === '') {
+        return 'Seal has a signature without signer ID.';
+      }
+      if (signature.bytes.length === 0) {
+        return `Seal has an empty signature for "${signer}".`;
+      }
     }
     return null;
   }
@@ -145,7 +178,7 @@ export class SealVerificationSession implements ISealAuthenticator {
       .update(
         CborSerializer.encodeArray(
           CborSerializer.encodeTextString(this.options.policy ?? ''),
-          CborSerializer.encodeTextString(JSON.stringify(this.trustBase.toJSON())),
+          CborSerializer.encodeTextString(authorityIdentity(this.trustBase)),
           CborSerializer.encodeByteString(seal.toCBOR()),
         ),
       )
