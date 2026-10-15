@@ -1,7 +1,6 @@
 import { ConsolidationError } from './ConsolidationError.js';
 import { ConsolidationResult, IProofSummary } from './ConsolidationResult.js';
 import { IConsolidationItem, IConsolidationOptions, ProofConsolidator } from './ProofConsolidator.js';
-import { SessionQuorumRule } from './SessionQuorumRule.js';
 import { ShardRouting } from './ShardRouting.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
@@ -212,7 +211,9 @@ export class TokenProofClient {
     return new VerificationContext(
       context.trustBase,
       context.predicateVerifier,
-      new UnicityCertificateVerifier(new SessionQuorumRule(signatureVerifier, session, context.trustBase)),
+      new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier)).beginOperation(
+        session,
+      ),
       context.mintJustificationVerifier,
       context.tokenIssuanceVerifier,
     );

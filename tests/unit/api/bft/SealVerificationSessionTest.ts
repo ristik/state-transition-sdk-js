@@ -175,18 +175,27 @@ describe('SealVerificationSession', () => {
     expect(verifySpy).toHaveBeenCalledTimes(1);
   });
 
-  it('binds the memo to the actual signer lookup entries of a mutated trust base', async () => {
+  it('verifies an operation against the authority as it was when the operation began', async () => {
     const tb = trustBase(node.publicKey);
-    const mutable = new SealVerificationSession(tb, rule);
+    const operation = new SealVerificationSession(tb, rule);
+    const identity = operation.identity;
     const s = await seal(node);
-    expect((await mutable.authenticate(s)).status).toEqual(VerificationStatus.OK);
+    expect((await operation.authenticate(s)).status).toEqual(VerificationStatus.OK);
 
-    // same node value, other lookup key: trust base JSON is unchanged but "NODE" no longer resolves
+    // the caller's object changes afterwards: the signer no longer resolves under that key
     const info = tb._rootNodes.get('NODE');
     tb._rootNodes.delete('NODE');
     tb._rootNodes.set('OTHER', info as NonNullable<typeof info>);
-    expect((await mutable.authenticate(s)).status).toEqual(VerificationStatus.FAIL);
-    expect(mutable.stats.memoHits).toEqual(0);
+
+    // verdicts and memo keys of the running operation still agree with each other (the snapshot) ...
+    expect(operation.identity).toEqual(identity);
+    expect((await operation.authenticate(s)).status).toEqual(VerificationStatus.OK);
+    expect(operation.stats).toMatchObject({ memoHits: 1, quorumChecks: 1 });
+
+    // ... and a new operation sees the new authority, with another identity, and never inherits the old verdict
+    const next = new SealVerificationSession(tb, rule);
+    expect(next.identity).not.toEqual(identity);
+    expect((await next.authenticate(s)).status).toEqual(VerificationStatus.FAIL);
   });
 
   it('binds the inner seal cache to the actual signer lookup entries too', async () => {

@@ -19,7 +19,16 @@ export class TokenVerifier implements ITokenVerifier {
   /**
    * @inheritDoc
    */
-  public async verify(token: Token, context: IVerificationContext): Promise<VerificationResult<VerificationStatus>> {
+  public async verify(token: Token, outer: IVerificationContext): Promise<VerificationResult<VerificationStatus>> {
+    // One operation for the token and every nested token: identical certificates and seals are authenticated once.
+    // The context is the caller's with only the certificate verifier replaced by its operation scoped form, an
+    // injected verifier that customizes verification keeps full control.
+    const scoped = outer.unicityCertificateVerifier.beginOperation?.();
+    const context: IVerificationContext = scoped
+      ? (Object.create(outer, {
+          unicityCertificateVerifier: { enumerable: true, value: scoped },
+        }) as IVerificationContext)
+      : outer;
     const pending: Token[] = [token];
     const collectNestedToken = (nested: Token): void => {
       pending.push(nested);

@@ -1,5 +1,6 @@
 import { PartitionView, IPartitionViewPolicy, PartitionViewLeaf } from './PartitionView.js';
 import { PartitionViewError } from './PartitionViewError.js';
+import { partitionViewMetrics } from './PartitionViewMetrics.js';
 import { ShardId } from './ShardId.js';
 import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
@@ -7,6 +8,7 @@ import { UnicitySeal } from './UnicitySeal.js';
 import { ISealAuthenticator } from './verification/ISealAuthenticator.js';
 import { DataHasher } from '../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../crypto/hash/HashAlgorithm.js';
+import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../util/HexConverter.js';
 import { VerificationStatus } from '../../verification/VerificationStatus.js';
@@ -17,11 +19,11 @@ const AUTHENTICATED = Symbol('authenticated');
 
 interface IAuthenticatedParts {
   readonly authority: string;
-  readonly certificates: readonly Uint8Array[];
   readonly enclosing: Uint8Array;
+  readonly leaves: readonly Uint8Array[];
   readonly partitionId: bigint;
   readonly policy: string;
-  readonly view: Uint8Array;
+  readonly tree: ShardTree;
 }
 
 /**
@@ -33,7 +35,10 @@ interface IAuthenticatedParts {
  * start, quorum). There is no flag or map a caller can supply to obtain one, and no reachable factory.
  *
  * Immutable and independent of every object graph it was built from or hands out: it holds only private canonical
- * bytes that were snapshotted before verification, and every accessor decodes fresh copies.
+ * bytes and the private authenticated shard tree, all snapshotted before verification, and every accessor builds fresh
+ * copies. Per-shard work is lazy and indexed: a lookup decodes and derives only that shard's leaf and certificate
+ * (O(1) leaves, O(depth) hashes already held by the tree), not the whole view, and nothing is derived for shards nobody
+ * asks for.
  *
  * The committed scheme and configuration hashes are authenticated by the commitment itself, they are not taken from
  * the response on trust and no independent hash list is required.
@@ -46,9 +51,10 @@ export class AuthenticatedPartitionView {
   /** Identity of the optional pins applied during authentication. */
   public readonly policy: string;
 
-  readonly #certificates: readonly Uint8Array[];
   readonly #enclosing: Uint8Array;
-  readonly #view: Uint8Array;
+  readonly #index: ReadonlyMap<string, number>;
+  readonly #leaves: readonly Uint8Array[];
+  readonly #tree: ShardTree;
 
   /**
    * Not callable outside this module, use {@link PartitionViewAuthenticator.authenticate}.
@@ -63,9 +69,13 @@ export class AuthenticatedPartitionView {
     this.authority = parts.authority;
     this.partitionId = parts.partitionId;
     this.policy = parts.policy;
-    this.#certificates = parts.certificates.map((bytes) => new Uint8Array(bytes));
     this.#enclosing = new Uint8Array(parts.enclosing);
-    this.#view = new Uint8Array(parts.view);
+    this.#leaves = parts.leaves.map((bytes) => new Uint8Array(bytes));
+    this.#tree = parts.tree;
+    // the shard to position index, built once while the view is already authenticated: O(S)
+    this.#index = new Map(
+      this.#leaves.map((bytes, position) => [ShardId.decode(decodeShardBytes(bytes)).toString(), position]),
+    );
     Object.freeze(this);
   }
 
@@ -73,7 +83,7 @@ export class AuthenticatedPartitionView {
    * @returns {PartitionViewLeaf[]} Independent copies of the committed leaves in canonical order.
    */
   public get leaves(): PartitionViewLeaf[] {
-    return PartitionView.fromCBOR(this.#view).leaves;
+    return this.#leaves.map((bytes) => PartitionViewLeaf.fromCBOR(bytes));
   }
 
   /**
@@ -87,7 +97,8 @@ export class AuthenticatedPartitionView {
    * @returns {ShardId[]} Committed sharding scheme, empty for a single shard partition.
    */
   public get scheme(): ShardId[] {
-    return PartitionView.fromCBOR(this.#view).scheme;
+    const ids = this.#leaves.map((bytes) => ShardId.decode(decodeShardBytes(bytes)));
+    return ids.length === 1 && ids[0].length === 0 ? [] : ids;
   }
 
   /**
@@ -100,12 +111,13 @@ export class AuthenticatedPartitionView {
   /**
    * Ordinary version 1 unicity certificates of every shard in canonical order, each carrying the shared partition
    * certificate and the identical complete master seal. Shards in their initial state keep their native null input
-   * record fields. Every call returns independent objects.
+   * record fields. Every call returns independent objects. Derives all S certificates; use
+   * {@link AuthenticatedPartitionView.certificateOf} for the shards that are needed.
    *
    * @returns {UnicityCertificate[]} Certificates.
    */
   public assembleCertificates(): UnicityCertificate[] {
-    return this.#certificates.map((bytes) => UnicityCertificate.fromCBOR(bytes));
+    return this.#leaves.map((_, position) => this.derive(position));
   }
 
   /**
@@ -114,12 +126,32 @@ export class AuthenticatedPartitionView {
    * @throws {Error} If the shard is not committed by the view.
    */
   public certificateOf(shard: ShardId): UnicityCertificate {
-    const index = PartitionView.fromCBOR(this.#view).leaves.findIndex((leaf) => leaf.shardId.equals(shard));
-    if (index < 0) {
+    const position = this.#index.get(shard.toString());
+    if (position === undefined) {
       throw new Error(`Shard "${shard.toString()}" is not in the authenticated view.`);
     }
-    return UnicityCertificate.fromCBOR(this.#certificates[index]);
+    return this.derive(position);
   }
+
+  /** One shard's certificate from its leaf, the authenticated tree and the shared partition path and seal. */
+  private derive(position: number): UnicityCertificate {
+    partitionViewMetrics.certificateDerivations++;
+    const leaf = PartitionViewLeaf.fromCBOR(this.#leaves[position]);
+    const enclosing = UnicityCertificate.fromCBOR(this.#enclosing);
+    return new UnicityCertificate(
+      leaf.inputRecord,
+      leaf.technicalRecordHash,
+      leaf.shardConfigurationHash,
+      this.#tree.certificate(leaf.shardId),
+      enclosing.unicityTreeCertificate,
+      enclosing.unicitySeal,
+    );
+  }
+}
+
+/** The encoded shard id (the first item) of an encoded leaf, without decoding the rest. */
+function decodeShardBytes(leaf: Uint8Array): Uint8Array {
+  return CborDeserializer.decodeByteString(CborDeserializer.decodeArray(leaf, 4)[0]);
 }
 
 /**
@@ -141,20 +173,11 @@ function createAuthenticated(
 ): AuthenticatedPartitionView {
   return new AuthenticatedPartitionView(AUTHENTICATED, {
     authority,
-    certificates: view.leaves.map((leaf) =>
-      new UnicityCertificate(
-        leaf.inputRecord,
-        leaf.technicalRecordHash,
-        leaf.shardConfigurationHash,
-        tree.certificate(leaf.shardId),
-        uc.unicityTreeCertificate,
-        uc.unicitySeal,
-      ).toCBOR(),
-    ),
     enclosing: uc.toCBOR(),
+    leaves: view.leaves.map((leaf) => leaf.toCBOR()),
     partitionId: view.partitionId,
     policy,
-    view: view.toCBOR(),
+    tree,
   });
 }
 

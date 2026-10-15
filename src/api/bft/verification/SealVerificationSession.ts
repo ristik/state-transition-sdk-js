@@ -43,9 +43,13 @@ export class SealVerificationSession implements ISealAuthenticator {
   /** Minimum seal timestamp: Thursday, April 20, 2023 6:11:24 AM GMT+00:00. */
   public static readonly GENESIS_TIME = 1681971084n;
 
+  private readonly authorityId: string;
   private readonly completed = new Map<string, VerificationResult<VerificationStatus>>();
   private readonly counters = { inFlightJoins: 0, memoHits: 0, quorumChecks: 0 };
+  private readonly identityText: string;
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
+  private readonly source: RootTrustBase;
+  private readonly trustBase: RootTrustBase;
 
   /**
    * @param {RootTrustBase} trustBase Trusted authority the seals are authenticated against.
@@ -57,7 +61,7 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @throws {Error} If `maxEntries` is not a positive integer.
    */
   public constructor(
-    private readonly trustBase: RootTrustBase,
+    trustBase: RootTrustBase,
     private readonly quorumRule: UnicitySealQuorumSignaturesVerificationRule,
     private readonly options: {
       readonly maxEntries?: number;
@@ -73,13 +77,27 @@ export class SealVerificationSession implements ISealAuthenticator {
     if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
       throw new Error('SealVerificationSession maxInFlight must be a positive integer');
     }
+    // The operation's authority is snapshotted once: every check of this session verifies against the snapshot and
+    // every memo key commits to its identity, which is computed exactly once. Later changes to the caller's object
+    // cannot make the verdicts and the keys disagree, and a new operation sees the new state.
+    this.source = trustBase;
+    this.trustBase = trustBase.snapshot();
+    this.authorityId = authorityIdentity(this.trustBase);
+    this.identityText = JSON.stringify([options.policy ?? '', this.authorityId]);
   }
 
   /**
    * @returns {string} Identity of the anchored authority and the verifier policy.
    */
   public get identity(): string {
-    return JSON.stringify([this.options.policy ?? '', authorityIdentity(this.trustBase)]);
+    return this.identityText;
+  }
+
+  /**
+   * @returns {RootTrustBase} The trust base object this session was created for (its authority is a snapshot).
+   */
+  public get sourceTrustBase(): RootTrustBase {
+    return this.source;
   }
 
   /**
