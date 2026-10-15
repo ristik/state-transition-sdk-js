@@ -7,11 +7,8 @@ import {
   ProofConsolidator,
   validateConsolidationOptions,
 } from './ProofConsolidator.js';
-import { SessionQuorumRule } from './SessionQuorumRule.js';
 import { ShardRouting } from './ShardRouting.js';
-import { UnicitySealQuorumSignaturesVerificationRule } from '../api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
-import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
@@ -140,19 +137,19 @@ export class TokenProofClient {
     }
   }
 
-  /** Verification context of one operation: the caller's, with the certificate verifier backed by the session. */
-  private operationContext(
-    rule: UnicitySealQuorumSignaturesVerificationRule,
-    session: SealVerificationSession,
-  ): IVerificationContext {
+  /** Verification context of one operation: the caller's, with a stock verifier scoped to the operation and session. */
+  private operationContext(session: SealVerificationSession): IVerificationContext {
     const context = this.options.verificationContext;
-    return new VerificationContext(
-      context.trustBase,
-      context.predicateVerifier,
-      new UnicityCertificateVerifier(new SessionQuorumRule(rule, session, context.trustBase)),
-      context.mintJustificationVerifier,
-      context.tokenIssuanceVerifier,
-    );
+    const scoped = context.unicityCertificateVerifier.beginOperation(session);
+    return scoped === context.unicityCertificateVerifier
+      ? context
+      : new VerificationContext(
+          context.trustBase,
+          context.predicateVerifier,
+          scoped,
+          context.mintJustificationVerifier,
+          context.tokenIssuanceVerifier,
+        );
   }
 
   private async run(
@@ -168,10 +165,8 @@ export class TokenProofClient {
     const verifier = callerContext.unicityCertificateVerifier;
     const rule = verifier.quorumRule;
     const session = new SealVerificationSession(trustBase, rule, { maxEntries: this.options.maxSealCacheEntries });
-    const customized =
-      Object.getPrototypeOf(verifier) !== UnicityCertificateVerifier.prototype ||
-      Object.getPrototypeOf(rule) !== UnicitySealQuorumSignaturesVerificationRule.prototype;
-    const context = customized ? callerContext : this.operationContext(rule, session);
+    // a stock verifier becomes this operation, sharing the strict session; a customized one returns itself
+    const context = this.operationContext(session);
 
     const original = await token.verify(context);
     clock.throwIfDone();

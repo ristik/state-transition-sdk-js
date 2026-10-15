@@ -15,6 +15,7 @@ import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
+import { VerificationResult } from '../../../src/verification/VerificationResult.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
 import { IScenario, scenario, NestedTokenJustification } from '../../utils/ConsolidationScenario.js';
 import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
@@ -646,6 +647,46 @@ describe('TokenProofClient', () => {
       expect(result.status).toEqual('consolidated');
       // every distinct seal was decided by the caller's signature verifier, the master seal included
       expect(calls).toHaveBeenCalledTimes(sealsOf(token).size + 1);
+    });
+
+    it('asks a customized quorum rule about the caller trust base object, for every seal, and never memoizes it', async () => {
+      const received: unknown[] = [];
+      let calls = 0;
+      class Pinned extends UnicitySealQuorumSignaturesVerificationRule {
+        public constructor(
+          private readonly pinned: () => unknown,
+          signatureVerifier: Secp256k1SignatureVerifier,
+        ) {
+          super(signatureVerifier);
+        }
+
+        public override verify(
+          ...args: Parameters<UnicitySealQuorumSignaturesVerificationRule['verify']>
+        ): ReturnType<UnicitySealQuorumSignaturesVerificationRule['verify']> {
+          calls++;
+          received.push(args[0]);
+          // a policy keyed on the identity of the trust base object
+          return args[0] === this.pinned()
+            ? super.verify(...args)
+            : Promise.resolve(new VerificationResult('Pinned', VerificationStatus.FAIL));
+        }
+      }
+      const pin: { trustBase?: unknown } = {};
+      const s = await scenario(
+        1,
+        new UnicityCertificateVerifier(new Pinned(() => pin.trustBase, new Secp256k1SignatureVerifier())),
+      );
+      const trustBase = s.context.trustBase;
+      pin.trustBase = trustBase;
+      const token = await spanning(s, 4, 2);
+      await s.world.idle(1);
+      calls = 0;
+      received.length = 0;
+      const result = await clientOf(s).consolidate(token);
+      expect(result.status).toEqual('consolidated');
+      expect(received.every((t) => t === trustBase)).toBe(true);
+      // not shared or remembered: the rule decides every check itself
+      expect(calls).toBeGreaterThan(sealsOf(token).size);
     });
 
     it('a rejecting injected verifier makes the attempt fail, it is never replaced by a default', async () => {

@@ -1,6 +1,8 @@
 import { InputRecord } from './InputRecord.js';
 import { PartitionViewError } from './PartitionViewError.js';
+import { partitionViewMetrics } from './PartitionViewMetrics.js';
 import { ShardId } from './ShardId.js';
+import { canonicalShardOrder } from './ShardTopology.js';
 import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
@@ -30,7 +32,6 @@ export interface IPartitionViewPolicy {
 }
 
 const HASH_LENGTH = 32;
-const SINGLE_SHARD = ShardId.decode(new Uint8Array([0x80]));
 
 /**
  * Committed content of one shard in a {@link PartitionView}.
@@ -61,6 +62,19 @@ export class PartitionViewLeaf {
    */
   public get technicalRecordHash(): Uint8Array {
     return new Uint8Array(this._technicalRecordHash);
+  }
+
+  /**
+   * Strictly decode one encoded leaf and check its bounds.
+   *
+   * @param {Uint8Array} bytes CBOR `[shardId, inputRecord, trHash, shardConfHash]`.
+   * @returns {PartitionViewLeaf} Decoded leaf.
+   * @throws {PartitionViewError} If the bytes are not a valid leaf.
+   */
+  public static fromCBOR(bytes: Uint8Array): PartitionViewLeaf {
+    const leaf = decodeLeaf(bytes);
+    leaf.validateBounds();
+    return leaf;
   }
 
   /**
@@ -227,48 +241,7 @@ export class PartitionView {
    * @throws {PartitionViewError} If the scheme is not a complete prefix-free set within limits.
    */
   public static canonicalShardOrder(scheme: readonly ShardId[]): ShardId[] {
-    if (scheme.length === 0) {
-      return [SINGLE_SHARD];
-    }
-    if (scheme.length > PartitionView.MAX_LEAVES) {
-      throw new PartitionViewError(
-        'topology',
-        `Scheme has ${scheme.length} shards, limit is ${PartitionView.MAX_LEAVES}.`,
-      );
-    }
-    // a single shard partition is the empty scheme, never a one element scheme
-    if (scheme.length === 1) {
-      throw new PartitionViewError('topology', 'Scheme can not contain a single shard.');
-    }
-
-    const ids = scheme.map((id) => ({ bits: id.toString(), id }));
-    let maxLength = 0;
-    for (const { bits } of ids) {
-      if (bits.length === 0) {
-        throw new PartitionViewError('topology', 'Scheme may not contain the empty shard id.');
-      }
-      if (bits.length > PartitionView.MAX_SHARD_ID_BITS) {
-        throw new PartitionViewError(
-          'topology',
-          `Shard ID ${bits} is longer than ${PartitionView.MAX_SHARD_ID_BITS} bits.`,
-        );
-      }
-      maxLength = Math.max(maxLength, bits.length);
-    }
-    for (const [i, a] of ids.entries()) {
-      for (const [j, b] of ids.entries()) {
-        if (i !== j && b.bits.startsWith(a.bits)) {
-          throw new PartitionViewError('topology', `Scheme is not prefix-free: ${a.bits} is prefix of ${b.bits}.`);
-        }
-      }
-    }
-    // prefix-free scheme covers the whole tree iff the Kraft sum equals one
-    const sum = ids.reduce((acc, { bits }) => acc + (1n << BigInt(maxLength - bits.length)), 0n);
-    if (sum !== 1n << BigInt(maxLength)) {
-      throw new PartitionViewError('topology', 'Scheme does not cover the whole shard tree.');
-    }
-
-    return ids.sort((a, b) => (a.bits < b.bits ? -1 : a.bits > b.bits ? 1 : 0)).map(({ id }) => id);
+    return canonicalShardOrder(scheme, PartitionView.MAX_LEAVES, PartitionView.MAX_SHARD_ID_BITS);
   }
 
   /**
@@ -309,6 +282,7 @@ export class PartitionView {
         `Partition view is ${bytes.length} bytes, limit is ${PartitionView.MAX_BYTES}.`,
       );
     }
+    partitionViewMetrics.viewDecodes++;
 
     let view: PartitionView;
     try {
@@ -329,13 +303,7 @@ export class PartitionView {
       view = new PartitionView(
         partitionId,
         leafItems.map((item) => {
-          const leaf = CborDeserializer.decodeArray(item, 4);
-          return new PartitionViewLeaf(
-            ShardId.decode(CborDeserializer.decodeByteString(leaf[0])),
-            InputRecord.fromCBOR(leaf[1]),
-            CborDeserializer.decodeByteString(leaf[2]),
-            CborDeserializer.decodeByteString(leaf[3]),
-          );
+          return decodeLeaf(item); // the view validates the bounds of its leaves
         }),
       );
     } catch (e) {
@@ -539,5 +507,24 @@ export class PartitionView {
       enclosingUc.unicityTreeCertificate,
       enclosingUc.unicitySeal,
     );
+  }
+}
+
+/** Decode one leaf without checking its bounds. */
+function decodeLeaf(bytes: Uint8Array): PartitionViewLeaf {
+  partitionViewMetrics.leafDecodes++;
+  try {
+    const data = CborDeserializer.decodeArray(bytes, 4);
+    return new PartitionViewLeaf(
+      ShardId.decode(CborDeserializer.decodeByteString(data[0])),
+      InputRecord.fromCBOR(data[1]),
+      CborDeserializer.decodeByteString(data[2]),
+      CborDeserializer.decodeByteString(data[3]),
+    );
+  } catch (e) {
+    if (e instanceof CborError || e instanceof RangeError) {
+      throw new PartitionViewError('malformed', `Decoding partition view leaf: ${e.message}`);
+    }
+    throw e;
   }
 }

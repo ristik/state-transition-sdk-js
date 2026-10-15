@@ -3,6 +3,7 @@ import { VerificationStatus } from '../../../verification/VerificationStatus.js'
 import type { Token } from '../../Token.js';
 import { ITokenVerifier } from '../ITokenVerifier.js';
 import { IVerificationContext } from '../IVerificationContext.js';
+import { beginOperationContext } from '../OperationContext.js';
 import { CertifiedMintTransactionVerificationRule } from '../rule/CertifiedMintTransactionVerificationRule.js';
 import { CertifiedTransferTransactionVerificationRule } from '../rule/CertifiedTransferTransactionVerificationRule.js';
 
@@ -19,7 +20,8 @@ export class TokenVerifier implements ITokenVerifier {
   /**
    * @inheritDoc
    */
-  public async verify(token: Token, context: IVerificationContext): Promise<VerificationResult<VerificationStatus>> {
+  public async verify(token: Token, outer: IVerificationContext): Promise<VerificationResult<VerificationStatus>> {
+    const context = beginOperationContext(outer);
     const pending: Token[] = [token];
     const collectNestedToken = (nested: Token): void => {
       pending.push(nested);

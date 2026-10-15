@@ -59,10 +59,12 @@ export class ShardTree {
       );
     }
 
-    const leafKeys = new Set(nodes.keys());
+    const leafCount = nodes.size;
+    let reached = 0;
     const generate = async (prefix: string): Promise<Uint8Array> => {
       const existing = nodes.get(prefix);
       if (existing) {
+        reached++;
         return existing;
       }
       if (prefix.length >= 256) {
@@ -81,13 +83,9 @@ export class ShardTree {
     };
     await generate('');
 
-    // every leaf must have been reached, otherwise a leaf below another leaf was supplied
-    for (const key of leafKeys) {
-      for (let i = 0; i < key.length; i++) {
-        if (leafKeys.has(key.slice(0, i))) {
-          throw new Error('Shard tree leaves are not prefix-free.');
-        }
-      }
+    // every leaf must have been reached by the descent, otherwise a leaf below another leaf was supplied
+    if (reached !== leafCount) {
+      throw new Error('Shard tree leaves are not prefix-free.');
     }
 
     return new ShardTree(nodes);

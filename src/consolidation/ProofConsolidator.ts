@@ -671,8 +671,10 @@ export class ProofConsolidator {
     // wave 2: exact roots of the other participating shards, bounded parallel
     const peers = groups.filter((g) => g !== master);
     const roots = peers.map((g) => {
-      const leaf = authenticated.leaves.find((l) => l.shardId.equals(g.endpoint.shard));
-      if (!leaf) {
+      let leaf;
+      try {
+        leaf = authenticated.leafOf(g.endpoint.shard); // indexed: decodes this one leaf
+      } catch {
         throw integrity('binding_mismatch', 'A participating shard is not in the master view.', g.endpoint.shard);
       }
       return new DataHash(HashAlgorithm.SHA256, leaf.inputRecord.hash);

@@ -1,6 +1,15 @@
 import { HexConverter } from '../../../util/HexConverter.js';
 import { RootTrustBase } from '../RootTrustBase.js';
 
+let authorityIdentityBuilds = 0;
+
+/**
+ * @returns {number} Number of authority identities built so far (a hardware-independent work counter).
+ */
+export function authorityIdentityBuildCount(): number {
+  return authorityIdentityBuilds;
+}
+
 /**
  * Canonical text identity of everything the quorum verdict depends on: network, epoch, quorum threshold and the
  * actual signer lookup entries (map key, node id, signing key, stake) as {@link RootTrustBase.rootNodes} resolves
@@ -11,6 +20,7 @@ import { RootTrustBase } from '../RootTrustBase.js';
  * @returns {string} Identity text.
  */
 export function authorityIdentity(trustBase: RootTrustBase): string {
+  authorityIdentityBuilds++;
   const nodes = Array.from(trustBase.rootNodes.entries())
     .map(([key, node]) => [key, node.nodeId, HexConverter.encode(node.signingKey), node.stakedAmount.toString()])
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
