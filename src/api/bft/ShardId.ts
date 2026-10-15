@@ -65,6 +65,16 @@ export class ShardId {
   }
 
   /**
+   * Compare with another shard id by value.
+   *
+   * @param {ShardId} other Other shard id.
+   * @returns {boolean} True if both have the same length and bits.
+   */
+  public equals(other: ShardId): boolean {
+    return this.length === other.length && this.toString() === other.toString();
+  }
+
+  /**
    * Return the bit at the given index.
    *
    * @param {number} index Bit index, zero-based.

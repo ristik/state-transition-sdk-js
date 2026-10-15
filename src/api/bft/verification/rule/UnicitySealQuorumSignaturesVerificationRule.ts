@@ -9,6 +9,7 @@ import { VerificationResult } from '../../../../verification/VerificationResult.
 import { VerificationStatus } from '../../../../verification/VerificationStatus.js';
 import { RootTrustBase } from '../../RootTrustBase.js';
 import { UnicitySeal } from '../../UnicitySeal.js';
+import { authorityIdentity } from '../authorityIdentity.js';
 import { VerifiedSealCache } from '../VerifiedSealCache.js';
 
 /**
@@ -59,7 +60,7 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     const hash = await new DataHasher(HashAlgorithm.SHA256)
       .update(
         CborSerializer.encodeArray(
-          CborSerializer.encodeTextString(JSON.stringify(trustBase.toJSON())),
+          CborSerializer.encodeTextString(authorityIdentity(trustBase)),
           CborSerializer.encodeByteString(unicitySeal.toCBOR()),
         ),
       )
