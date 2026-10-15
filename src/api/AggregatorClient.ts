@@ -1,17 +1,25 @@
+import { BatchProofError } from './BatchProofError.js';
 import { CertificationData } from './CertificationData.js';
 import { CertificationRequest } from './CertificationRequest.js';
 import { CertificationResponse } from './CertificationResponse.js';
 import { IAggregatorClient } from './IAggregatorClient.js';
+import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
 import { IRequestOptions } from './IRequestOptions.js';
+import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
+import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
+import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
 import { StateId } from './StateId.js';
 import { HexConverter } from '../util/HexConverter.js';
 
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
  */
-export class AggregatorClient implements IAggregatorClient {
+export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient {
+  /** Most state ids of one `get_inclusion_proofs.v1` call. */
+  public static readonly BATCH_MAX_STATE_IDS = 256;
+
   private readonly transport: JsonRpcHttpTransport;
   readonly #key: string | null;
 
@@ -33,6 +41,95 @@ export class AggregatorClient implements IAggregatorClient {
     this.transport = new JsonRpcHttpTransport(url);
   }
 
+  private static batchFailure(e: unknown, options?: IBatchRequestOptions): unknown {
+    if (e instanceof BatchProofError) {
+      return e;
+    }
+    // caller cancellation and deadline keep their platform identity
+    if (
+      options?.signal?.aborted ||
+      (typeof e === 'object' && e !== null && 'name' in e && (e.name === 'AbortError' || e.name === 'TimeoutError'))
+    ) {
+      return e;
+    }
+    if (e instanceof JsonRpcDataError) {
+      return AggregatorClient.rpcFailure(e);
+    }
+    if (e instanceof JsonRpcResponseError) {
+      return new BatchProofError('invalid_response', e.message, { cause: e });
+    }
+    if (e instanceof JsonRpcNetworkError) {
+      return new BatchProofError('transport', `HTTP ${e.status}`, {
+        cause: e,
+        detail: `http_${e.status}`,
+        retryable: true,
+      });
+    }
+    return new BatchProofError('transport', e instanceof Error ? e.message : String(e), { cause: e, retryable: true });
+  }
+
+  private static decodeBatch(result: unknown, count: number, exact: boolean): InclusionProofBatch {
+    const invalid = (message: string, cause?: unknown): BatchProofError =>
+      new BatchProofError('invalid_response', message, { cause });
+    if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+      throw invalid('Batch result must be an object.');
+    }
+    const body = result as Record<string, unknown>;
+    for (const key of Object.keys(body)) {
+      if (key !== 'proofs' && key !== 'partitionView') {
+        throw invalid(`Unexpected batch result field "${key}".`);
+      }
+    }
+    if (!Array.isArray(body.proofs) || body.proofs.length !== count) {
+      throw invalid(`Expected ${count} proofs.`);
+    }
+    // an exact root request never carries a view: it is only meaningful for the latest seal
+    if (body.partitionView !== undefined && (exact || typeof body.partitionView !== 'string')) {
+      throw invalid('Unexpected partition view.');
+    }
+
+    try {
+      const proofs = body.proofs.map((proof) => {
+        if (typeof proof !== 'string') {
+          throw new Error('Proof must be a hex string.');
+        }
+        return InclusionProofResponse.fromCBOR(HexConverter.decode(proof));
+      });
+      const view = typeof body.partitionView === 'string' ? HexConverter.decode(body.partitionView) : null;
+      return new InclusionProofBatch(proofs, view);
+    } catch (e) {
+      throw invalid(`Malformed batch result: ${e instanceof Error ? e.message : String(e)}`, e);
+    }
+  }
+
+  private static rpcFailure(e: JsonRpcDataError): BatchProofError {
+    const data = typeof e.data === 'object' && e.data !== null ? (e.data as Record<string, unknown>) : {};
+    const detail = typeof data.detail === 'string' ? data.detail : undefined;
+    const retryable = data.retryable === true;
+    const code = e.code;
+    switch (code) {
+      case -32008: // proof unavailable
+        return detail === 'unsupported_configuration'
+          ? new BatchProofError('unsupported', e.message, { code, detail })
+          : new BatchProofError('unavailable', e.message, { code, detail, retryable });
+      case -32006: // concurrency limit: busy, with or without data
+        return new BatchProofError('unavailable', e.message, {
+          code,
+          detail: detail ? `busy:${detail}` : 'busy',
+          retryable: true,
+        });
+      case -32601:
+        return new BatchProofError('unsupported', e.message, { code, detail: 'method_not_found' });
+      case -32602:
+      case -32600:
+        return new BatchProofError('rejected', e.message, { code, detail });
+      case -32007:
+        return new BatchProofError('limit_exceeded', e.message, { code, detail });
+      default: // database, internal and unknown codes are operational failures, not unavailability
+        return new BatchProofError('server', e.message, { code, detail, retryable });
+    }
+  }
+
   /**
    * @inheritDoc
    */
@@ -43,6 +140,44 @@ export class AggregatorClient implements IAggregatorClient {
         (await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options)) as string,
       ),
     );
+  }
+
+  /**
+   * @inheritDoc
+   */
+  public async getInclusionProofs(
+    stateIds: readonly StateId[],
+    options?: IBatchRequestOptions,
+  ): Promise<InclusionProofBatch> {
+    if (stateIds.length < 1 || stateIds.length > AggregatorClient.BATCH_MAX_STATE_IDS) {
+      throw new BatchProofError(
+        'rejected',
+        `Batch must contain 1..${AggregatorClient.BATCH_MAX_STATE_IDS} state ids, got ${stateIds.length}.`,
+        { detail: 'state_count' },
+      );
+    }
+    const ids = stateIds.map((id) => HexConverter.encode(id.data));
+    if (new Set(ids).size !== ids.length) {
+      throw new BatchProofError('rejected', 'Batch state ids must be distinct.', { detail: 'duplicate_state_id' });
+    }
+    const exact = options?.stateRoot !== undefined;
+    if (exact && options.stateRoot?.data.length !== 32) {
+      throw new BatchProofError('rejected', 'stateRoot must be a 32-byte hash.', { detail: 'invalid_state_root' });
+    }
+
+    let result: unknown;
+    try {
+      result = await this.transport.request(
+        'get_inclusion_proofs.v1',
+        { stateIds: ids, stateRoot: exact ? HexConverter.encode(options.stateRoot?.data) : 'latest' },
+        new Headers(),
+        options,
+      );
+    } catch (e) {
+      throw AggregatorClient.batchFailure(e, options);
+    }
+
+    return AggregatorClient.decodeBatch(result, ids.length, exact);
   }
 
   /**

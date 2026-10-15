@@ -219,6 +219,17 @@ describe('SealVerificationSession', () => {
     expect(new Set([a.identity, b.identity, c.identity]).size).toEqual(3);
   });
 
+  it('serves the ordinary quorum path from the same memo as the strict path, without the authority context', async () => {
+    const s = await seal(node);
+    expect((await session.authenticate(s)).status).toEqual(VerificationStatus.OK);
+    expect((await session.verifyQuorum(s)).status).toEqual(VerificationStatus.OK);
+    expect(session.stats).toMatchObject({ memoHits: 1, quorumChecks: 1 });
+    // another epoch is not an authority failure for the ordinary path (original proofs may be older) but is for the strict one
+    const older = await seal(node, { epoch: 7n });
+    expect((await session.verifyQuorum(older)).status).toEqual(VerificationStatus.OK);
+    expect((await session.authenticate(older)).status).toEqual(VerificationStatus.FAIL);
+  });
+
   it('rejects an invalid memo size', () => {
     expect(() => new SealVerificationSession(trustBase(node.publicKey), rule, { maxEntries: 0 })).toThrow();
   });

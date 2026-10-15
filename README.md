@@ -84,6 +84,7 @@ The SDK handles cryptography and token encoding. Your application manages keys, 
 | Mint a token | `MintTransaction.create()`, `Token.mint()` | [Mint](./tests/examples/mint/ExampleTest.ts) |
 | Transfer ownership | `TransferTransaction.create()`, `token.transfer()` | [Transfer](./tests/examples/transfer/ExampleTest.ts) |
 | Split a fungible token | `TokenSplit.split()` | [Split](./tests/examples/split/ExampleTest.ts) |
+| Prepare a token for EVM / zkVM verification (explicit, optional) | `TokenProofClient.consolidate()` | [Consolidation](./tests/examples/consolidation/ExampleTest.ts) |
 | Verify a received token | `token.verify(verificationContext)` | [Receive and verify](./tests/examples/transfer/ExampleTest.ts) |
 
 For minting and transfers, create the transaction, submit its `CertificationData` with `client.submitCertificationRequest()`, and check the response status. Obtain the verified unicity proof with the standalone `waitInclusionProof(client, trustBase, predicateVerifier, unicityCertificateVerifier, transaction)` function from `@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js`, then use `transaction.toCertifiedTransaction()` and `Token.mint()` or `token.transfer()` to produce the updated token. These API methods use the name `InclusionProof` for the proof object.
@@ -111,6 +112,20 @@ if (result.status !== VerificationStatus.OK) {
   throw new Error(`Token verification failed: ${result.status}`);
 }
 ```
+
+### Prepare a token for EVM or zkVM verification
+
+`TokenProofClient.consolidate(token, { timeoutMs, signal })` rebuilds the replaceable outer-history proofs of a token so
+that they share one unicity seal, which lets a verifier that authenticates that seal once reuse the result. It is
+**explicit and never automatic**: no mint, transfer, send, receive, import, export, serialization or verification calls
+it, and there is no `auto` policy. It needs no signing key, submits nothing and never modifies its input. It needs
+`get_inclusion_proofs.v1` on every participating shard (a client without it yields `unavailable`, single-proof calls are
+never emulated) and a trusted `ShardRouting` configured once. The result is `consolidated` with a newly verified token, or
+`unavailable` with a stable reason and retryability hint; cancellation, deadline, transport, server, response and integrity
+failures are thrown as `ConsolidationError` and are never reported as unavailability. Proofs nested in signed mint
+justifications, split/burn dependencies and predicate data stay byte for byte unchanged and may need other seals; tokens do
+not get smaller. The target verifier (contract, zkVM guest) must authenticate the seal itself, a host verdict is not evidence.
+See the [consolidation example](./tests/examples/consolidation/ExampleTest.ts).
 
 ## Security
 
