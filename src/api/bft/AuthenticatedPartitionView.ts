@@ -189,7 +189,7 @@ export class PartitionViewAuthenticator {
     private readonly sealAuthenticator: ISealAuthenticator,
     policy: IPartitionViewPolicy = {},
   ) {
-    const scheme = policy.scheme ? Object.freeze(policy.scheme.slice()) : undefined;
+    const scheme = policy.scheme ? Object.freeze(policy.scheme.map((id) => ShardId.decode(id.encode()))) : undefined;
     // validates the pinned scheme and fixes the identity to its canonical order
     const order = scheme ? PartitionView.canonicalShardOrder(scheme) : undefined;
     const hashes = policy.shardConfigurationHashes
@@ -272,7 +272,7 @@ export class PartitionViewAuthenticator {
       return running;
     }
 
-    const run = this.run(view, uc).then(
+    const run = this.#run(view, uc).then(
       (authenticated) => {
         this.inFlight.delete(key);
         if (this.completed.size >= PartitionViewAuthenticator.MAX_ENTRIES) {
@@ -293,7 +293,7 @@ export class PartitionViewAuthenticator {
     return run;
   }
 
-  private async run(view: PartitionView, uc: UnicityCertificate): Promise<AuthenticatedPartitionView> {
+  async #run(view: PartitionView, uc: UnicityCertificate): Promise<AuthenticatedPartitionView> {
     // 1-3: candidate structure, tree and partition path to the seal hash, exact enclosing leaf
     const tree = await view.verifyTree(uc, this.partition, this.pins);
 

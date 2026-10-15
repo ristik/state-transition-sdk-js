@@ -209,6 +209,17 @@ describe('AuthenticatedPartitionView', () => {
       await expect(authenticator.authenticate(viewBytes, ucBytes)).resolves.toBeDefined();
     });
 
+    it('snapshots the pinned ShardId objects, not only the array', async () => {
+      const scheme = PartitionView.fromCBOR(viewBytes).scheme;
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { scheme });
+      const identity = authenticator.identity;
+      // JavaScript callers can write the public length of a retained id
+      (scheme[0] as unknown as { length: number }).length = 0;
+      (scheme[1] as unknown as { _bits: Uint8Array })._bits.fill(0xff);
+      expect(authenticator.identity).toEqual(identity);
+      await expect(authenticator.authenticate(viewBytes, ucBytes)).resolves.toBeDefined();
+    });
+
     it('is independent of the buffers the inputs came from', async () => {
       const viewBuffer = Buffer.from(viewBytes);
       const ucBuffer = Buffer.from(ucBytes);
@@ -277,6 +288,23 @@ describe('AuthenticatedPartitionView', () => {
       expect((PartitionViewAuthenticator as unknown as Record<string, unknown>).create).toBeUndefined();
     });
 
+    it('exposes no instance worker that skips the snapshot and decode boundary', () => {
+      for (const target of [PartitionViewAuthenticator, AuthenticatedPartitionView]) {
+        const methods = Object.getOwnPropertyNames(target.prototype).filter((n) => n !== 'constructor');
+        expect(methods.sort()).not.toContain('run');
+      }
+      expect(Object.getOwnPropertyNames(PartitionViewAuthenticator.prototype).sort()).toEqual([
+        'authenticate',
+        'constructor',
+        'identity',
+      ]);
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session);
+      expect((authenticator as unknown as Record<string, unknown>).run).toBeUndefined();
+      expect(
+        Object.getOwnPropertyNames(authenticator).filter((n) => typeof (authenticator as never)[n] === 'function'),
+      ).toEqual([]);
+    });
+
     it('cannot be forged through the emitted JavaScript either', async () => {
       const built = join(process.cwd(), 'lib/api/bft/AuthenticatedPartitionView.js');
       if (!existsSync(built)) {
@@ -285,6 +313,8 @@ describe('AuthenticatedPartitionView', () => {
       const lib = (await import(built)) as Record<string, Record<string, unknown>>;
       expect(Object.keys(lib).sort()).toEqual(['AuthenticatedPartitionView', 'PartitionViewAuthenticator']);
       expect(lib.PartitionViewAuthenticator.create).toBeUndefined();
+      const proto = (lib.PartitionViewAuthenticator as unknown as { prototype: object }).prototype;
+      expect(Object.getOwnPropertyNames(proto).sort()).toEqual(['authenticate', 'constructor', 'identity']);
       const Forged = lib.AuthenticatedPartitionView as unknown as new (c: symbol, p: object) => unknown;
       expect(() => new Forged(Symbol('authenticated'), {})).toThrow('can only be created');
     });
