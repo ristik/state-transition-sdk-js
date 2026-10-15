@@ -53,6 +53,27 @@ export class UnicityCertificate {
   }
 
   /**
+   * Calculate the shard tree leaf hash: the hash of the committed input record, technical record hash and shard
+   * configuration hash.
+   *
+   * @param {InputRecord} inputRecord            input record
+   * @param {Uint8Array | null} technicalRecordHash    technical record hash
+   * @param {Uint8Array} shardConfigurationHash shard configuration hash
+   * @return leaf hash
+   */
+  public static calculateShardLeafHash(
+    inputRecord: InputRecord,
+    technicalRecordHash: Uint8Array | null,
+    shardConfigurationHash: Uint8Array,
+  ): Promise<DataHash> {
+    return new DataHasher(HashAlgorithm.SHA256)
+      .update(inputRecord.toCBOR())
+      .update(CborSerializer.encodeNullable(technicalRecordHash, CborSerializer.encodeByteString))
+      .update(CborSerializer.encodeByteString(shardConfigurationHash))
+      .digest();
+  }
+
+  /**
    * Calculate the root hash of the shard tree certificate.
    *
    * @param {InputRecord} inputRecord            input record
@@ -67,11 +88,11 @@ export class UnicityCertificate {
     shardConfigurationHash: Uint8Array,
     shardTreeCertificate: ShardTreeCertificate,
   ): Promise<DataHash> {
-    let rootHash = await new DataHasher(HashAlgorithm.SHA256)
-      .update(inputRecord.toCBOR())
-      .update(CborSerializer.encodeNullable(technicalRecordHash, CborSerializer.encodeByteString))
-      .update(CborSerializer.encodeByteString(shardConfigurationHash))
-      .digest();
+    let rootHash = await UnicityCertificate.calculateShardLeafHash(
+      inputRecord,
+      technicalRecordHash,
+      shardConfigurationHash,
+    );
 
     const shardId = shardTreeCertificate.shard;
     const siblingHashes = shardTreeCertificate.siblingHashList;
