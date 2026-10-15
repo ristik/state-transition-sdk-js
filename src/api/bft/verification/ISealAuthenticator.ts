@@ -8,6 +8,12 @@ import { UnicitySeal } from '../UnicitySeal.js';
  */
 export interface ISealAuthenticator {
   /**
+   * Identity of the trusted authority and verifier policy this authenticator applies (anchored network, epoch, signer
+   * entries, quorum). Part of every cache and session key derived from its verdicts.
+   */
+  readonly identity: string;
+
+  /**
    * @param {UnicitySeal} seal Seal to authenticate.
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome, never a success for a seal that was not
    *   authenticated by the trusted authority.

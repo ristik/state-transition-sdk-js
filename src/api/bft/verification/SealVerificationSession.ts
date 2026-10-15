@@ -51,18 +51,34 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @param {UnicitySealQuorumSignaturesVerificationRule} quorumRule Quorum rule, runs on every distinct miss.
    * @param {object} [options] Options.
    * @param {number} [options.maxEntries] Upper bound on retained successful checks, the oldest is evicted first.
+   * @param {number} [options.maxInFlight] Upper bound on distinct checks running at once, further ones throw.
    * @param {string} [options.policy] Identifier of the verifier policy, part of the memo key.
    * @throws {Error} If `maxEntries` is not a positive integer.
    */
   public constructor(
     private readonly trustBase: RootTrustBase,
     private readonly quorumRule: UnicitySealQuorumSignaturesVerificationRule,
-    private readonly options: { readonly maxEntries?: number; readonly policy?: string } = {},
+    private readonly options: {
+      readonly maxEntries?: number;
+      readonly maxInFlight?: number;
+      readonly policy?: string;
+    } = {},
   ) {
     const maxEntries = options.maxEntries ?? 64;
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
       throw new Error('SealVerificationSession maxEntries must be a positive integer');
     }
+    const maxInFlight = options.maxInFlight ?? 64;
+    if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
+      throw new Error('SealVerificationSession maxInFlight must be a positive integer');
+    }
+  }
+
+  /**
+   * @returns {string} Identity of the anchored authority and the verifier policy.
+   */
+  public get identity(): string {
+    return JSON.stringify([this.options.policy ?? '', authorityIdentity(this.trustBase)]);
   }
 
   /**
@@ -155,6 +171,10 @@ export class SealVerificationSession implements ISealAuthenticator {
       return running;
     }
 
+    if (this.inFlight.size >= (this.options.maxInFlight ?? 64)) {
+      throw new Error('Too many concurrent seal verifications in the session.');
+    }
+
     this.counters.quorumChecks++;
     const check = this.quorumRule.verify(this.trustBase, seal).then(
       (result) => {
@@ -177,8 +197,7 @@ export class SealVerificationSession implements ISealAuthenticator {
     const hash = await new DataHasher(HashAlgorithm.SHA256)
       .update(
         CborSerializer.encodeArray(
-          CborSerializer.encodeTextString(this.options.policy ?? ''),
-          CborSerializer.encodeTextString(authorityIdentity(this.trustBase)),
+          CborSerializer.encodeTextString(this.identity),
           CborSerializer.encodeByteString(seal.toCBOR()),
         ),
       )

@@ -200,6 +200,25 @@ describe('SealVerificationSession', () => {
     expect((await cached.verify(tb, s)).status).toEqual(VerificationStatus.FAIL);
   });
 
+  it('bounds distinct concurrent checks', async () => {
+    const capped = new SealVerificationSession(trustBase(node.publicKey), rule, { maxInFlight: 2 });
+    const seals = await Promise.all([1n, 2n, 3n].map((round) => seal(node, { round })));
+    const results = await Promise.allSettled(seals.map((s) => capped.authenticate(s)));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
+    // same seal joins the running check instead of counting against the bound
+    const twice = await Promise.all([capped.authenticate(seals[0]), capped.authenticate(seals[0])]);
+    expect(twice.every((r) => r.status === VerificationStatus.OK)).toBe(true);
+    expect(() => new SealVerificationSession(trustBase(node.publicKey), rule, { maxInFlight: 0 })).toThrow();
+  });
+
+  it('exposes an identity covering authority and policy', () => {
+    const a = new SealVerificationSession(trustBase(node.publicKey), rule, { policy: 'a' });
+    const b = new SealVerificationSession(trustBase(node.publicKey), rule, { policy: 'b' });
+    const c = new SealVerificationSession(trustBase(signer(2).publicKey), rule, { policy: 'a' });
+    expect(new Set([a.identity, b.identity, c.identity]).size).toEqual(3);
+  });
+
   it('rejects an invalid memo size', () => {
     expect(() => new SealVerificationSession(trustBase(node.publicKey), rule, { maxEntries: 0 })).toThrow();
   });

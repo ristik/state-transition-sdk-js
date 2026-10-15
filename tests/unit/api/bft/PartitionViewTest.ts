@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { PartitionViewAuthenticator } from '../../../../src/api/bft/AuthenticatedPartitionView.js';
 import { InputRecord } from '../../../../src/api/bft/InputRecord.js';
-import { PartitionView, PartitionViewLeaf } from '../../../../src/api/bft/PartitionView.js';
+import { IPartitionViewPolicy, PartitionView, PartitionViewLeaf } from '../../../../src/api/bft/PartitionView.js';
 import { PartitionViewError } from '../../../../src/api/bft/PartitionViewError.js';
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../../../src/api/bft/ShardId.js';
@@ -95,6 +96,17 @@ function topologyOf(
       Object.entries(v.shardConfigurationHashes).map(([shard, hash]) => [shard, HexConverter.decode(hash)]),
     ),
   };
+}
+
+async function assembleVia(
+  view: PartitionView,
+  uc: UnicityCertificate,
+  authority: SealVerificationSession,
+  policy: IPartitionViewPolicy = {},
+): Promise<UnicityCertificate[]> {
+  return (
+    await new PartitionViewAuthenticator(PARTITION, authority, policy).authenticate(view, uc)
+  ).assembleCertificates();
 }
 
 function newSession(trustBase: RootTrustBase): SealVerificationSession {
@@ -404,59 +416,45 @@ describe('canonical shard order', () => {
   });
 });
 
-describe('PartitionView against the trusted topology', () => {
+describe('PartitionView candidate structure', () => {
   const view = PartitionView.fromCBOR(file('shards-4.cbor'));
   const v = assemblyVector(4);
+  const pins = topologyOf(v, 2);
 
-  it('validates exact membership and order', () => {
-    expect(() => view.validateStructure(PARTITION, topologyOf(v, 2))).not.toThrow();
+  it('validates a complete canonical candidate without any external topology', () => {
+    expect(() => view.validateStructure(PARTITION)).not.toThrow();
+    expect(view.scheme.map(String)).toEqual(['00', '01', '10', '11']);
+    expect(() => view.validateStructure(PARTITION, pins)).not.toThrow();
+    const single = PartitionView.fromCBOR(file('shards-1.cbor'));
+    expect(single.scheme).toEqual([]);
+    expect(() => single.validateStructure(PARTITION)).not.toThrow();
   });
 
   it('rejects a wrong partition', () => {
-    expectReasonSync(() => view.validateStructure(PARTITION + 1n, topologyOf(v, 2)), 'topology');
+    expectReasonSync(() => view.validateStructure(PARTITION + 1n), 'topology');
   });
 
-  it('rejects missing, extra, reordered and wrong shards', () => {
-    const topo = topologyOf(v, 2);
-    expectReasonSync(() => view.validateStructure(PARTITION, { ...topo, scheme: scheme(3) }), 'topology');
-    expectReasonSync(
-      () => view.validateStructure(PARTITION, { ...topo, scheme: [shardIdOf('0'), shardIdOf('10'), shardIdOf('11')] }),
-      'topology',
-    );
+  it('rejects incomplete, overlapping, duplicate and reordered candidates', () => {
     const leaves = view.leaves;
-    expectReasonSync(
-      () =>
-        new PartitionView(view.partitionId, [leaves[1], leaves[0], leaves[2], leaves[3]]).validateStructure(
-          PARTITION,
-          topo,
-        ),
-      'topology',
-    );
-    expectReasonSync(
-      () => new PartitionView(view.partitionId, leaves.slice(0, 3)).validateStructure(PARTITION, topo),
-      'topology',
-    );
-    expectReasonSync(
-      () =>
-        new PartitionView(view.partitionId, [leaves[0], leaves[0], leaves[2], leaves[3]]).validateStructure(
-          PARTITION,
-          topo,
-        ),
-      'topology',
-    );
-    expectReasonSync(() => view.validateStructure(PARTITION, { ...topo, scheme: [] }), 'topology');
+    const bad =
+      (l: PartitionViewLeaf[]): (() => void) =>
+      (): void =>
+        new PartitionView(view.partitionId, l).validateStructure(PARTITION);
+    expectReasonSync(bad([leaves[1], leaves[0], leaves[2], leaves[3]]), 'topology');
+    expectReasonSync(bad(leaves.slice(0, 3)), 'topology');
+    expectReasonSync(bad([leaves[0], leaves[0], leaves[2], leaves[3]]), 'topology');
+    expectReasonSync(bad([leaves[0]]), 'topology');
+    expectReasonSync(bad([leaves[0], leaves[1]]), 'topology');
   });
 
-  it('binds present configuration hashes to the admitted ones', () => {
-    const topo = topologyOf(v, 2);
-    const bad = new Map(topo.shardConfigurationHashes);
+  it('applies pinned scheme and configuration hashes as an optional stricter policy', () => {
+    expectReasonSync(() => view.validateStructure(PARTITION, { ...pins, scheme: scheme(3) }), 'topology');
+    expectReasonSync(() => view.validateStructure(PARTITION, { ...pins, scheme: [] }), 'topology');
+    const bad = new Map(pins.shardConfigurationHashes);
     bad.set('01', new Uint8Array(32).fill(7));
-    expectReasonSync(
-      () => view.validateStructure(PARTITION, { ...topo, shardConfigurationHashes: bad }),
-      'config_not_admitted',
-    );
-    // an absent entry is not an error for structure validation
-    expect(() => view.validateStructure(PARTITION, { ...topo, shardConfigurationHashes: new Map() })).not.toThrow();
+    expectReasonSync(() => view.validateStructure(PARTITION, { shardConfigurationHashes: bad }), 'config_not_admitted');
+    // absent pins do not constrain
+    expect(() => view.validateStructure(PARTITION, { shardConfigurationHashes: new Map() })).not.toThrow();
   });
 });
 
@@ -478,7 +476,7 @@ describe.each([
 
   it('derives byte-identical ordinary unicity certificates and verifies each one fully', async () => {
     const session = newSession(trustBaseOf(v));
-    const ucs = await view.assembleCertificates(enclosing, PARTITION, topology, session);
+    const ucs = await assembleVia(view, enclosing, session);
     expect(ucs.map((uc) => HexConverter.encode(uc.toCBOR()))).toEqual(v.shards.map((s) => s.uc));
     expect(ucs.map((uc) => uc.shardTreeCertificate.shard.toString())).toEqual(v.shards.map((s) => s.shard));
 
@@ -507,43 +505,45 @@ describe.each([
 
   it('does not modify the inputs', async () => {
     const before = HexConverter.encode(view.toCBOR());
-    await view.assembleCertificates(enclosing, PARTITION, topology, newSession(trustBaseOf(v)));
+    await assembleVia(view, enclosing, newSession(trustBaseOf(v)));
     expect(HexConverter.encode(view.toCBOR())).toEqual(before);
   });
 
-  it('requires the admitted configuration hash of every shard', async () => {
+  it('needs no pinned topology: the committed scheme and hashes come from the authenticated seal', async () => {
+    const authenticated = await new PartitionViewAuthenticator(PARTITION, newSession(trustBaseOf(v))).authenticate(
+      view,
+      enclosing,
+    );
+    expect(authenticated.scheme.map(String)).toEqual(scheme(bits).map(String));
+    expect(authenticated.leaves).toHaveLength(1 << bits);
+    expect(authenticated.partitionId).toEqual(PARTITION);
+    expect(authenticated.networkId.id).toEqual(v.networkId);
+    expect(HexConverter.encode(authenticated.seal.toCBOR())).toEqual(
+      HexConverter.encode(enclosing.unicitySeal.toCBOR()),
+    );
+  });
+
+  it('applies matching pins and rejects mismatching ones', async () => {
+    await expect(assembleVia(view, enclosing, newSession(trustBaseOf(v)), topology)).resolves.toHaveLength(1 << bits);
+    const wrong = new Map(topology.shardConfigurationHashes);
+    wrong.set(view.leaves[0].shardId.toString(), new Uint8Array(32).fill(1));
     await expectReason(
-      view.assembleCertificates(
-        enclosing,
-        PARTITION,
-        { ...topology, shardConfigurationHashes: new Map() },
-        newSession(trustBaseOf(v)),
-      ),
+      assembleVia(view, enclosing, newSession(trustBaseOf(v)), { shardConfigurationHashes: wrong }),
       'config_not_admitted',
     );
-    // structure and tree checks alone do not need them
-    await expect(
-      view.verifyTree(enclosing, PARTITION, { ...topology, shardConfigurationHashes: new Map() }),
-    ).resolves.toBeDefined();
   });
 
   it('refuses seals of another network or epoch even though the same keys sign', async () => {
+    await expectReason(assembleVia(view, enclosing, newSession(trustBaseOf(v, { networkId: 2 }))), 'seal_invalid');
     await expectReason(
-      view.assembleCertificates(enclosing, PARTITION, topology, newSession(trustBaseOf(v, { networkId: 2 }))),
-      'seal_invalid',
-    );
-    await expectReason(
-      view.assembleCertificates(enclosing, PARTITION, topology, newSession(trustBaseOf(v, { epoch: v.epoch + 1 }))),
+      assembleVia(view, enclosing, newSession(trustBaseOf(v, { epoch: v.epoch + 1 }))),
       'seal_invalid',
     );
   });
 
   it('refuses an unknown authority', async () => {
     const other = '02' + '11'.repeat(32);
-    await expectReason(
-      view.assembleCertificates(enclosing, PARTITION, topology, newSession(trustBaseOf(v, { sigKey: other }))),
-      'seal_invalid',
-    );
+    await expectReason(assembleVia(view, enclosing, newSession(trustBaseOf(v, { sigKey: other }))), 'seal_invalid');
   });
 });
 
@@ -562,7 +562,7 @@ describe('PartitionView seal structure', () => {
         replaceItem(enclosing.unicitySeal.toCBOR(), 4, CborSerializer.encodeUnsignedInteger(1), true),
       ),
     );
-    await expectReason(view.verifyTree(old, PARTITION, topologyOf(v, 2)), 'seal_invalid');
+    await expectReason(view.verifyTree(old, PARTITION), 'seal_invalid');
   });
 
   it('rejects a leaf with a null summary value on a non-initial record', () => {
@@ -589,11 +589,10 @@ describe('PartitionView seal structure', () => {
 describe('PartitionView adversarial assembly', () => {
   const v = assemblyVector(4);
   const view = PartitionView.fromCBOR(HexConverter.decode(v.view));
-  const topology = topologyOf(v, 2);
   const enclosingBytes = HexConverter.decode(v.enclosingUc);
   const enclosing = PartitionView.decodeEnclosingCertificate(enclosingBytes);
   const assemble = (pv: PartitionView, uc: UnicityCertificate): Promise<UnicityCertificate[]> =>
-    pv.assembleCertificates(uc, PARTITION, topology, newSession(trustBaseOf(v)));
+    assembleVia(pv, uc, newSession(trustBaseOf(v)));
 
   it('is accepted unchanged', async () => {
     await expect(assemble(view, enclosing)).resolves.toHaveLength(4);
@@ -638,7 +637,7 @@ describe('PartitionView adversarial assembly', () => {
         void name;
       }
     }
-    // configuration hash is bound to the trusted topology first
+    // a changed configuration hash changes the committed tree
     await expectReason(
       assemble(
         withLeaf(
@@ -648,7 +647,7 @@ describe('PartitionView adversarial assembly', () => {
         ),
         enclosing,
       ),
-      'config_not_admitted',
+      'enclosing_certificate_mismatch',
     );
   });
 

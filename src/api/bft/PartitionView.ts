@@ -3,7 +3,6 @@ import { PartitionViewError } from './PartitionViewError.js';
 import { ShardId } from './ShardId.js';
 import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
-import { ISealAuthenticator } from './verification/ISealAuthenticator.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './verification/SealVerificationSession.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
@@ -13,20 +12,21 @@ import { areUint8ArraysEqual } from '../../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../../verification/VerificationStatus.js';
 
 /**
- * Trusted description of the partition a view is validated against. It must come from the verifier's own
- * configuration, never from the response carrying the view.
+ * Optional stricter policy a candidate view is additionally checked against. The view is authenticated by its
+ * commitment under the enclosing seal; pins from the verifier's own configuration (never from the response carrying the
+ * view) only narrow what is accepted. Pins are part of the identity of the authenticator that applies them.
  */
-export interface IPartitionViewTopology {
+export interface IPartitionViewPolicy {
   /**
-   * Sharding scheme of the partition: empty for a single shard partition, otherwise at least two shards forming a
-   * complete prefix-free set.
+   * Required sharding scheme: empty for a single shard partition, otherwise at least two shards forming a complete
+   * prefix-free set.
    */
-  readonly scheme: readonly ShardId[];
+  readonly scheme?: readonly ShardId[];
   /**
-   * Admitted shard configuration hashes by shard id bit string ({@link ShardId.toString}). Present entries must match
-   * the view, certificate assembly requires an entry for every shard.
+   * Pinned shard configuration hashes by shard id bit string ({@link ShardId.toString}). Present entries must match
+   * the view, shards without an entry are not constrained.
    */
-  readonly shardConfigurationHashes: ReadonlyMap<string, Uint8Array>;
+  readonly shardConfigurationHashes?: ReadonlyMap<string, Uint8Array>;
 }
 
 const HASH_LENGTH = 32;
@@ -202,6 +202,16 @@ export class PartitionView {
   }
 
   /**
+   * @returns {ShardId[]} Sharding scheme the candidate's leaves describe: empty for a single shard partition.
+   *   Candidate data, not authenticated by itself.
+   */
+  public get scheme(): ShardId[] {
+    return this._leaves.length === 1 && this._leaves[0].shardId.length === 0
+      ? []
+      : this._leaves.map((leaf) => leaf.shardId);
+  }
+
+  /**
    * @returns {bigint} Wire-format version of the view.
    */
   public get version(): bigint {
@@ -346,56 +356,15 @@ export class PartitionView {
   }
 
   /**
-   * Derive the ordinary version 1 unicity certificate of every shard in the view, in canonical order.
-   *
-   * Requires every step of {@link PartitionView.verifyTree}, the topology to carry the admitted configuration hash of
-   * every shard and the seal of the enclosing certificate to be authenticated by `sealAuthenticator` (signatures,
-   * network and epoch against the verifier's own trusted authority). Tree root equality alone is not authentication.
-   * Derived certificates share the partition certificate and the identical, complete master seal.
-   *
-   * @param {UnicityCertificate} enclosingUc Certificate carrying the seal the view is committed under.
-   * @param {bigint} partition Expected partition id.
-   * @param {IPartitionViewTopology} topology Trusted topology.
-   * @param {ISealAuthenticator} sealAuthenticator Authenticates the master seal against the trusted authority.
-   * @returns {Promise<UnicityCertificate[]>} Certificates of all shards.
-   * @throws {PartitionViewError} If any check fails.
-   */
-  public async assembleCertificates(
-    enclosingUc: UnicityCertificate,
-    partition: bigint,
-    topology: IPartitionViewTopology,
-    sealAuthenticator: ISealAuthenticator,
-  ): Promise<UnicityCertificate[]> {
-    for (const id of PartitionView.canonicalShardOrder(topology.scheme)) {
-      const admitted = topology.shardConfigurationHashes.get(id.toString());
-      if (!admitted || admitted.length !== HASH_LENGTH) {
-        throw new PartitionViewError(
-          'config_not_admitted',
-          `Shard "${id.toString()}": admitted configuration hash is required.`,
-        );
-      }
-    }
-
-    const tree = await this.verifyTree(enclosingUc, partition, topology);
-
-    const result = await sealAuthenticator.authenticate(enclosingUc.unicitySeal);
-    if (result.status !== VerificationStatus.OK) {
-      throw new PartitionViewError('seal_invalid', `Authenticating unicity seal: ${result.message || 'failed'}.`);
-    }
-
-    return this._leaves.map((leaf) => this.deriveCertificate(leaf, tree, enclosingUc));
-  }
-
-  /**
    * Validate the structure and rebuild the native shard tree from the leaves.
    *
    * @param {bigint} partition Expected partition id.
-   * @param {IPartitionViewTopology} topology Trusted topology.
-   * @returns {Promise<ShardTree>} Shard tree.
-   * @throws {PartitionViewError} If the view does not match the topology.
+   * @param {IPartitionViewPolicy} [policy] Optional pins.
+   * @returns {Promise<ShardTree>} Shard tree, built from untrusted candidate data.
+   * @throws {PartitionViewError} If the view is not well formed or does not match the pins.
    */
-  public buildShardTree(partition: bigint, topology: IPartitionViewTopology): Promise<ShardTree> {
-    this.validateStructure(partition, topology);
+  public buildShardTree(partition: bigint, policy: IPartitionViewPolicy = {}): Promise<ShardTree> {
+    this.validateStructure(partition, policy);
     return ShardTree.create(
       this._leaves.map((leaf) => ({
         inputRecord: leaf.inputRecord,
@@ -427,41 +396,42 @@ export class PartitionView {
   }
 
   /**
-   * Check that the view is a well formed view of the given partition and exactly the shards of the topology in
-   * canonical order. Does not touch any hash tree.
+   * Check that the view is a well formed candidate for the given partition: its leaves are distinct valid shard ids
+   * forming a complete prefix-free scheme in canonical left-to-right order. The scheme is taken from the candidate
+   * itself (it is authenticated later by the seal commitment); pins in `policy` only narrow it. Does not touch any
+   * hash tree.
    *
    * @param {bigint} partition Expected partition id.
-   * @param {IPartitionViewTopology} topology Trusted topology.
+   * @param {IPartitionViewPolicy} [policy] Optional pins.
    * @returns {void}
    * @throws {PartitionViewError} If the view does not match.
    */
-  public validateStructure(partition: bigint, topology: IPartitionViewTopology): void {
+  public validateStructure(partition: bigint, policy: IPartitionViewPolicy = {}): void {
     if (this.partitionId !== partition) {
       throw new PartitionViewError(
         'topology',
         `Partition view is for partition ${this.partitionId}, expected ${partition}.`,
       );
     }
-    const order = PartitionView.canonicalShardOrder(topology.scheme);
-    if (this._leaves.length !== order.length) {
-      throw new PartitionViewError(
-        'topology',
-        `View has ${this._leaves.length} leaves, topology has ${order.length} shards.`,
-      );
+    const order = PartitionView.canonicalShardOrder(this.scheme);
+    if (policy.scheme) {
+      const pinned = PartitionView.canonicalShardOrder(policy.scheme);
+      if (pinned.length !== order.length || pinned.some((id, i) => !id.equals(order[i]))) {
+        throw new PartitionViewError('topology', 'Partition view scheme does not match the pinned scheme.');
+      }
     }
-    order.forEach((id, i) => {
-      const leaf = this._leaves[i];
-      if (!leaf.shardId.equals(id)) {
+    this._leaves.forEach((leaf, i) => {
+      if (!leaf.shardId.equals(order[i])) {
         throw new PartitionViewError(
           'topology',
-          `Leaf ${i} is shard "${leaf.shardId.toString()}", expected "${id.toString()}".`,
+          `Leaf ${i} is shard "${leaf.shardId.toString()}", expected "${order[i].toString()}".`,
         );
       }
-      const admitted = topology.shardConfigurationHashes.get(id.toString());
-      if (admitted && !areUint8ArraysEqual(admitted, leaf.shardConfigurationHash)) {
+      const pinned = policy.shardConfigurationHashes?.get(leaf.shardId.toString());
+      if (pinned && !areUint8ArraysEqual(pinned, leaf.shardConfigurationHash)) {
         throw new PartitionViewError(
           'config_not_admitted',
-          `Shard "${id.toString()}": configuration hash does not match the admitted configuration.`,
+          `Shard "${leaf.shardId.toString()}": configuration hash does not match the pinned configuration.`,
         );
       }
     });
@@ -476,16 +446,16 @@ export class PartitionView {
    *
    * @param {UnicityCertificate} enclosingUc Certificate carrying the seal the view is committed under.
    * @param {bigint} partition Expected partition id.
-   * @param {IPartitionViewTopology} topology Trusted topology.
+   * @param {IPartitionViewPolicy} [policy] Optional pins.
    * @returns {Promise<ShardTree>} The rebuilt shard tree.
    * @throws {PartitionViewError} If the view is not committed by the certificate.
    */
   public async verifyTree(
     enclosingUc: UnicityCertificate,
     partition: bigint,
-    topology: IPartitionViewTopology,
+    policy: IPartitionViewPolicy = {},
   ): Promise<ShardTree> {
-    const tree = await this.buildShardTree(partition, topology);
+    const tree = await this.buildShardTree(partition, policy);
 
     const utc = enclosingUc.unicityTreeCertificate;
     if (utc.partitionIdentifier !== this.partitionId) {
