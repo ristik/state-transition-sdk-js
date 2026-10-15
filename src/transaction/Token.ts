@@ -4,6 +4,8 @@ import { ITransaction } from './ITransaction.js';
 import { TokenId } from './TokenId.js';
 import { TokenType } from './TokenType.js';
 import { IVerificationContext } from './verification/IVerificationContext.js';
+import { UnicityCertificate } from '../api/bft/UnicityCertificate.js';
+import { UnicityCertificateInterner } from '../api/bft/UnicityCertificateInterner.js';
 import { NetworkId } from '../api/NetworkId.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../serialization/cbor/CborError.js';
@@ -79,10 +81,15 @@ export class Token {
    * Create Token from CBOR bytes.
    *
    * @param {Uint8Array} bytes CBOR bytes.
+   * @param {UnicityCertificateInterner} [interner] Decoding operation: identical wire certificates of the token's proofs
+   *   are parsed once (a fresh one per call by default).
    * @returns {Promise<Token>} Decoded token.
    * @throws {CborError} On wrong tag or unsupported version.
    */
-  public static async fromCBOR(bytes: Uint8Array): Promise<Token> {
+  public static async fromCBOR(
+    bytes: Uint8Array,
+    interner: UnicityCertificateInterner = new UnicityCertificateInterner((b) => UnicityCertificate.fromCBOR(b)),
+  ): Promise<Token> {
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== Token.CBOR_TAG) {
       throw new CborError(`Invalid CBOR tag for Token: ${tag.tag}`);
@@ -95,7 +102,7 @@ export class Token {
     }
 
     const transactionsBytes = CborDeserializer.decodeArray(data[2]);
-    const genesis = await CertifiedMintTransaction.fromCBOR(data[1]);
+    const genesis = await CertifiedMintTransaction.fromCBOR(data[1], interner);
     const transactions: CertifiedTransferTransaction[] = [];
     // Each transfer spends the state the previous one produced. Deriving that here, rather than
     // handing the decoder a half-built token to read it back off, is what makes the chain
@@ -106,6 +113,7 @@ export class Token {
         transaction,
         await previous.calculateStateHash(),
         previous.recipient,
+        interner,
       );
       transactions.push(decoded);
       previous = decoded;

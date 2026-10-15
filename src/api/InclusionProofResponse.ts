@@ -1,4 +1,5 @@
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
+import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
 import { InclusionCertificate } from './InclusionCertificate.js';
 import { InclusionProof } from './InclusionProof.js';
@@ -39,9 +40,10 @@ export class InclusionProofResponse {
    * Create response from CBOR bytes.
    *
    * @param {Uint8Array} bytes CBOR bytes.
+   * @param {UnicityCertificateInterner} [interner] Optional decoding operation sharing identical wire certificates.
    * @returns {InclusionProofResponse} Inclusion proof response.
    */
-  public static fromCBOR(bytes: Uint8Array): InclusionProofResponse {
+  public static fromCBOR(bytes: Uint8Array, interner?: UnicityCertificateInterner): InclusionProofResponse {
     const data = CborDeserializer.decodeArray(bytes, 2);
     const blockNumber = CborDeserializer.decodeUnsignedInteger(data[0]);
 
@@ -60,7 +62,7 @@ export class InclusionProofResponse {
     const inclusionCertificate = CborDeserializer.decodeNullable(proof[3], (certificate) =>
       InclusionCertificate.decode(CborDeserializer.decodeByteString(certificate)),
     );
-    const unicityCertificate = UnicityCertificate.fromCBOR(proof[4]);
+    const unicityCertificate = UnicityCertificate.fromCBOR(proof[4], interner);
 
     // The three leaf fields travel together: all present once the request has been included in a
     // certified round, all absent while it is still pending. Anything in between is a protocol

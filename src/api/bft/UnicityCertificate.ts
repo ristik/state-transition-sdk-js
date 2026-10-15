@@ -1,5 +1,7 @@
 import { InputRecord } from './InputRecord.js';
 import { ShardTreeCertificate } from './ShardTreeCertificate.js';
+import { UnicityCertificateInterner } from './UnicityCertificateInterner.js';
+import { unicityCertificateMetrics } from './UnicityCertificateMetrics.js';
 import { UnicitySeal } from './UnicitySeal.js';
 import { UnicityTreeCertificate } from './UnicityTreeCertificate.js';
 import { DataHash } from '../../crypto/hash/DataHash.js';
@@ -118,9 +120,14 @@ export class UnicityCertificate {
    * Create unicity certificate from CBOR bytes.
    *
    * @param bytes CBOR bytes
+   * @param interner Optional decoding operation: a certificate with the same complete bytes is parsed once.
    * @return unicity certificate
    */
-  public static fromCBOR(bytes: Uint8Array): UnicityCertificate {
+  public static fromCBOR(bytes: Uint8Array, interner?: UnicityCertificateInterner): UnicityCertificate {
+    if (interner) {
+      return interner.decode(bytes);
+    }
+    unicityCertificateMetrics.decodes++;
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== UnicityCertificate.CBOR_TAG) {
       throw new CborError(`Invalid CBOR tag for UnicityCertificate: ${tag.tag}`);

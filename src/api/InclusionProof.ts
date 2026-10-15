@@ -1,4 +1,5 @@
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
+import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
 import { InclusionCertificate } from './InclusionCertificate.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
@@ -47,10 +48,11 @@ export class InclusionProof {
    * that carries it, and it decodes that case itself.
    *
    * @param bytes The CBOR-encoded bytes.
+   * @param interner Optional decoding operation sharing identical wire certificates.
    * @returns An InclusionProof instance.
    * @throws {CborError} On a wrong tag, an unsupported version, or bytes describing no leaf.
    */
-  public static fromCBOR(bytes: Uint8Array): InclusionProof {
+  public static fromCBOR(bytes: Uint8Array, interner?: UnicityCertificateInterner): InclusionProof {
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== InclusionProof.CBOR_TAG) {
       throw new CborError(`Invalid CBOR tag for InclusionProof: ${tag.tag}`);
@@ -75,7 +77,7 @@ export class InclusionProof {
       certificationData,
       referenceTime,
       inclusionCertificate,
-      UnicityCertificate.fromCBOR(data[4]),
+      UnicityCertificate.fromCBOR(data[4], interner),
     );
   }
 
