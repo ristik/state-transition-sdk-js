@@ -133,6 +133,21 @@ export class AuthenticatedPartitionView {
     return this.derive(position);
   }
 
+  /**
+   * Independent copy of one committed leaf, found through the private index: decodes only that leaf.
+   *
+   * @param {ShardId} shard Shard of the partition.
+   * @returns {PartitionViewLeaf} Leaf of the shard.
+   * @throws {Error} If the shard is not committed by the view.
+   */
+  public leafOf(shard: ShardId): PartitionViewLeaf {
+    const position = this.#index.get(shard.toString());
+    if (position === undefined) {
+      throw new Error(`Shard "${shard.toString()}" is not in the authenticated view.`);
+    }
+    return PartitionViewLeaf.fromCBOR(this.#leaves[position]);
+  }
+
   /** One shard's certificate from its leaf, the authenticated tree and the shared partition path and seal. */
   private derive(position: number): UnicityCertificate {
     partitionViewMetrics.certificateDerivations++;

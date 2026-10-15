@@ -255,3 +255,21 @@ describe('token verification work', () => {
     expect(operation.beginOperation()).toBe(operation);
   });
 });
+
+describe('customized verification is never scoped', () => {
+  it('leaves a custom quorum rule in full control, with the caller trust base and no memo', async () => {
+    class PinnedRule extends UnicitySealQuorumSignaturesVerificationRule {}
+    const verifier = new UnicityCertificateVerifier(new PinnedRule(new Secp256k1SignatureVerifier()));
+    expect(verifier.beginOperation()).toBe(verifier);
+
+    // such a verifier verifies every proof by itself: L+1 quorum calls over a single seal history
+    const s = await scenario(0);
+    const signatureVerifier = new Secp256k1SignatureVerifier();
+    const calls = jest.spyOn(signatureVerifier, 'verify');
+    const custom = new UnicityCertificateVerifier(new PinnedRule(signatureVerifier));
+    const token = await consolidated(s, await s.history(3));
+    expect((await token.verify(withVerifier(s.context, custom))).status).toEqual(VerificationStatus.OK);
+    expect(calls).toHaveBeenCalledTimes(4);
+    calls.mockRestore();
+  });
+});

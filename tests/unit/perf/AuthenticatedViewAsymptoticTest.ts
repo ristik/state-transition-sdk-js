@@ -72,6 +72,22 @@ describe.each([0, 1, 2, 3])('authenticated view of %i shard bits', (bits) => {
     }
   });
 
+  it('finds a leaf through the index: one decode per lookup, and a copy', async () => {
+    const { view } = await authenticated(bits);
+    const ids = schemeOf(bits);
+    for (const lookups of [1, 4, 16]) {
+      const start = snapshotPartitionViewMetrics();
+      for (let i = 0; i < lookups; i++) {
+        const leaf = view.leafOf(shardIdFromBits(ids[i % ids.length]));
+        expect(leaf.shardId.toString()).toEqual(ids[i % ids.length]);
+      }
+      const end = snapshotPartitionViewMetrics();
+      expect(end.leafDecodes - start.leafDecodes).toEqual(lookups);
+      expect(end.viewDecodes - start.viewDecodes).toEqual(0);
+    }
+    expect(() => view.leafOf(shardIdFromBits('1'.repeat(40)))).toThrow('not in the authenticated view');
+  });
+
   it('keeps the immutable boundary: every lookup is an independent copy', async () => {
     const { view } = await authenticated(bits);
     const id = shardIdFromBits(schemeOf(bits)[0]);

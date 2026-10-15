@@ -72,14 +72,20 @@ export class UnicityCertificateVerifier {
    * commit to the complete certificate or seal bytes and the operation's authority snapshot, only successes are kept,
    * and the state is bounded and discarded with the returned object.
    *
-   * A subclass that customizes verification returns itself: injected verifiers keep full control of their rules.
+   * A subclass that customizes verification, or a verifier built with a customized quorum rule, returns itself: injected
+   * verifiers and rules keep full control.
    *
    * @param {SealVerificationSession} [session] Session to adopt for its trust base, so that a caller that already
    *   authenticated a seal strictly in the same operation does not pay the quorum check twice.
    * @returns {UnicityCertificateVerifier} Operation scoped verifier.
    */
   public beginOperation(session?: SealVerificationSession): UnicityCertificateVerifier {
-    if (Object.getPrototypeOf(this) !== UnicityCertificateVerifier.prototype) {
+    // neither a customized verifier nor a customized quorum rule is wrapped: the operation memoizes and hands the rule a
+    // snapshot of the trust base, which only a rule that is pure in (authority content, seal bytes) can rely on
+    if (
+      Object.getPrototypeOf(this) !== UnicityCertificateVerifier.prototype ||
+      Object.getPrototypeOf(this.quorumSignaturesRule) !== UnicitySealQuorumSignaturesVerificationRule.prototype
+    ) {
       return this;
     }
     return new OperationUnicityCertificateVerifier(this.quorumSignaturesRule, session);
