@@ -7,6 +7,7 @@ import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../util/HexConverter.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
+import { NetworkId } from '../../NetworkId.js';
 import { RootTrustBase } from '../RootTrustBase.js';
 import { UnicitySeal } from '../UnicitySeal.js';
 
@@ -89,6 +90,13 @@ export class SealVerificationSession implements ISealAuthenticator {
   }
 
   /**
+   * @returns {NetworkId} Network of the trusted authority.
+   */
+  public get trustBaseNetwork(): NetworkId {
+    return this.trustBase.networkId;
+  }
+
+  /**
    * Check the seal belongs to the authority the trust base represents: structure, network, epoch and epoch start.
    * Quorum signatures are NOT checked.
    *
@@ -153,12 +161,25 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @param {UnicitySeal} seal Seal.
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
-  public async authenticate(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
+  public authenticate(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
     const failure = SealVerificationSession.checkAuthority(this.trustBase, seal);
     if (failure !== null) {
-      return new VerificationResult('SealAuthority', VerificationStatus.FAIL, failure);
+      return Promise.resolve(new VerificationResult('SealAuthority', VerificationStatus.FAIL, failure));
     }
 
+    return this.verifyQuorum(seal);
+  }
+
+  /**
+   * Quorum signatures of the seal against the session's trust base, memoized and in-flight deduplicated exactly like
+   * {@link SealVerificationSession.authenticate}, but WITHOUT the authority context checks (structure, epoch, epoch
+   * start). This is what the ordinary token verification does for the seals of original proofs, which may belong to
+   * earlier epochs; it shares the memo with the strict path, so one distinct complete seal is checked once.
+   *
+   * @param {UnicitySeal} seal Seal.
+   * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
+   */
+  public async verifyQuorum(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
     const key = await this.keyFor(seal);
     const done = this.completed.get(key);
     if (done) {

@@ -57,6 +57,14 @@ export class UnicityCertificateVerifier {
   public constructor(private readonly quorumSignaturesRule: UnicitySealQuorumSignaturesVerificationRule) {}
 
   /**
+   * @returns {UnicitySealQuorumSignaturesVerificationRule} The quorum rule this verifier applies, with its signature
+   *   verifier and cache: whoever shares seal work with this verifier must do it through this rule.
+   */
+  public get quorumRule(): UnicitySealQuorumSignaturesVerificationRule {
+    return this.quorumSignaturesRule;
+  }
+
+  /**
    * Verify the unicity certificate in an inclusion proof against the trust base.
    *
    * @param {RootTrustBase} trustBase Root trust base.
