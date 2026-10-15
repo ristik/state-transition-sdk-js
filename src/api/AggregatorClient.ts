@@ -3,7 +3,7 @@ import { UnicityCertificate } from './bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
 import { CertificationRequest } from './CertificationRequest.js';
-import { CertificationResponse } from './CertificationResponse.js';
+import { CertificationResponse, CertificationStatus } from './CertificationResponse.js';
 import { IAggregatorClient } from './IAggregatorClient.js';
 import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
@@ -107,15 +107,37 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
   }
 
-  /** Offending request indexes of a state status error: `data.indexes`, or the list under the state class name. */
-  private static offendingIndexes(data: Record<string, unknown>, detail: string): number[] | undefined {
-    const klass = detail.replace(/^state_/, '');
-    const raw = Array.isArray(data.indexes) ? data.indexes : data[klass];
-    if (!Array.isArray(raw) || raw.length > AggregatorClient.BATCH_MAX_STATE_IDS) {
+  private static isDuplicateSubmission(e: unknown): boolean {
+    if (!(e instanceof JsonRpcDataError) || e.code !== -32603) {
+      return false;
+    }
+    const text = `${e.message} ${typeof e.data === 'string' ? e.data : ''}`;
+    return /E11000|duplicate key/i.test(text);
+  }
+
+  /**
+   * The offending request indexes of a state status error: `data.indexes` is an object with one list per class
+   * (`{"pending":[0],"expired":[2],"unknown":[3]}`, `{"not_in_root":[...]}` for an exact root). Malformed lists are
+   * ignored, never trusted for control flow.
+   */
+  private static offendingIndexes(data: Record<string, unknown>): Record<string, number[]> | undefined {
+    const raw = data.indexes;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       return undefined;
     }
-    const indexes = raw.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
-    return indexes.length === raw.length ? indexes : undefined;
+    const classes: Record<string, number[]> = {};
+    let total = 0;
+    for (const [klass, list] of Object.entries(raw)) {
+      if (!Array.isArray(list)) {
+        continue;
+      }
+      const valid = list.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
+      total += list.length;
+      if (valid.length === list.length && total <= AggregatorClient.BATCH_MAX_STATE_IDS) {
+        classes[klass] = valid;
+      }
+    }
+    return Object.keys(classes).length > 0 ? classes : undefined;
   }
 
   private static rpcFailure(e: JsonRpcDataError): BatchProofError {
@@ -130,7 +152,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
           return new BatchProofError('unavailable', e.message, {
             code,
             detail,
-            indexes: AggregatorClient.offendingIndexes(data, detail),
+            ...AggregatorClient.stateIndexes(data, detail),
             retryable: detail === 'state_pending',
           });
         }
@@ -153,6 +175,15 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       default: // database, internal and unknown codes are operational failures, not unavailability
         return new BatchProofError('server', e.message, { code, detail, retryable });
     }
+  }
+
+  private static stateIndexes(
+    data: Record<string, unknown>,
+    detail: string,
+  ): { indexes?: number[]; indexesByClass?: Record<string, number[]> } {
+    const indexesByClass = AggregatorClient.offendingIndexes(data);
+    const own = indexesByClass?.[detail.replace(/^state_/, '')];
+    return { ...(indexesByClass ? { indexesByClass } : {}), ...(own ? { indexes: own } : {}) };
   }
 
   /**
@@ -253,12 +284,24 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       headers.set('X-API-Key', this.#key);
     }
 
-    const response = await this.transport.request(
-      'certification_request',
-      HexConverter.encode(request.toCBOR()),
-      headers,
-      options,
-    );
+    let response: unknown;
+    try {
+      response = await this.transport.request(
+        'certification_request',
+        HexConverter.encode(request.toCBOR()),
+        headers,
+        options,
+      );
+    } catch (e) {
+      // Resubmitting a request that is still pending (e.g. after an `unknown` status hint from another HA instance):
+      // the Mongo backed queue rejects the copy by its unique state id index and the server reports it as an internal
+      // error naming the duplicate key, while a Redis backed one accepts and drops it. Either way the earlier copy is
+      // held, so this is "already submitted", not a failure.
+      if (AggregatorClient.isDuplicateSubmission(e)) {
+        return CertificationResponse.create(CertificationStatus.ALREADY_SUBMITTED);
+      }
+      throw e;
+    }
 
     return CertificationResponse.fromJSON(response);
   }

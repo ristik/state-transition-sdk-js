@@ -30,6 +30,7 @@ export class BatchProofError extends Error {
    * @param {string} [info.detail] Service detail, e.g. `view_not_retained`, `busy:pinned_views`, `state_count`.
    * @param {number[]} [info.indexes] Positions in the request's state id list the service names as offending (state
    *   status details only).
+   * @param {object} [info.indexesByClass] Offending positions by class, as the service sent them.
    * @param {boolean} [info.retryable] Whether a new attempt may succeed.
    * @param {unknown} [info.cause] Underlying error.
    */
@@ -41,6 +42,7 @@ export class BatchProofError extends Error {
       readonly code?: number;
       readonly detail?: string;
       readonly indexes?: readonly number[];
+      readonly indexesByClass?: Readonly<Record<string, readonly number[]>>;
       readonly retryable?: boolean;
     } = {},
   ) {
@@ -67,6 +69,16 @@ export class BatchProofError extends Error {
    */
   public get indexes(): number[] | undefined {
     return this.info.indexes ? this.info.indexes.slice() : undefined;
+  }
+
+  /**
+   * @returns {Record<string, number[]>|undefined} The offending request positions of every class the service reported
+   *   (`pending`, `expired`, `unknown`, or `not_in_root`). A mixed outcome is reported under its most severe class
+   *   (`unknown` over `expired` over `pending`) in {@link BatchProofError.detail}, the others are still listed here.
+   */
+  public get indexesByClass(): Record<string, number[]> | undefined {
+    const classes = this.info.indexesByClass;
+    return classes ? Object.fromEntries(Object.entries(classes).map(([k, v]) => [k, v.slice()])) : undefined;
   }
 
   /**

@@ -122,7 +122,11 @@ Without the option the request and the result are exactly as before. `waitInclus
 waiting at the poll interval, `expired` fails at once with `InclusionProofExpiredError`, and `unknown` fails with
 `InclusionProofUnknownError` once it has persisted for a grace period (default two intervals, `unknownGraceMs` in the last
 argument), because a wait that starts right after submission can hit an HA instance that has not seen the request yet. After
-either error the same signed request may be submitted again. Consolidation reports the batch details `state_pending`
+either error the same signed request may be submitted again. Resubmitting a request that is still pending is harmless: the
+aggregator never creates a second leaf. Its Mongo backed queue rejects the copy with a duplicate key error (a Redis backed one
+accepts and drops it); `submitCertificationRequest` recognizes that internal error and returns the SDK-classified status
+`ALREADY_SUBMITTED` instead of throwing, and `response.isAccepted` is true for `SUCCESS` and `ALREADY_SUBMITTED` (wait for the
+proof in both cases). Other errors, including other internal errors, still throw. Consolidation reports the batch details `state_pending`
 (retryable), `state_expired`, `state_unknown` and `state_not_in_root` (not retryable) as the `unavailable` reasons of the same
 names, with `proofIndexes` naming the outer proofs concerned when the service sent request indexes.
 

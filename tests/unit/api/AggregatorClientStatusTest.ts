@@ -1,5 +1,7 @@
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { BatchProofError } from '../../../src/api/BatchProofError.js';
+import { CertificationData } from '../../../src/api/CertificationData.js';
+import { CertificationResponse, CertificationStatus } from '../../../src/api/CertificationResponse.js';
 import { JsonRpcResponseError } from '../../../src/api/json-rpc/JsonRpcResponseError.js';
 import { ProofStatus, parseProofStatus } from '../../../src/api/ProofStatus.js';
 import { StateId } from '../../../src/api/StateId.js';
@@ -149,13 +151,38 @@ describe('get_inclusion_proofs.v1 state details', () => {
     expect(error.code).toEqual(-32008);
   });
 
-  it('reads the offending indexes, from `indexes` or from the list named after the class, and ignores junk', async () => {
-    expect((await fail({ detail: 'state_expired', indexes: [0, 3] })).indexes).toEqual([0, 3]);
-    expect((await fail({ detail: 'state_unknown', unknown: [2] })).indexes).toEqual([2]);
-    expect((await fail({ detail: 'state_pending', indexes: [-1] })).indexes).toBeUndefined();
-    expect((await fail({ detail: 'state_pending', indexes: ['a'] })).indexes).toBeUndefined();
-    expect((await fail({ detail: 'state_pending', indexes: new Array<number>(300).fill(1) })).indexes).toBeUndefined();
-    expect((await fail({ detail: 'state_pending' })).indexes).toBeUndefined();
+  it('reads the offending indexes per class, as the server sends them, and ignores junk', async () => {
+    const mixed = await fail({
+      detail: 'state_unknown',
+      indexes: { expired: [2], pending: [0], unknown: [3] },
+      reason: 'proof_unavailable',
+      retryable: false,
+    });
+    expect(mixed.indexes).toEqual([3]);
+    expect(mixed.indexesByClass).toEqual({ expired: [2], pending: [0], unknown: [3] });
+    expect((await fail({ detail: 'state_not_in_root', indexes: { not_in_root: [1, 4] } })).indexes).toEqual([1, 4]);
+    expect((await fail({ detail: 'state_pending', indexes: { pending: [0, 3] } })).indexesByClass).toEqual({
+      pending: [0, 3],
+    });
+    // the per-class view is a copy
+    const copy = mixed.indexesByClass;
+    (copy as Record<string, number[]>).unknown.push(9);
+    expect(mixed.indexesByClass?.unknown).toEqual([3]);
+
+    for (const junk of [
+      { indexes: [0, 1] },
+      { indexes: { pending: [-1] } },
+      { indexes: { pending: ['a'] } },
+      { indexes: { pending: 3 } },
+      { indexes: { pending: new Array<number>(300).fill(1) } },
+      { indexes: 'x' },
+      {},
+    ]) {
+      const error = await fail({ detail: 'state_pending', ...junk });
+      expect(error.indexes).toBeUndefined();
+      expect(error.indexesByClass).toBeUndefined();
+      expect(error.retryable).toBe(true);
+    }
   });
 
   it('keeps the earlier details as they were', async () => {
@@ -262,5 +289,64 @@ describe('consolidation of the state details', () => {
     const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token);
     expect(result.status).toEqual('unavailable');
     expect((await token.verify(s.context)).status).toEqual('OK');
+  });
+});
+
+describe('resubmitting a request the aggregator already holds', () => {
+  const client = new AggregatorClient('https://example.com');
+  afterEach(() => jest.restoreAllMocks());
+
+  const rpcError = (code: number, message: string, data: unknown): jest.SpyInstance =>
+    jest.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const id = (JSON.parse(init?.body as string) as { id: string }).id;
+      return Promise.resolve(new Response(JSON.stringify({ error: { code, data, message }, id, jsonrpc: '2.0' })));
+    });
+
+  async function certificationData(): Promise<CertificationData> {
+    const s = await scenario(0);
+    const token = await s.history(0);
+    return token.genesis.inclusionProof.certificationData;
+  }
+
+  it('a duplicate key error of the queue is "already submitted", not a failure', async () => {
+    const data = await certificationData();
+    rpcError(
+      -32603,
+      'Failed to submit certification request',
+      'failed to store certificationRequest: failed to store commitment: write exception: write errors: [E11000 duplicate key error collection: aggregator.certification_requests index: stateId_1 dup key: { stateId: "ab" }]',
+    );
+    const response = await client.submitCertificationRequest(data);
+    expect(response.status).toEqual(CertificationStatus.ALREADY_SUBMITTED);
+    expect(response.isAlreadySubmitted).toBe(true);
+    expect(response.isAccepted).toBe(true);
+  });
+
+  it('only that error is: other internal errors, other codes and other messages still fail', async () => {
+    const data = await certificationData();
+    for (const [code, message, details] of [
+      [-32603, 'Failed to submit certification request', 'failed to store certificationRequest: connection refused'],
+      [-32603, 'Failed to submit certification request', undefined],
+      [-32004, 'Database error', 'E11000 duplicate key error'],
+      [-32602, 'Invalid params', 'duplicate key'],
+    ] as const) {
+      jest.restoreAllMocks();
+      rpcError(code, message, details);
+      await expect(client.submitCertificationRequest(data)).rejects.toMatchObject({ code });
+    }
+  });
+
+  it('an accepted submission keeps its status, and a response is accepted only for those two statuses', async () => {
+    const data = await certificationData();
+    jest.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const id = (JSON.parse(init?.body as string) as { id: string }).id;
+      return Promise.resolve(new Response(JSON.stringify({ id, jsonrpc: '2.0', result: { status: 'SUCCESS' } })));
+    });
+    const ok = await client.submitCertificationRequest(data);
+    expect(ok.status).toEqual('SUCCESS');
+    expect(ok.isAccepted).toBe(true);
+    expect(ok.isAlreadySubmitted).toBe(false);
+    for (const status of ['STATE_ID_EXISTS', 'REQUEST_EXPIRED', 'whatever']) {
+      expect(CertificationResponse.create(status).isAccepted).toBe(false);
+    }
   });
 });

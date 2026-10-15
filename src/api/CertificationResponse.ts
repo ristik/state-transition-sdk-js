@@ -26,6 +26,13 @@ export enum CertificationStatus {
   REQUEST_EXPIRED = 'REQUEST_EXPIRED',
   /** The service has not obtained a consensus reference time yet. */
   SERVICE_NOT_READY = 'SERVICE_NOT_READY',
+  /**
+   * Classified by this SDK, never sent by a server: the aggregator rejected the copy of a request it already holds
+   * (its queue answers a duplicate key error, `AggregatorClient.submitCertificationRequest` recognizes it). The
+   * earlier submission is still pending or already certified, so the right continuation is to wait for the proof, as
+   * after `SUCCESS`; see {@link CertificationResponse.isAccepted}.
+   */
+  ALREADY_SUBMITTED = 'ALREADY_SUBMITTED',
 }
 
 /**
@@ -47,6 +54,22 @@ export class CertificationResponse {
   /** The aggregator's status string. Known values are enumerated in {@link CertificationStatus};
    * compare against those members. Unknown strings are preserved as-is. */
   public constructor(public readonly status: string) {}
+
+  /**
+   * @returns {boolean} True for `SUCCESS` and for `ALREADY_SUBMITTED` (the same signed request is already held by the
+   *   aggregator, e.g. resubmitted after an `unknown` status while it was still pending): in both cases the next step is
+   *   waiting for the inclusion proof, nothing failed.
+   */
+  public get isAccepted(): boolean {
+    return this.status === String(CertificationStatus.SUCCESS) || this.isAlreadySubmitted;
+  }
+
+  /**
+   * @returns {boolean} True if the aggregator already held this request (see {@link CertificationStatus.ALREADY_SUBMITTED}).
+   */
+  public get isAlreadySubmitted(): boolean {
+    return this.status === String(CertificationStatus.ALREADY_SUBMITTED);
+  }
 
   /**
    * Create a new certification response.
