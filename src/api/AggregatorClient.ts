@@ -97,7 +97,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         if (typeof proof !== 'string') {
           throw new Error('Proof must be a hex string.');
         }
-        return InclusionProofResponse.fromCBOR(HexConverter.decode(proof), interner);
+        return InclusionProofResponse.decodeWith(HexConverter.decode(proof), interner);
       });
       const view = typeof body.partitionView === 'string' ? HexConverter.decode(body.partitionView) : null;
       return new InclusionProofBatch(proofs, view);

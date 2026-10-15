@@ -81,23 +81,40 @@ export class CertifiedTransferTransaction implements ITransaction {
   }
 
   /**
-   * Create CertifiedTransferTransaction from CBOR bytes.
+   * Create CertifiedTransferTransaction from CBOR bytes within a decoding operation sharing identical wire
+   * certificates.
    *
    * @param {Uint8Array} bytes CBOR bytes.
    * @param {DataHash} sourceStateHash Hash of the state the transfer spends.
    * @param {EncodedPredicate} lockScript Lock script the transfer unlocks.
-   * @param {UnicityCertificateInterner} [interner] Optional decoding operation sharing identical wire certificates.
+   * @param {UnicityCertificateInterner} [interner] Decoding operation, or none to parse every certificate.
    * @returns {CertifiedTransferTransaction} Decoded certified transaction.
    */
-  public static fromCBOR(
+  public static decodeWith(
     bytes: Uint8Array,
     sourceStateHash: DataHash,
     lockScript: EncodedPredicate,
     interner?: UnicityCertificateInterner,
   ): CertifiedTransferTransaction {
     const data = CborDeserializer.decodeArray(bytes, 2);
-    const proof = InclusionProof.fromCBOR(data[1], interner);
+    const proof = InclusionProof.decodeWith(data[1], interner);
     return new CertifiedTransferTransaction(TransferTransaction.fromCBOR(data[0], sourceStateHash, lockScript), proof);
+  }
+
+  /**
+   * Create CertifiedTransferTransaction from CBOR bytes.
+   *
+   * @param {Uint8Array} bytes CBOR bytes.
+   * @param {DataHash} sourceStateHash Hash of the state the transfer spends.
+   * @param {EncodedPredicate} lockScript Lock script the transfer unlocks.
+   * @returns {CertifiedTransferTransaction} Decoded certified transaction.
+   */
+  public static fromCBOR(
+    bytes: Uint8Array,
+    sourceStateHash: DataHash,
+    lockScript: EncodedPredicate,
+  ): CertifiedTransferTransaction {
+    return CertifiedTransferTransaction.decodeWith(bytes, sourceStateHash, lockScript);
   }
 
   /**

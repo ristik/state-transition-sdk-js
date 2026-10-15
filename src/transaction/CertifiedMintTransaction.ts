@@ -122,19 +122,29 @@ export class CertifiedMintTransaction implements ITransaction {
   }
 
   /**
-   * Create CertifiedMintTransaction from CBOR bytes.
+   * Create CertifiedMintTransaction from CBOR bytes within a decoding operation sharing identical wire certificates.
    *
    * @param {Uint8Array} bytes CBOR bytes.
-   * @param {UnicityCertificateInterner} [interner] Optional decoding operation sharing identical wire certificates.
+   * @param {UnicityCertificateInterner} [interner] Decoding operation, or none to parse every certificate.
    * @returns {Promise<CertifiedMintTransaction>} Decoded certified transaction.
    */
-  public static async fromCBOR(
+  public static async decodeWith(
     bytes: Uint8Array,
     interner?: UnicityCertificateInterner,
   ): Promise<CertifiedMintTransaction> {
     const data = CborDeserializer.decodeArray(bytes, 2);
-    const proof = InclusionProof.fromCBOR(data[1], interner);
+    const proof = InclusionProof.decodeWith(data[1], interner);
     return new CertifiedMintTransaction(await MintTransaction.fromCBOR(data[0]), proof);
+  }
+
+  /**
+   * Create CertifiedMintTransaction from CBOR bytes.
+   *
+   * @param {Uint8Array} bytes CBOR bytes.
+   * @returns {Promise<CertifiedMintTransaction>} Decoded certified transaction.
+   */
+  public static fromCBOR(bytes: Uint8Array): Promise<CertifiedMintTransaction> {
+    return CertifiedMintTransaction.decodeWith(bytes);
   }
 
   /**

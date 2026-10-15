@@ -3,6 +3,7 @@ import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from '../../../src/api/bft/UnicityCertificateInterner.js';
 import { unicityCertificateMetrics } from '../../../src/api/bft/UnicityCertificateMetrics.js';
 import { InclusionProof } from '../../../src/api/InclusionProof.js';
+import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
@@ -153,6 +154,49 @@ describe('wire certificate decoding', () => {
     const decoded = await new AggregatorClient('https://example.com').getInclusionProofs(ids);
     expect(decoded.proofs).toHaveLength(8);
     expect(unicityCertificateMetrics.decodes - before).toEqual(1);
+  });
+});
+
+describe('public decoders keep their signatures', () => {
+  it('can be passed point-free to map, whose second argument is the index', async () => {
+    const s = await scenario(0);
+    const tokens = await Promise.all([s.history(1), s.history(2), s.history(1), s.history(3)]);
+    const bytes = tokens.map((t) => t.toCBOR());
+
+    const decoded = await Promise.all(bytes.map(Token.fromCBOR));
+    expect(decoded.map((t) => HexConverter.encode(t.toCBOR()))).toEqual(bytes.map((b) => HexConverter.encode(b)));
+
+    const proofs = tokens.flatMap(proofsOf).map((p) => p.toCBOR());
+    expect(proofs.length).toBeGreaterThan(3);
+    expect(proofs.map(InclusionProof.fromCBOR)).toHaveLength(proofs.length);
+    const responses = tokens.flatMap(proofsOf).map((p) => InclusionProofResponse.certified(1n, p).toCBOR());
+    expect(responses.map(InclusionProofResponse.fromCBOR)).toHaveLength(responses.length);
+    expect(
+      tokens
+        .flatMap(proofsOf)
+        .map((p) => p.unicityCertificate.toCBOR())
+        .map(UnicityCertificate.fromCBOR),
+    ).toHaveLength(proofs.length);
+
+    expect(Token.fromCBOR.length).toEqual(1);
+    expect(InclusionProof.fromCBOR.length).toEqual(1);
+    expect(InclusionProofResponse.fromCBOR.length).toEqual(1);
+    expect(UnicityCertificate.fromCBOR.length).toEqual(1);
+  });
+
+  it('does not share certificate instances between two separate decodes', async () => {
+    const s = await scenario(0);
+    const bytes = (await consolidated(s, await s.history(3))).toCBOR();
+    const first = await Token.fromCBOR(bytes);
+    const second = await Token.fromCBOR(bytes);
+    // within one decode the proofs share it, across decodes nothing is shared
+    expect(first.genesis.inclusionProof.unicityCertificate).toBe(
+      first.transactions[0].inclusionProof.unicityCertificate,
+    );
+    expect(first.genesis.inclusionProof.unicityCertificate).not.toBe(second.genesis.inclusionProof.unicityCertificate);
+    expect(first.transactions[0].inclusionProof.unicityCertificate).not.toBe(
+      second.transactions[0].inclusionProof.unicityCertificate,
+    );
   });
 });
 

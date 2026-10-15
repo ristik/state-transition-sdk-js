@@ -117,16 +117,24 @@ export class UnicityCertificate {
   }
 
   /**
+   * Create unicity certificate from CBOR bytes within a decoding operation: a certificate with the same complete bytes
+   * is parsed once per interner.
+   *
+   * @param bytes CBOR bytes
+   * @param interner Decoding operation, or none to parse every occurrence.
+   * @return unicity certificate
+   */
+  public static decodeWith(bytes: Uint8Array, interner?: UnicityCertificateInterner): UnicityCertificate {
+    return interner ? interner.decode(bytes) : UnicityCertificate.fromCBOR(bytes);
+  }
+
+  /**
    * Create unicity certificate from CBOR bytes.
    *
    * @param bytes CBOR bytes
-   * @param interner Optional decoding operation: a certificate with the same complete bytes is parsed once.
    * @return unicity certificate
    */
-  public static fromCBOR(bytes: Uint8Array, interner?: UnicityCertificateInterner): UnicityCertificate {
-    if (interner) {
-      return interner.decode(bytes);
-    }
+  public static fromCBOR(bytes: Uint8Array): UnicityCertificate {
     unicityCertificateMetrics.decodes++;
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== UnicityCertificate.CBOR_TAG) {
