@@ -63,6 +63,14 @@ export class UnicityCertificateVerifier {
   public constructor(protected readonly quorumSignaturesRule: UnicitySealQuorumSignaturesVerificationRule) {}
 
   /**
+   * @returns {UnicitySealQuorumSignaturesVerificationRule} The quorum rule this verifier applies, with its signature
+   *   verifier and cache: whoever shares seal work with this verifier must do it through this rule.
+   */
+  public get quorumRule(): UnicitySealQuorumSignaturesVerificationRule {
+    return this.quorumSignaturesRule;
+  }
+
+  /**
    * Begin one verification operation (e.g. one token with every nested token).
    *
    * Returns a verifier with the same rules whose repeated work is shared for the operation only: a distinct complete

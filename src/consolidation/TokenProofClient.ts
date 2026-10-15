@@ -1,14 +1,15 @@
 import { ConsolidationError } from './ConsolidationError.js';
 import { ConsolidationResult, IProofSummary } from './ConsolidationResult.js';
-import { IConsolidationItem, IConsolidationOptions, ProofConsolidator } from './ProofConsolidator.js';
+import {
+  AttemptClock,
+  IConsolidationItem,
+  IConsolidationOptions,
+  ProofConsolidator,
+  validateConsolidationOptions,
+} from './ProofConsolidator.js';
 import { ShardRouting } from './ShardRouting.js';
-import { UnicitySealQuorumSignaturesVerificationRule } from '../api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
-import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
-import { ISignatureVerifier } from '../crypto/ISignatureVerifier.js';
-import { Secp256k1SignatureVerifier } from '../crypto/secp256k1/Secp256k1SignatureVerifier.js';
-import { Signature } from '../crypto/secp256k1/Signature.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
 import { Token } from '../transaction/Token.js';
@@ -25,12 +26,11 @@ export interface ITokenProofClientOptions {
   readonly maxSealCacheEntries?: number;
   /** Trusted shard routing, configured once. Endpoints and credentials come from here only. */
   readonly routing: ShardRouting;
-  /** Verifier of the root nodes' signatures. Default secp256k1. */
-  readonly signatureVerifier?: ISignatureVerifier<Signature>;
   /**
-   * The existing verification context. Its trust base is the anchored authority, its predicate and issuance services
-   * are used as they are. Its certificate verifier is replaced for the operation by one backed by the operation's seal
-   * session (inject a custom signature verifier through `signatureVerifier`).
+   * The existing verification context: its trust base is the anchored authority and its predicate, issuance and
+   * certificate verification are what decide, as injected (custom signature verifiers, rules and caches included). A
+   * stock verifier is shared through an operation scoped seal session whose misses its own quorum rule decides; a
+   * customized verifier or rule verifies every proof by itself.
    */
   readonly verificationContext: IVerificationContext;
 }
@@ -117,16 +117,59 @@ export class TokenProofClient {
    * @throws {ConsolidationError} Typed cancellation, deadline, transport, server, response or integrity failure.
    */
   public async consolidate(token: Token, options: ITokenConsolidationOptions = {}): Promise<ConsolidationResult> {
-    const signatureVerifier = this.options.signatureVerifier ?? new Secp256k1SignatureVerifier();
-    const { trustBase } = this.options.verificationContext;
-    const session = new SealVerificationSession(
-      trustBase,
-      new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier),
-      { maxEntries: this.options.maxSealCacheEntries },
-    );
-    const context = this.operationContext(signatureVerifier, session);
+    validateConsolidationOptions(options);
+    // one deadline and one cancellation for the whole operation: the checks before and after the requests as well
+    const timeoutMs = options.timeoutMs ?? ProofConsolidator.DEFAULT_TIMEOUT_MS;
+    const started = Date.now();
+    const clock = new AttemptClock(timeoutMs, options.signal);
+    try {
+      clock.throwIfDone();
+      return await this.run(token, options, clock, () => Math.max(1, timeoutMs - (Date.now() - started)));
+    } catch (e) {
+      // a deadline or cancellation that surfaced as anything else (an aborted request) is reported as what it was
+      const done = clock.done();
+      if (done && !(e instanceof ConsolidationError && e.kind !== 'cancelled' && e.kind !== 'timeout')) {
+        throw done;
+      }
+      throw e;
+    } finally {
+      clock.dispose();
+    }
+  }
+
+  /** Verification context of one operation: the caller's, with a stock verifier scoped to the operation and session. */
+  private operationContext(session: SealVerificationSession): IVerificationContext {
+    const context = this.options.verificationContext;
+    const scoped = context.unicityCertificateVerifier.beginOperation(session);
+    return scoped === context.unicityCertificateVerifier
+      ? context
+      : new VerificationContext(
+          context.trustBase,
+          context.predicateVerifier,
+          scoped,
+          context.mintJustificationVerifier,
+          context.tokenIssuanceVerifier,
+        );
+  }
+
+  private async run(
+    token: Token,
+    options: ITokenConsolidationOptions,
+    clock: AttemptClock,
+    remainingMs: () => number,
+  ): Promise<ConsolidationResult> {
+    const callerContext = this.options.verificationContext;
+    const { trustBase } = callerContext;
+    // the caller's verification is what is shared and what decides: its quorum rule (signature verifier, cache) backs
+    // the session, and a customized verifier or rule keeps verifying by itself under the caller's own context
+    const verifier = callerContext.unicityCertificateVerifier;
+    const rule = verifier.quorumRule;
+    const session = new SealVerificationSession(trustBase, rule, { maxEntries: this.options.maxSealCacheEntries });
+    // a stock verifier becomes this operation, sharing the strict session; a customized one returns itself
+    const context = this.operationContext(session);
 
     const original = await token.verify(context);
+    clock.throwIfDone();
     if (original.status !== VerificationStatus.OK) {
       throw new ConsolidationError('integrity', 'The token does not verify.', {
         cause: original,
@@ -162,7 +205,11 @@ export class TokenProofClient {
       };
     }
 
-    const attempt = await new ProofConsolidator(this.options.routing, session).consolidate(items, options);
+    const attempt = await new ProofConsolidator(this.options.routing, session).consolidate(items, {
+      ...options,
+      signal: clock.signal,
+      timeoutMs: remainingMs(),
+    });
     if (attempt.status === 'unavailable') {
       return { detail: attempt.detail, reason: attempt.reason, retryable: attempt.retryable, status: 'unavailable' };
     }
@@ -171,6 +218,7 @@ export class TokenProofClient {
     const proofs = attempt.responses.map((response) => response.inclusionProof as InclusionProof);
     const rebuilt = await Token.fromCBOR(TokenProofClient.replaceOuterProofs(token.toCBOR(), proofs));
     const result = await rebuilt.verify(context);
+    clock.throwIfDone();
     if (result.status !== VerificationStatus.OK) {
       throw new ConsolidationError('integrity', 'The consolidated token does not verify.', {
         cause: result,
@@ -200,22 +248,5 @@ export class TokenProofClient {
       shards: attempt.shards,
     };
     return { status: 'consolidated', summary, token: rebuilt };
-  }
-
-  /** Verification context of one operation: the caller's, with the certificate verifier backed by the session. */
-  private operationContext(
-    signatureVerifier: ISignatureVerifier<Signature>,
-    session: SealVerificationSession,
-  ): IVerificationContext {
-    const context = this.options.verificationContext;
-    return new VerificationContext(
-      context.trustBase,
-      context.predicateVerifier,
-      new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier)).beginOperation(
-        session,
-      ),
-      context.mintJustificationVerifier,
-      context.tokenIssuanceVerifier,
-    );
   }
 }

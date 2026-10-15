@@ -105,8 +105,31 @@ interface IShardBatch {
   readonly group: IGroup;
 }
 
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * Reject options the platform would silently misinterpret: a timer longer than 2^31-1 ms or a non finite delay fires
+ * at once, a non finite parallelism starts no request at all.
+ *
+ * @param {IConsolidationOptions} options Options of an attempt.
+ * @throws {ConsolidationError} `input` for an invalid `timeoutMs` or `maxParallel`.
+ */
+export function validateConsolidationOptions(options: IConsolidationOptions): void {
+  const { maxParallel, timeoutMs } = options;
+  if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TIMEOUT_MS)) {
+    throw new ConsolidationError('input', `timeoutMs must be a finite number in (0, ${MAX_TIMEOUT_MS}].`, {
+      outcome: 'invalid_input',
+    });
+  }
+  if (maxParallel !== undefined && !(Number.isInteger(maxParallel) && maxParallel >= 1)) {
+    throw new ConsolidationError('input', 'maxParallel must be an integer of at least 1.', {
+      outcome: 'invalid_input',
+    });
+  }
+}
+
 /** One attempt's deadline and cancellation. */
-class AttemptClock {
+export class AttemptClock {
   public readonly controller = new AbortController();
   private expired = false;
   private readonly onAbort: () => void;
@@ -266,6 +289,7 @@ export class ProofConsolidator {
     items: readonly IConsolidationItem[],
     options: IConsolidationOptions = {},
   ): Promise<ConsolidationAttempt> {
+    validateConsolidationOptions(options);
     const clock = new AttemptClock(options.timeoutMs ?? ProofConsolidator.DEFAULT_TIMEOUT_MS, options.signal);
     try {
       return await this.run(items, options, clock);
@@ -423,7 +447,7 @@ export class ProofConsolidator {
     maxParallel: number | undefined,
     clock: AttemptClock,
   ): Promise<IShardBatch[]> {
-    const limit = Math.max(1, Math.floor(maxParallel ?? ProofConsolidator.DEFAULT_MAX_PARALLEL));
+    const limit = maxParallel ?? ProofConsolidator.DEFAULT_MAX_PARALLEL;
     const results = new Array<IShardBatch | undefined>(groups.length);
     const errors = new Array<unknown>(groups.length);
     const inner = new AbortController();

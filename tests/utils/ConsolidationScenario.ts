@@ -1,6 +1,7 @@
 import { ShardedWorld } from './ShardedWorld.js';
 import { mintToken, transferToken } from './TokenUtils.js';
 import { createUnicityCertificateVerifier } from './UnicityCertificateVerifierFixture.js';
+import { UnicityCertificateVerifier } from '../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { SigningService } from '../../src/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '../../src/predicate/builtin/SignaturePredicate.js';
 import { PredicateVerifierService } from '../../src/predicate/verification/PredicateVerifierService.js';
@@ -52,12 +53,15 @@ export interface IScenario {
   history(transfers: number, justification?: ICborSerializable | null): Promise<Token>;
 }
 
-export async function scenario(shardBits: number): Promise<IScenario> {
+export async function scenario(
+  shardBits: number,
+  certificateVerifier: UnicityCertificateVerifier = createUnicityCertificateVerifier(),
+): Promise<IScenario> {
   const world = await ShardedWorld.create(shardBits);
   const context = new VerificationContext(
     world.trustBase,
     PredicateVerifierService.create(),
-    createUnicityCertificateVerifier(),
+    certificateVerifier,
     new MintJustificationVerifierService().register(new NestedTokenJustificationVerifier()),
     new TokenIssuanceVerifierService(false),
   );

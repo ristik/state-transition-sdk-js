@@ -2,6 +2,8 @@ import { BatchProofError } from '../../../src/api/BatchProofError.js';
 import { PartitionView } from '../../../src/api/bft/PartitionView.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../src/api/bft/UnicitySeal.js';
+import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
+import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { CertificationResponse } from '../../../src/api/CertificationResponse.js';
 import { InclusionProofBatch } from '../../../src/api/IBatchAggregatorClient.js';
 import { InclusionProof } from '../../../src/api/InclusionProof.js';
@@ -28,8 +30,17 @@ function routingOf(s: IScenario): ShardRouting {
   });
 }
 
-function clientOf(s: IScenario, signatureVerifier?: Secp256k1SignatureVerifier): TokenProofClient {
-  return new TokenProofClient({ routing: routingOf(s), signatureVerifier, verificationContext: s.context });
+function clientOf(s: IScenario): TokenProofClient {
+  return new TokenProofClient({ routing: routingOf(s), verificationContext: s.context });
+}
+
+/** A stock certificate verifier over a counting signature verifier and no cache of its own. */
+function counting(): { spy: jest.SpyInstance; verifier: UnicityCertificateVerifier } {
+  const signatureVerifier = new Secp256k1SignatureVerifier();
+  return {
+    spy: jest.spyOn(signatureVerifier, 'verify'),
+    verifier: new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier)),
+  };
 }
 
 function shardsOf(token: Token): Set<string> {
@@ -80,19 +91,20 @@ async function expectError(promise: Promise<unknown>, kind: string, outcome?: st
 describe('TokenProofClient', () => {
   describe('consolidation', () => {
     it.each([0, 1, 2])('replaces the outer history of a token over %i shard bits', async (bits) => {
-      const s = await scenario(bits);
+      const { spy: verifySpy, verifier } = counting();
+      const s = await scenario(bits, verifier);
       const token = await spanning(s, 4, bits === 0 ? 1 : 2);
       const before = token.toCBOR();
       expect(sealsOf(token).size).toBeGreaterThan(1);
       s.world.requests.length = 0;
-      const verifier = new Secp256k1SignatureVerifier();
-      const verifySpy = jest.spyOn(verifier, 'verify');
+      verifySpy.mockClear();
 
-      const result = await clientOf(s, verifier).consolidate(token);
+      const result = await clientOf(s).consolidate(token);
       expect(result.status).toEqual('consolidated');
       if (result.status !== 'consolidated') {
         return;
       }
+      const signatureChecks = verifySpy.mock.calls.length;
 
       // fully verified, immutable, one seal over the outer history
       expect((await result.token.verify(s.context)).status).toEqual(VerificationStatus.OK);
@@ -130,18 +142,18 @@ describe('TokenProofClient', () => {
 
       // one quorum check per distinct complete seal, one signature each: the master seal here is the seal of the
       // newest original proof (nothing was certified since), so it is a memo hit, not a second check
-      expect(verifySpy).toHaveBeenCalledTimes(sealsOf(token).size);
+      expect(signatureChecks).toEqual(sealsOf(token).size);
       expect(result.summary.quorumChecks).toEqual(0);
       expect(result.summary.evidenceQuorumChecks).toEqual(sealsOf(token).size);
     });
 
     it('checks a fresh master seal once, however many proofs carry it', async () => {
-      const s = await scenario(2);
+      const { spy: verifySpy, verifier } = counting();
+      const s = await scenario(2, verifier);
       const token = await spanning(s, 5, 2);
       await s.world.idle(2); // the root chain moved on: the master seal is a seal no original proof carries
-      const verifier = new Secp256k1SignatureVerifier();
-      const verifySpy = jest.spyOn(verifier, 'verify');
-      const result = await clientOf(s, verifier).consolidate(token);
+      verifySpy.mockClear();
+      const result = await clientOf(s).consolidate(token);
       expect(result.status).toEqual('consolidated');
       if (result.status === 'consolidated') {
         expect(result.summary.quorumChecks).toEqual(1);
@@ -616,6 +628,130 @@ describe('TokenProofClient', () => {
       for (const root of exactRoots) {
         expect(committed).toContain(root);
       }
+    });
+  });
+
+  describe('the caller verification decides', () => {
+    it('uses the injected quorum rule for the input check, the master seal and the output', async () => {
+      const signatureVerifier = new Secp256k1SignatureVerifier();
+      const calls = jest.spyOn(signatureVerifier, 'verify');
+      const s = await scenario(
+        1,
+        new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier)),
+      );
+      const token = await spanning(s, 4, 2);
+      await s.world.idle(1);
+      calls.mockClear();
+      const result = await clientOf(s).consolidate(token);
+      expect(result.status).toEqual('consolidated');
+      // every distinct seal was decided by the caller's signature verifier, the master seal included
+      expect(calls).toHaveBeenCalledTimes(sealsOf(token).size + 1);
+    });
+
+    it('a rejecting injected verifier makes the attempt fail, it is never replaced by a default', async () => {
+      const rejecting = new Secp256k1SignatureVerifier();
+      jest.spyOn(rejecting, 'verify').mockResolvedValue(false);
+      const s = await scenario(0);
+      const token = await s.history(2);
+      const foreign = new TokenProofClient({
+        routing: routingOf(s),
+        verificationContext: {
+          ...s.context,
+          unicityCertificateVerifier: new UnicityCertificateVerifier(
+            new UnicitySealQuorumSignaturesVerificationRule(rejecting),
+          ),
+        },
+      });
+      await expectError(foreign.consolidate(token), 'integrity', 'invalid_input');
+    });
+
+    it('a customized verifier verifies every proof by itself, before and after the requests', async () => {
+      const recorded: string[] = [];
+      class Recording extends UnicityCertificateVerifier {
+        public override verify(
+          ...args: Parameters<UnicityCertificateVerifier['verify']>
+        ): ReturnType<UnicityCertificateVerifier['verify']> {
+          recorded.push(args[1].unicityCertificate.unicitySeal.rootChainRoundNumber.toString());
+          return super.verify(...args);
+        }
+      }
+      const s = await scenario(
+        0,
+        new Recording(new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier())),
+      );
+      const token = await s.history(3);
+      recorded.length = 0;
+      const result = await clientOf(s).consolidate(token);
+      expect(result.status).toEqual('consolidated');
+      // 4 original proofs, then 4 consolidated ones, each through the caller's verifier
+      expect(recorded).toHaveLength(8);
+    });
+  });
+
+  describe('options and the whole-operation deadline', () => {
+    it.each([
+      [{ maxParallel: Number.NaN }],
+      [{ maxParallel: 0 }],
+      [{ maxParallel: 1.5 }],
+      [{ timeoutMs: Number.NaN }],
+      [{ timeoutMs: Infinity }],
+      [{ timeoutMs: 0 }],
+      [{ timeoutMs: -5 }],
+      [{ timeoutMs: 2 ** 31 }],
+    ])('rejects %j as an input error before any work', async (options) => {
+      const s = await scenario(1);
+      const token = await spanning(s, 2, 1);
+      s.world.requests.length = 0;
+      await expectError(clientOf(s).consolidate(token, options), 'input', 'invalid_input');
+      expect(s.world.requests).toHaveLength(0);
+    });
+
+    it('accepts the largest timer the platform honors', async () => {
+      const s = await scenario(0);
+      const token = await s.history(2);
+      expect((await clientOf(s).consolidate(token, { timeoutMs: 2 ** 31 - 1 })).status).toEqual('consolidated');
+    });
+
+    it('an already aborted signal pays for no verification and no request', async () => {
+      const s = await scenario(0);
+      const token = await s.history(2);
+      const verify = jest.spyOn(token, 'verify');
+      s.world.requests.length = 0;
+      const aborted = new AbortController();
+      aborted.abort();
+      await expectError(clientOf(s).consolidate(token, { signal: aborted.signal }), 'cancelled');
+      expect(verify).not.toHaveBeenCalled();
+      expect(s.world.requests).toHaveLength(0);
+    });
+
+    it('an abort during the final verification is a cancellation, never a consolidated result', async () => {
+      const s = await scenario(0);
+      const token = await s.history(2);
+      const controller = new AbortController();
+      // abort exactly when the request wave is over: the rebuilt token is about to be verified
+      const original = s.world.client('').getInclusionProofs.bind(s.world.client(''));
+      const routing = new ShardRouting({
+        endpoints: [
+          {
+            client: Object.assign(s.world.client(''), {
+              getInclusionProofs: async (...args: Parameters<typeof original>): ReturnType<typeof original> => {
+                const batch = await original(...args);
+                controller.abort();
+                return batch;
+              },
+            }),
+            shard: shardIdFromBits(''),
+          },
+        ],
+        partitionId: WORLD_PARTITION,
+        scheme: [],
+      });
+      await expectError(
+        new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token, {
+          signal: controller.signal,
+        }),
+        'cancelled',
+      );
     });
   });
 });
