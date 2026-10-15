@@ -1,4 +1,6 @@
 import { BatchProofError } from './BatchProofError.js';
+import { UnicityCertificate } from './bft/UnicityCertificate.js';
+import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
 import { CertificationRequest } from './CertificationRequest.js';
 import { CertificationResponse } from './CertificationResponse.js';
@@ -89,11 +91,13 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
 
     try {
+      // the proofs of one batch carry the same local certificate: parse it once
+      const interner = new UnicityCertificateInterner((bytes) => UnicityCertificate.fromCBOR(bytes));
       const proofs = body.proofs.map((proof) => {
         if (typeof proof !== 'string') {
           throw new Error('Proof must be a hex string.');
         }
-        return InclusionProofResponse.fromCBOR(HexConverter.decode(proof));
+        return InclusionProofResponse.decodeWith(HexConverter.decode(proof), interner);
       });
       const view = typeof body.partitionView === 'string' ? HexConverter.decode(body.partitionView) : null;
       return new InclusionProofBatch(proofs, view);
