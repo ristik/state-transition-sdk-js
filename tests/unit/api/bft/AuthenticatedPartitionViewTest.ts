@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -165,5 +165,128 @@ describe('AuthenticatedPartitionView', () => {
     expect(certificates.map((uc) => HexConverter.encode(uc.toCBOR()))).toEqual(initial.shards.map((x) => x.uc));
     expect(certificates[1].inputRecord.nullableHash).toBeNull();
     expect(certificates[1].inputRecord.nullableSummaryValue).toBeNull();
+  });
+
+  describe('independence of caller owned state', () => {
+    const wrongPin = (): Map<string, Uint8Array> => new Map([['00', new Uint8Array(32).fill(1)]]);
+
+    it('applies the pins snapshotted at construction, not the caller map afterwards', async () => {
+      const pins = wrongPin();
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins });
+      const identity = authenticator.identity;
+      pins.clear();
+      await expect(authenticator.authenticate(viewBytes, ucBytes)).rejects.toMatchObject({
+        reason: 'config_not_admitted',
+      });
+      expect(authenticator.identity).toEqual(identity);
+    });
+
+    it('does not let later mutation of pin buffers or maps change the applied policy or the memo', async () => {
+      const view = PartitionView.fromCBOR(viewBytes);
+      const good = new Uint8Array(view.leaves[0].shardConfigurationHash);
+      const pins = new Map([['00', good]]);
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins });
+      const identity = authenticator.identity;
+      const first = await authenticator.authenticate(viewBytes, ucBytes);
+
+      good[0] ^= 1;
+      pins.set('01', new Uint8Array(32));
+      expect(authenticator.identity).toEqual(identity);
+      expect(await authenticator.authenticate(viewBytes, ucBytes)).toBe(first);
+      // a fresh authenticator over the current (mutated) policy is a different policy and rejects
+      await expect(
+        new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins }).authenticate(
+          viewBytes,
+          ucBytes,
+        ),
+      ).rejects.toMatchObject({ reason: 'config_not_admitted' });
+    });
+
+    it('snapshots the pinned scheme', async () => {
+      const scheme = PartitionView.fromCBOR(viewBytes).scheme;
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { scheme });
+      scheme.length = 0;
+      await expect(authenticator.authenticate(viewBytes, ucBytes)).resolves.toBeDefined();
+    });
+
+    it('is independent of the buffers the inputs came from', async () => {
+      const viewBuffer = Buffer.from(viewBytes);
+      const ucBuffer = Buffer.from(ucBytes);
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session);
+      const pending = authenticator.authenticate(viewBuffer, ucBuffer);
+      // reuse of the source buffers while verification is in flight and afterwards
+      ucBuffer.fill(0);
+      viewBuffer.fill(0);
+      const authenticated = await pending;
+      expect(authenticated.assembleCertificates().map((uc) => HexConverter.encode(uc.toCBOR()))).toEqual(
+        v.shards.map((s) => s.uc),
+      );
+      expect(HexConverter.encode(authenticated.seal.toCBOR())).toEqual(
+        HexConverter.encode(UnicityCertificate.fromCBOR(ucBytes).unicitySeal.toCBOR()),
+      );
+
+      // the original valid bytes authenticate to a valid object, not to a cached corrupted one
+      const again = await authenticator.authenticate(viewBytes, ucBytes);
+      expect(again.assembleCertificates().map((uc) => HexConverter.encode(uc.toCBOR()))).toEqual(
+        v.shards.map((s) => s.uc),
+      );
+    });
+
+    it('is independent of the caller owned objects passed in', async () => {
+      const view = PartitionView.fromCBOR(viewBytes);
+      const uc = UnicityCertificate.fromCBOR(ucBytes);
+      const authenticated = await new PartitionViewAuthenticator(PARTITION, session).authenticate(view, uc);
+      // JavaScript callers can write to readonly fields and to buffers behind getters
+      (uc.inputRecord as unknown as { timestamp: bigint }).timestamp = 1n;
+      expect(authenticated.assembleCertificates().map((c) => HexConverter.encode(c.toCBOR()))).toEqual(
+        v.shards.map((s) => s.uc),
+      );
+    });
+
+    it('hands out independent copies of every nested object', async () => {
+      const authenticated = await new PartitionViewAuthenticator(PARTITION, session).authenticate(viewBytes, ucBytes);
+      const expected = v.shards.map((s) => s.uc);
+
+      const first = authenticated.assembleCertificates();
+      (first[0].inputRecord as unknown as { timestamp: bigint }).timestamp = 1n;
+      (first[1].unicitySeal as unknown as { _hash: Uint8Array })._hash.fill(0);
+      (first[2].unicityTreeCertificate as unknown as { _steps: unknown[] })._steps.length = 0;
+      (authenticated.seal as unknown as { _hash: Uint8Array })._hash.fill(0);
+      (authenticated.leaves[0].inputRecord as unknown as { timestamp: bigint }).timestamp = 1n;
+      (authenticated.certificateOf(authenticated.scheme[3]).inputRecord as unknown as { timestamp: bigint }).timestamp =
+        1n;
+
+      expect(authenticated.assembleCertificates().map((uc) => HexConverter.encode(uc.toCBOR()))).toEqual(expected);
+      expect(HexConverter.encode(authenticated.seal.toCBOR())).toEqual(
+        HexConverter.encode(UnicityCertificate.fromCBOR(ucBytes).unicitySeal.toCBOR()),
+      );
+      expect(HexConverter.encode(authenticated.certificateOf(authenticated.scheme[3]).toCBOR())).toEqual(expected[3]);
+      expect(HexConverter.encode(PartitionView.fromCBOR(viewBytes).toCBOR())).toEqual(v.view);
+      expect(authenticated.leaves[0].inputRecord.timestamp).not.toEqual(1n);
+    });
+  });
+
+  describe('construction boundary', () => {
+    it('exposes no factory on the authenticator or the view', () => {
+      for (const target of [PartitionViewAuthenticator, AuthenticatedPartitionView]) {
+        const statics = Object.getOwnPropertyNames(target).filter((n) => !['length', 'name', 'prototype'].includes(n));
+        expect(statics.filter((n) => typeof (target as unknown as Record<string, unknown>)[n] === 'function')).toEqual(
+          [],
+        );
+      }
+      expect((PartitionViewAuthenticator as unknown as Record<string, unknown>).create).toBeUndefined();
+    });
+
+    it('cannot be forged through the emitted JavaScript either', async () => {
+      const built = join(process.cwd(), 'lib/api/bft/AuthenticatedPartitionView.js');
+      if (!existsSync(built)) {
+        return; // only after `npm run build`
+      }
+      const lib = (await import(built)) as Record<string, Record<string, unknown>>;
+      expect(Object.keys(lib).sort()).toEqual(['AuthenticatedPartitionView', 'PartitionViewAuthenticator']);
+      expect(lib.PartitionViewAuthenticator.create).toBeUndefined();
+      const Forged = lib.AuthenticatedPartitionView as unknown as new (c: symbol, p: object) => unknown;
+      expect(() => new Forged(Symbol('authenticated'), {})).toThrow('can only be created');
+    });
   });
 });
