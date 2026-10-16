@@ -1,6 +1,5 @@
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { ShardId } from '../../../src/api/bft/ShardId.js';
-import { NetworkId } from '../../../src/api/NetworkId.js';
 import { ConsolidationError } from '../../../src/consolidation/ConsolidationError.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
@@ -29,7 +28,6 @@ function configureRouting(): ShardRouting {
       { client: new AggregatorClient('https://shard-0.example.org', 'api-key-0'), shard: shardOf('0') },
       { client: new AggregatorClient('https://shard-1.example.org', 'api-key-1'), shard: shardOf('1') },
     ],
-    networkId: NetworkId.TESTNET,
     partitionId: 168496141n,
     // the complete shard prefix topology of the partition
     scheme: [shardOf('0'), shardOf('1')],
@@ -68,11 +66,19 @@ export async function prepareForEvmBridgeBack(
     await adapters.encodeForBridgeBack(token.toCBOR());
     return 'original';
   } catch (e) {
-    if (e instanceof ConsolidationError && (e.kind === 'cancelled' || e.kind === 'timeout')) {
-      throw e; // the caller decides what to do with an expired deadline or its own cancellation
+    if (ConsolidationError.is(e)) {
+      if (e.retryable) {
+        // transport failures and an expired deadline: a new attempt may succeed. Falling back to the original token is
+        // the caller's choice and only sound when the verifier's limits allow that token.
+        await adapters.encodeForBridgeBack(token.toCBOR());
+        return 'original';
+      }
+      if (e.kind === 'cancelled') {
+        throw e; // the caller's own cancellation: not a failure to hide
+      }
     }
-    // transport, server, response and integrity failures are errors, never "unavailable"; an integrity failure means
-    // the service returned material that does not verify and must not be retried silently
+    // integrity, rejection or invalid response: the service returned material that does not verify, or the request is
+    // wrong. Surface it; never retry silently and never present it as "unavailable".
     throw e;
   }
 }

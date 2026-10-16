@@ -1,5 +1,5 @@
-import { HexConverter } from '../../../util/HexConverter.js';
-import { RootTrustBase } from '../RootTrustBase.js';
+import { RootTrustBase } from '../../api/bft/RootTrustBase.js';
+import { HexConverter } from '../../util/HexConverter.js';
 
 let authorityIdentityBuilds = 0;
 

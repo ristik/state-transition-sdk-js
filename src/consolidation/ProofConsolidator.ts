@@ -3,14 +3,20 @@ import { ProofUnavailableReason } from './ConsolidationResult.js';
 import { IShardEndpoint, ShardRouting } from './ShardRouting.js';
 import { BatchProofError, isBatchStateDetail } from '../api/BatchProofError.js';
 import { PartitionViewAuthenticator } from '../api/bft/AuthenticatedPartitionView.js';
-import { PartitionView } from '../api/bft/PartitionView.js';
+import { PartitionViewLeaf } from '../api/bft/PartitionView.js';
 import { PartitionViewError } from '../api/bft/PartitionViewError.js';
 import { ShardId } from '../api/bft/ShardId.js';
 import { UnicityCertificate } from '../api/bft/UnicityCertificate.js';
+import { UnicitySeal } from '../api/bft/UnicitySeal.js';
 import { UnicitySealHashMatchesWithRootHashRule } from '../api/bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
 import { CertificationData } from '../api/CertificationData.js';
-import { IBatchRequestOptions, InclusionProofBatch, isBatchAggregatorClient } from '../api/IBatchAggregatorClient.js';
+import {
+  BATCH_MAX_STATE_IDS,
+  IBatchRequestOptions,
+  InclusionProofBatch,
+  isBatchAggregatorClient,
+} from '../api/IBatchAggregatorClient.js';
 import { InclusionProof } from '../api/InclusionProof.js';
 import { InclusionProofResponse } from '../api/InclusionProofResponse.js';
 import { calculateLeafValue } from '../api/LeafValue.js';
@@ -18,6 +24,7 @@ import { NetworkId } from '../api/NetworkId.js';
 import { StateId } from '../api/StateId.js';
 import { DataHash } from '../crypto/hash/DataHash.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
+import { abortable, SleepError } from '../internal/abortable.js';
 import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
@@ -85,6 +92,14 @@ export type ConsolidationAttempt =
       readonly status: 'unavailable';
     };
 
+/** What the replacement certificates are derived from: an authenticated view or the unsharded certificate itself. */
+interface IConsolidationTarget {
+  readonly networkId: NetworkId;
+  readonly seal: UnicitySeal;
+  certificateOf(shard: ShardId): UnicityCertificate;
+  leafOf(shard: ShardId): PartitionViewLeaf;
+}
+
 /** Service outcome that ends the attempt as `unavailable`, internal control flow. */
 class Unavailable extends Error {
   public constructor(
@@ -115,6 +130,7 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  *
  * @param {IConsolidationOptions} options Options of an attempt.
  * @throws {ConsolidationError} `input` for an invalid `timeoutMs` or `maxParallel`.
+ * @internal
  */
 export function validateConsolidationOptions(options: IConsolidationOptions): void {
   const { maxParallel, timeoutMs } = options;
@@ -130,7 +146,11 @@ export function validateConsolidationOptions(options: IConsolidationOptions): vo
   }
 }
 
-/** One attempt's deadline and cancellation. */
+/**
+ * One attempt's deadline and cancellation.
+ *
+ * @internal
+ */
 export class AttemptClock {
   public readonly controller = new AbortController();
   private expired = false;
@@ -169,7 +189,11 @@ export class AttemptClock {
       return new ConsolidationError('timeout', 'The attempt deadline expired.', { retryable: true });
     }
     if (this.controller.signal.aborted || this.external?.aborted) {
-      return new ConsolidationError('cancelled', 'The attempt was cancelled.');
+      // the caller's own signal.reason is the cause; a caller's own deadline (AbortSignal.timeout) is a timeout
+      const reason = this.externalReason();
+      return isNamed(reason, 'TimeoutError')
+        ? new ConsolidationError('timeout', "The caller's deadline expired.", { cause: reason, retryable: true })
+        : new ConsolidationError('cancelled', 'The attempt was cancelled.', { cause: reason });
     }
     return null;
   }
@@ -180,11 +204,23 @@ export class AttemptClock {
       throw error;
     }
   }
+
+  private externalReason(): unknown {
+    try {
+      return this.external?.aborted ? this.external.reason : undefined;
+    } catch {
+      return undefined; // a signal whose reason cannot be read still cancels
+    }
+  }
+}
+
+function isNamed(e: unknown, name: string): boolean {
+  // by name, not by class: abort reasons come from the platform's realm
+  return typeof e === 'object' && e !== null && 'name' in e && e.name === name;
 }
 
 function isAbort(e: unknown): boolean {
-  // by name, not by class: abort reasons come from the platform's realm
-  return typeof e === 'object' && e !== null && 'name' in e && (e.name === 'AbortError' || e.name === 'TimeoutError');
+  return e instanceof SleepError || isNamed(e, 'AbortError') || isNamed(e, 'TimeoutError');
 }
 
 function integrity(
@@ -193,7 +229,7 @@ function integrity(
   shard?: ShardId,
   cause?: unknown,
 ): ConsolidationError {
-  return new ConsolidationError('integrity', message, { cause, outcome, shard: shard?.toString() });
+  return new ConsolidationError('integrity', message, { cause, outcome, shard });
 }
 
 function viewFailure(e: unknown, shard: ShardId): unknown {
@@ -216,7 +252,10 @@ function viewFailure(e: unknown, shard: ShardId): unknown {
  */
 export class ProofConsolidator {
   public static readonly DEFAULT_MAX_PARALLEL = 4;
+
   public static readonly DEFAULT_TIMEOUT_MS = 10_000;
+
+  private readonly pins: ReadonlyMap<string, Uint8Array>;
 
   /**
    * @param {ShardRouting} routing Trusted routing of the partition.
@@ -225,7 +264,9 @@ export class ProofConsolidator {
   public constructor(
     private readonly routing: ShardRouting,
     private readonly session: SealVerificationSession,
-  ) {}
+  ) {
+    this.pins = new Map(routing.shardConfigurationPins?.map((pin) => [pin.shard.toString(), pin.hash]));
+  }
 
   private static requestFailure(
     e: unknown,
@@ -241,17 +282,16 @@ export class ProofConsolidator {
     if (e instanceof ConsolidationError || e instanceof Unavailable) {
       return e;
     }
-    const bits = shard.toString();
     if (!(e instanceof BatchProofError)) {
       return isAbort(e)
-        ? new ConsolidationError('cancelled', 'The request was aborted.', { cause: e, shard: bits })
+        ? new ConsolidationError('cancelled', 'The request was aborted.', { cause: e, shard })
         : new ConsolidationError('transport', e instanceof Error ? e.message : String(e), {
             cause: e,
             retryable: true,
-            shard: bits,
+            shard,
           });
     }
-    const info = { cause: e, detail: e.detail, shard: bits };
+    const info = { cause: e, detail: e.detail, shard };
     switch (e.kind) {
       case 'unavailable': {
         const detail = e.detail ?? '';
@@ -284,7 +324,7 @@ export class ProofConsolidator {
       case 'server':
         return new ConsolidationError('server', e.message, { ...info, retryable: e.retryable });
       case 'invalid_response':
-        return new ConsolidationError('invalid_response', e.message, { ...info, outcome: 'invalid_input' });
+        return new ConsolidationError('invalid_response', e.message, info);
       default:
         return new ConsolidationError('transport', e.message, { ...info, retryable: true });
     }
@@ -331,6 +371,64 @@ export class ProofConsolidator {
   }
 
   /**
+   * The master target of an unsharded partition: the ordinary certificate itself. With the empty shard id and no
+   * shard tree siblings the shard tree is the one leaf, so the certificate already commits to everything a one-leaf
+   * partition view would repeat; no view is received, decoded, authenticated or derived. This is not an optional
+   * view: it holds only for a certificate that is for the configured partition, the empty shard (one routed group,
+   * no peers, scheme empty) and an empty shard path, and it passes the same pins, structure, seal-hash path and strict
+   * seal authentication (network, epoch interval, quorum) as any other target. Anything else is an integrity error,
+   * never a fallback.
+   */
+  private async authenticateDirect(
+    enclosing: UnicityCertificate,
+    masterShard: ShardId,
+    groupCount: number,
+  ): Promise<IConsolidationTarget> {
+    const shardPath = enclosing.shardTreeCertificate;
+    if (masterShard.length !== 0 || groupCount !== 1 || this.routing.scheme.length !== 0) {
+      throw integrity(
+        'binding_mismatch',
+        'A direct target needs the unsharded partition with one routed shard.',
+        masterShard,
+      );
+    }
+    if (shardPath.shard.length !== 0 || shardPath.siblingHashList.length !== 0) {
+      throw integrity(
+        'binding_mismatch',
+        'A certificate without partition view must have the empty shard and path.',
+        masterShard,
+      );
+    }
+    enclosing.unicityTreeCertificate.steps.forEach((step, i) => {
+      if (step == null) {
+        throw integrity('invalid_input', `Unicity tree certificate hash step ${i} is nil.`, masterShard);
+      }
+    });
+    this.checkUcShape(0, enclosing, masterShard);
+    if ((await UnicitySealHashMatchesWithRootHashRule.verify(enclosing)).status !== VerificationStatus.OK) {
+      throw integrity('binding_mismatch', 'The certificate path does not reach the seal hash.', masterShard);
+    }
+    const result = await this.session.authenticate(enclosing.unicitySeal);
+    if (result.status !== VerificationStatus.OK) {
+      throw integrity('unauthenticated', `Authenticating unicity seal: ${result.message || 'failed'}.`, masterShard);
+    }
+    const fixed = enclosing;
+    return {
+      certificateOf: (shard: ShardId): UnicityCertificate => {
+        if (shard.length !== 0) {
+          throw new PartitionViewError('topology', 'A direct target has only the empty shard.');
+        }
+        return fixed;
+      },
+      leafOf: (): never => {
+        throw new PartitionViewError('topology', 'A direct target has no peer shards.');
+      },
+      networkId: enclosing.unicitySeal.networkId,
+      seal: enclosing.unicitySeal,
+    };
+  }
+
+  /**
    * Authenticate every original proof (shard and partition path to its seal hash, leaf rules, seal quorum under the
    * trusted authority) and derive R_min: the highest root round among them. All seals must be of one network.
    */
@@ -338,7 +436,7 @@ export class ProofConsolidator {
     items: readonly IConsolidationItem[],
     stateIds: readonly StateId[],
   ): Promise<{ network: NetworkId; round: bigint; shard: ShardId }> {
-    const order = PartitionView.canonicalShardOrder(this.routing.scheme);
+    const order = this.routing.order;
     let best: { network: NetworkId; round: bigint; shard: ShardId } | null = null;
     for (const [i, item] of items.entries()) {
       const uc = item.proof.unicityCertificate;
@@ -359,7 +457,7 @@ export class ProofConsolidator {
       if (!seal.networkId.equals(this.session.trustBaseNetwork)) {
         throw integrity('unauthenticated', `Evidence ${i}: seal of another network than the trusted authority.`);
       }
-      const quorum = await this.session.verifyQuorum(seal);
+      const quorum = await this.session.verifyQuorumSignaturesOnly(seal);
       if (quorum.status !== VerificationStatus.OK) {
         throw integrity('unauthenticated', `Evidence ${i}: the seal is not authenticated.`, shard);
       }
@@ -370,10 +468,29 @@ export class ProofConsolidator {
     return best as { network: NetworkId; round: bigint; shard: ShardId };
   }
 
+  /** The master target from its authenticated partition view: one leaf per shard, every certificate derived from it. */
+  private async authenticateView(
+    viewBytes: Uint8Array,
+    enclosing: UnicityCertificate,
+    masterShard: ShardId,
+  ): Promise<IConsolidationTarget> {
+    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
+      scheme: this.routing.scheme,
+      shardConfigurationPins: this.routing.shardConfigurationPins,
+    });
+    try {
+      return await authenticator.authenticate(viewBytes, enclosing);
+    } catch (e) {
+      throw viewFailure(e, masterShard);
+    }
+  }
+
   /** The source proofs are rooted at the state the master view commits to, for this very shard and partition. */
   private checkExactRoot(shardBatch: IShardBatch, target: UnicityCertificate, shard: ShardId): void {
     const local = this.commonUc(shardBatch, shard);
-    if (!areUint8ArraysEqual(local.inputRecord.hash, target.inputRecord.hash)) {
+    const localRoot = local.inputRecord.nullableHash;
+    const targetRoot = target.inputRecord.nullableHash;
+    if (localRoot?.length !== 32 || targetRoot?.length !== 32 || !areUint8ArraysEqual(localRoot, targetRoot)) {
       throw integrity('binding_mismatch', 'The source root differs from the master view root.', shard);
     }
     if (
@@ -397,7 +514,7 @@ export class ProofConsolidator {
     if (uc.technicalRecordHash?.length !== 32) {
       throw fail('technical record hash must be 32 bytes.');
     }
-    const pinned = this.routing.shardConfigurationHashes?.get(shard.toString());
+    const pinned = this.pins.get(shard.toString());
     if (pinned && !areUint8ArraysEqual(pinned, uc.shardConfigurationHash)) {
       throw fail('shard configuration hash differs from the pinned configuration.');
     }
@@ -415,7 +532,7 @@ export class ProofConsolidator {
       if (!response.inclusionProof) {
         throw new ConsolidationError('invalid_response', `Proof ${i} of shard "${shard.toString()}" is empty.`, {
           outcome: 'invalid_input',
-          shard: shard.toString(),
+          shard,
         });
       }
       const bytes = response.inclusionProof.unicityCertificate.toCBOR();
@@ -439,17 +556,17 @@ export class ProofConsolidator {
     const ids = group.indexes.map((i) => stateIds[i]);
     const requestOptions: IBatchRequestOptions = { signal, stateRoot: root };
     try {
-      const batch = await (
-        group.endpoint.client as unknown as {
-          getInclusionProofs(ids: readonly StateId[], options: IBatchRequestOptions): Promise<InclusionProofBatch>;
-        }
-      ).getInclusionProofs(ids, requestOptions);
+      // raced against the signal: a transport that ignores it cannot hang the attempt past its deadline
+      const client = group.endpoint.client as unknown as {
+        getInclusionProofs(ids: readonly StateId[], options: IBatchRequestOptions): Promise<InclusionProofBatch>;
+      };
+      const batch = await abortable((s) => client.getInclusionProofs(ids, { ...requestOptions, signal: s }), signal);
       clock.throwIfDone();
       if (batch.proofs.length !== ids.length) {
         throw new ConsolidationError(
           'invalid_response',
           `Got ${batch.proofs.length} proofs for ${ids.length} states.`,
-          { outcome: 'invalid_input', shard: group.endpoint.shard.toString() },
+          { outcome: 'invalid_input', shard: group.endpoint.shard },
         );
       }
       return { batch, group };
@@ -517,7 +634,7 @@ export class ProofConsolidator {
       group.indexes.push(index);
       byShard.set(key, group);
     });
-    const order = PartitionView.canonicalShardOrder(this.routing.scheme);
+    const order = this.routing.order;
     return order.flatMap((id) => {
       const group = byShard.get(id.toString());
       return group ? [group] : [];
@@ -557,9 +674,9 @@ export class ProofConsolidator {
         shard,
       );
     }
-    const root = target.inputRecord.hash;
-    if (root.length !== 32) {
-      throw integrity('unsupported', `The target state root has ${root.length} bytes.`, shard);
+    const root = target.inputRecord.nullableHash;
+    if (root?.length !== 32) {
+      throw integrity('unsupported', `The target state root has ${root?.length ?? 'no'} bytes.`, shard);
     }
     const leafValue = await calculateLeafValue(item.certificationData.transactionHash, proof.referenceTime);
     if (!(await proof.inclusionCertificate.verify(stateId, leafValue, new DataHash(HashAlgorithm.SHA256, root)))) {
@@ -638,7 +755,7 @@ export class ProofConsolidator {
       if (!isBatchAggregatorClient(group.endpoint.client)) {
         throw new Unavailable('unsupported_capability', false, group.endpoint.shard.toString());
       }
-      if (group.indexes.length > 256) {
+      if (group.indexes.length > BATCH_MAX_STATE_IDS) {
         throw new Unavailable('limit_exceeded', false, 'state_count');
       }
     }
@@ -655,27 +772,23 @@ export class ProofConsolidator {
     const masterBatch = await this.fetch(master, stateIds, undefined, clock, 'master');
     requests++;
     const viewBytes = masterBatch.batch.partitionViewBytes;
-    if (!viewBytes) {
-      throw new Unavailable('partition_view_unavailable', true, master.endpoint.shard.toString());
-    }
-    clock.throwIfDone();
     const masterShard = master.endpoint.shard;
+    clock.throwIfDone();
     const enclosing = this.commonUc(masterBatch, masterShard);
+    // decided on the SERVED certificate, like the Go and Rust clients: a sharded partition is never consolidated without
+    // its authenticated view, and only a certificate of the empty shard (the partition's single leaf) may do without
+    // one, see authenticateDirect. A certificate that contradicts the trusted routing is an integrity failure.
+    if (!viewBytes && enclosing.shardTreeCertificate.shard.length !== 0) {
+      throw new Unavailable('partition_view_unavailable', true, masterShard.toString());
+    }
     if (!enclosing.shardTreeCertificate.shard.equals(masterShard)) {
       throw integrity('binding_mismatch', 'The master certificate is of another shard.', masterShard);
     }
 
-    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
-      scheme: this.routing.scheme,
-      shardConfigurationHashes: this.routing.shardConfigurationHashes,
-    });
     const quorumBefore = this.session.stats.quorumChecks;
-    let authenticated;
-    try {
-      authenticated = await authenticator.authenticate(viewBytes, enclosing);
-    } catch (e) {
-      throw viewFailure(e, masterShard);
-    }
+    const authenticated = viewBytes
+      ? await this.authenticateView(viewBytes, enclosing, masterShard)
+      : await this.authenticateDirect(enclosing, masterShard, groups.length);
     const quorumChecks = this.session.stats.quorumChecks - quorumBefore;
     if (!authenticated.networkId.equals(bound.network)) {
       throw integrity('incompatible_lineage', 'The master seal is of another network than the original proofs.');
@@ -696,7 +809,15 @@ export class ProofConsolidator {
       } catch {
         throw integrity('binding_mismatch', 'A participating shard is not in the master view.', g.endpoint.shard);
       }
-      return new DataHash(HashAlgorithm.SHA256, leaf.inputRecord.hash);
+      const root = leaf.inputRecord.nullableHash;
+      if (root?.length !== 32) {
+        throw integrity(
+          'unsupported',
+          'A participating shard has no 32-byte state root in the master view.',
+          g.endpoint.shard,
+        );
+      }
+      return new DataHash(HashAlgorithm.SHA256, root);
     });
     const peerBatches = await this.fetchAll(peers, roots, stateIds, options.maxParallel, clock);
     requests += peers.length;

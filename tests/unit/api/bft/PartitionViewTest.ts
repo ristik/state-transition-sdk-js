@@ -89,12 +89,13 @@ function trustBaseOf(
 function topologyOf(
   v: IAssemblyVector,
   bits: number,
-): { scheme: ShardId[]; shardConfigurationHashes: Map<string, Uint8Array> } {
+): { scheme: ShardId[]; shardConfigurationPins: { hash: Uint8Array; shard: ShardId }[] } {
   return {
     scheme: scheme(bits),
-    shardConfigurationHashes: new Map(
-      Object.entries(v.shardConfigurationHashes).map(([shard, hash]) => [shard, HexConverter.decode(hash)]),
-    ),
+    shardConfigurationPins: Object.entries(v.shardConfigurationHashes).map(([shard, hash]) => ({
+      hash: HexConverter.decode(hash),
+      shard: shardIdOf(shard),
+    })),
   };
 }
 
@@ -450,11 +451,29 @@ describe('PartitionView candidate structure', () => {
   it('applies pinned scheme and configuration hashes as an optional stricter policy', () => {
     expectReasonSync(() => view.validateStructure(PARTITION, { ...pins, scheme: scheme(3) }), 'topology');
     expectReasonSync(() => view.validateStructure(PARTITION, { ...pins, scheme: [] }), 'topology');
-    const bad = new Map(pins.shardConfigurationHashes);
-    bad.set('01', new Uint8Array(32).fill(7));
-    expectReasonSync(() => view.validateStructure(PARTITION, { shardConfigurationHashes: bad }), 'config_not_admitted');
+    const bad = pins.shardConfigurationPins.map((p) =>
+      p.shard.toString() === '01' ? { hash: new Uint8Array(32).fill(7), shard: p.shard } : p,
+    );
+    expectReasonSync(() => view.validateStructure(PARTITION, { shardConfigurationPins: bad }), 'config_not_admitted');
     // absent pins do not constrain
-    expect(() => view.validateStructure(PARTITION, { shardConfigurationHashes: new Map() })).not.toThrow();
+    expect(() => view.validateStructure(PARTITION, { shardConfigurationPins: [] })).not.toThrow();
+    // a pin that would never be consulted is an error, not silently ignored
+    const stray = { hash: new Uint8Array(32), shard: shardIdOf('0') };
+    expectReasonSync(() => view.validateStructure(PARTITION, { shardConfigurationPins: [stray] }), 'topology');
+    expectReasonSync(
+      () =>
+        view.validateStructure(PARTITION, {
+          shardConfigurationPins: [pins.shardConfigurationPins[0], pins.shardConfigurationPins[0]],
+        }),
+      'topology',
+    );
+    expectReasonSync(
+      () =>
+        view.validateStructure(PARTITION, {
+          shardConfigurationPins: [{ hash: new Uint8Array(31), shard: pins.shardConfigurationPins[0].shard }],
+        }),
+      'bounds',
+    );
   });
 });
 
@@ -470,7 +489,7 @@ describe.each([
   const enclosing = PartitionView.decodeEnclosingCertificate(HexConverter.decode(v.enclosingUc));
 
   it('rebuilds the same shard tree as Go', async () => {
-    const tree = await view.verifyTree(enclosing, PARTITION, topology);
+    const tree = await view.checkCommitmentUnauthenticated(enclosing, PARTITION, topology);
     expect(HexConverter.encode(tree.rootHash)).toEqual(v.shardTreeRoot);
   });
 
@@ -525,10 +544,9 @@ describe.each([
 
   it('applies matching pins and rejects mismatching ones', async () => {
     await expect(assembleVia(view, enclosing, newSession(trustBaseOf(v)), topology)).resolves.toHaveLength(1 << bits);
-    const wrong = new Map(topology.shardConfigurationHashes);
-    wrong.set(view.leaves[0].shardId.toString(), new Uint8Array(32).fill(1));
+    const wrong = [{ hash: new Uint8Array(32).fill(1), shard: view.leaves[0].shardId }];
     await expectReason(
-      assembleVia(view, enclosing, newSession(trustBaseOf(v)), { shardConfigurationHashes: wrong }),
+      assembleVia(view, enclosing, newSession(trustBaseOf(v)), { shardConfigurationPins: wrong }),
       'config_not_admitted',
     );
   });
@@ -562,7 +580,7 @@ describe('PartitionView seal structure', () => {
         replaceItem(enclosing.unicitySeal.toCBOR(), 4, CborSerializer.encodeUnsignedInteger(1), true),
       ),
     );
-    await expectReason(view.verifyTree(old, PARTITION), 'seal_invalid');
+    await expectReason(view.checkCommitmentUnauthenticated(old, PARTITION), 'seal_invalid');
   });
 
   it('rejects a leaf with a null summary value on a non-initial record', () => {

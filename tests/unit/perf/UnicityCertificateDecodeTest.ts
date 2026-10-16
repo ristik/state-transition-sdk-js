@@ -1,12 +1,12 @@
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from '../../../src/api/bft/UnicityCertificateInterner.js';
-import { unicityCertificateMetrics } from '../../../src/api/bft/UnicityCertificateMetrics.js';
 import { InclusionProof } from '../../../src/api/InclusionProof.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
+import { unicityCertificateMetrics } from '../../../src/internal/bft/UnicityCertificateMetrics.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';

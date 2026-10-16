@@ -1,8 +1,8 @@
 import { PartitionViewAuthenticator } from '../../../src/api/bft/AuthenticatedPartitionView.js';
-import { snapshotPartitionViewMetrics } from '../../../src/api/bft/PartitionViewMetrics.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../src/api/bft/verification/SealVerificationSession.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
+import { snapshotPartitionViewMetrics } from '../../../src/internal/bft/PartitionViewMetrics.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { schemeOf, ShardedWorld, shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
 

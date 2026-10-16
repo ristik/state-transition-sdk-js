@@ -1,12 +1,12 @@
 import { InputRecord } from './InputRecord.js';
 import { ShardTreeCertificate } from './ShardTreeCertificate.js';
 import { UnicityCertificateInterner } from './UnicityCertificateInterner.js';
-import { unicityCertificateMetrics } from './UnicityCertificateMetrics.js';
 import { UnicitySeal } from './UnicitySeal.js';
 import { UnicityTreeCertificate } from './UnicityTreeCertificate.js';
 import { DataHash } from '../../crypto/hash/DataHash.js';
 import { DataHasher } from '../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../crypto/hash/HashAlgorithm.js';
+import { unicityCertificateMetrics } from '../../internal/bft/UnicityCertificateMetrics.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';

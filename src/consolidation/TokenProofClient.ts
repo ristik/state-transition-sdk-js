@@ -8,13 +8,14 @@ import {
   validateConsolidationOptions,
 } from './ProofConsolidator.js';
 import { ShardRouting } from './ShardRouting.js';
+import { ShardId } from '../api/bft/ShardId.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
 import { InclusionProof } from '../api/InclusionProof.js';
+import { scopedVerificationContext } from '../internal/OperationContext.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
 import { Token } from '../transaction/Token.js';
 import { IVerificationContext } from '../transaction/verification/IVerificationContext.js';
-import { VerificationContext } from '../transaction/verification/VerificationContext.js';
 import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
@@ -38,7 +39,25 @@ export interface ITokenProofClientOptions {
 /**
  * Options of one {@link TokenProofClient.consolidate} call.
  */
-export type ITokenConsolidationOptions = IConsolidationOptions;
+export interface ITokenConsolidationOptions {
+  /**
+   * Diagnostics and special cases. Ordinary callers never need them: the master is chosen for you (the shard of the
+   * newest original proof, which is the one that can cover the history).
+   */
+  readonly advanced?: {
+    /** Master shard to use instead; it must take part in the token's outer history. */
+    readonly master?: ShardId;
+  };
+  /** Upper bound on concurrent exact-root requests of the second wave. Default 4. */
+  readonly maxParallel?: number;
+  /**
+   * Cancels the attempt and every outstanding request. The error is `cancelled` with `cause === signal.reason`; a
+   * signal that aborts with a `TimeoutError` (`AbortSignal.timeout`) is reported as `timeout`.
+   */
+  readonly signal?: AbortSignal;
+  /** Total deadline of the whole operation in milliseconds, 1..2^31-1. Default 10 000. */
+  readonly timeoutMs?: number;
+}
 
 /**
  * Explicit preparation of a token for verification by an EVM contract (including internal bridge back) or a zkVM:
@@ -52,17 +71,10 @@ export type ITokenConsolidationOptions = IConsolidationOptions;
  */
 export class TokenProofClient {
   /**
-   * @param {ITokenProofClientOptions} options Configuration.
-   * @throws {ConsolidationError} `input` if the routing and the verification context are for different networks.
+   * @param {ITokenProofClientOptions} options Configuration. The network is the one of the verification context's
+   *   trust base, the routing carries none.
    */
-  public constructor(private readonly options: ITokenProofClientOptions) {
-    const network = options.routing.networkId;
-    if (network && !network.equals(options.verificationContext.trustBase.networkId)) {
-      throw new ConsolidationError('input', 'The routing is configured for another network than the trust base.', {
-        outcome: 'incompatible_lineage',
-      });
-    }
-  }
+  public constructor(private readonly options: ITokenProofClientOptions) {}
 
   private static distinctSeals(proofs: readonly InclusionProof[]): number {
     const seals: Uint8Array[] = [];
@@ -117,7 +129,13 @@ export class TokenProofClient {
    * @throws {ConsolidationError} Typed cancellation, deadline, transport, server, response or integrity failure.
    */
   public async consolidate(token: Token, options: ITokenConsolidationOptions = {}): Promise<ConsolidationResult> {
-    validateConsolidationOptions(options);
+    const attemptOptions: IConsolidationOptions = {
+      master: options.advanced?.master,
+      maxParallel: options.maxParallel,
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+    };
+    validateConsolidationOptions(attemptOptions);
     // one deadline and one cancellation for the whole operation: the checks before and after the requests as well
     const timeoutMs = options.timeoutMs ?? ProofConsolidator.DEFAULT_TIMEOUT_MS;
     const started = Date.now();
@@ -141,15 +159,7 @@ export class TokenProofClient {
   private operationContext(session: SealVerificationSession): IVerificationContext {
     const context = this.options.verificationContext;
     const scoped = context.unicityCertificateVerifier.beginOperation(session);
-    return scoped === context.unicityCertificateVerifier
-      ? context
-      : new VerificationContext(
-          context.trustBase,
-          context.predicateVerifier,
-          scoped,
-          context.mintJustificationVerifier,
-          context.tokenIssuanceVerifier,
-        );
+    return scoped === context.unicityCertificateVerifier ? context : scopedVerificationContext(context, scoped);
   }
 
   private async run(
@@ -193,7 +203,7 @@ export class TokenProofClient {
           consolidatedSeals: 1,
           evidenceQuorumChecks,
           masterRound: items[0].proof.unicityCertificate.unicitySeal.rootChainRoundNumber,
-          masterShard: items[0].proof.unicityCertificate.shardTreeCertificate.shard.toString(),
+          masterShard: items[0].proof.unicityCertificate.shardTreeCertificate.shard,
           originalSeals,
           outerProofs: items.length,
           quorumChecks: 0,
@@ -206,7 +216,8 @@ export class TokenProofClient {
     }
 
     const attempt = await new ProofConsolidator(this.options.routing, session).consolidate(items, {
-      ...options,
+      master: options.advanced?.master,
+      maxParallel: options.maxParallel,
       signal: clock.signal,
       timeoutMs: remainingMs(),
     });
@@ -245,7 +256,7 @@ export class TokenProofClient {
       consolidatedSeals,
       evidenceQuorumChecks,
       masterRound: attempt.masterRound,
-      masterShard: attempt.masterShard.toString(),
+      masterShard: attempt.masterShard,
       originalSeals,
       outerProofs: items.length,
       quorumChecks: session.stats.quorumChecks - evidenceQuorumChecks,

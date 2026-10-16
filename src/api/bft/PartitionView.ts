@@ -1,12 +1,12 @@
 import { InputRecord } from './InputRecord.js';
 import { PartitionViewError } from './PartitionViewError.js';
-import { partitionViewMetrics } from './PartitionViewMetrics.js';
 import { ShardId } from './ShardId.js';
-import { canonicalShardOrder } from './ShardTopology.js';
-import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './verification/SealVerificationSession.js';
+import { partitionViewMetrics } from '../../internal/bft/PartitionViewMetrics.js';
+import { canonicalShardOrder } from '../../internal/bft/ShardTopology.js';
+import { ShardTree } from '../../internal/bft/ShardTree.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
@@ -25,10 +25,21 @@ export interface IPartitionViewPolicy {
    */
   readonly scheme?: readonly ShardId[];
   /**
-   * Pinned shard configuration hashes by shard id bit string ({@link ShardId.toString}). Present entries must match
-   * the view, shards without an entry are not constrained.
+   * Pinned shard configuration hashes. Every pinned shard must be a shard of the view, a shard is pinned at most once
+   * and every hash is 32 bytes; anything else is rejected, never silently ignored (a pin that is not consulted would
+   * make the policy fail open). Shards without a pin are not constrained.
    */
-  readonly shardConfigurationHashes?: ReadonlyMap<string, Uint8Array>;
+  readonly shardConfigurationPins?: readonly IShardConfigurationPin[];
+}
+
+/**
+ * Pinned configuration hash of one shard.
+ */
+export interface IShardConfigurationPin {
+  /** The shard's 32-byte configuration hash. */
+  readonly hash: Uint8Array;
+  /** The shard. */
+  readonly shard: ShardId;
 }
 
 const HASH_LENGTH = 32;
@@ -161,21 +172,26 @@ export class PartitionViewLeaf {
  *
  * Untagged, explicitly versioned CBOR array `[1, partitionId, [[shardId, inputRecord, trHash, shardConfHash], ...]]`
  * from which the ordinary unicity certificates of every shard can be derived. A decoded view is NOT trusted:
- * {@link PartitionView.assembleCertificates} authenticates it against the enclosing certificate and the seal.
+ * {@link PartitionViewAuthenticator.authenticate} authenticates it against the enclosing certificate and the seal.
  */
 export class PartitionView {
   /** Maximum size of an encoded view. */
   public static readonly MAX_BYTES = 16 * 1024;
+
   /** Maximum size of an encoded input record. */
   public static readonly MAX_INPUT_RECORD_BYTES = 1024;
+
   /** Maximum number of shards in a view. */
   public static readonly MAX_LEAVES = 8;
+
   /** Maximum shard id length in bits. */
   public static readonly MAX_SHARD_ID_BITS = 256;
+
   /** Maximum size of the input record summary value. */
   public static readonly MAX_SUMMARY_VALUE_BYTES = 256;
 
   private static readonly MAX_PARTITION_ID = 0xffffffffn;
+
   private static readonly VERSION = 1n;
 
   private readonly _leaves: PartitionViewLeaf[];
@@ -267,6 +283,7 @@ export class PartitionView {
     }
     return uc;
   }
+
   /**
    * Strictly decode a view: bounded input size, exact array lengths, no trailing bytes, no indefinite length items,
    * explicit version 1, untagged, and the encoding must be the canonical one.
@@ -344,73 +361,11 @@ export class PartitionView {
   }
 
   /**
-   * Convert to CBOR bytes.
-   *
-   * @returns {Uint8Array} CBOR bytes.
-   */
-  public toCBOR(): Uint8Array {
-    const bytes = CborSerializer.encodeArray(
-      CborSerializer.encodeUnsignedInteger(this.version),
-      CborSerializer.encodeUnsignedInteger(this.partitionId),
-      CborSerializer.encodeArray(...this._leaves.map((leaf) => leaf.toCBOR())),
-    );
-    if (bytes.length > PartitionView.MAX_BYTES) {
-      throw new PartitionViewError(
-        'bounds',
-        `Encoded partition view is ${bytes.length} bytes, limit is ${PartitionView.MAX_BYTES}.`,
-      );
-    }
-    return bytes;
-  }
-
-  /**
-   * Check that the view is a well formed candidate for the given partition: its leaves are distinct valid shard ids
-   * forming a complete prefix-free scheme in canonical left-to-right order. The scheme is taken from the candidate
-   * itself (it is authenticated later by the seal commitment); pins in `policy` only narrow it. Does not touch any
-   * hash tree.
-   *
-   * @param {bigint} partition Expected partition id.
-   * @param {IPartitionViewPolicy} [policy] Optional pins.
-   * @returns {void}
-   * @throws {PartitionViewError} If the view does not match.
-   */
-  public validateStructure(partition: bigint, policy: IPartitionViewPolicy = {}): void {
-    if (this.partitionId !== partition) {
-      throw new PartitionViewError(
-        'topology',
-        `Partition view is for partition ${this.partitionId}, expected ${partition}.`,
-      );
-    }
-    const order = PartitionView.canonicalShardOrder(this.scheme);
-    if (policy.scheme) {
-      const pinned = PartitionView.canonicalShardOrder(policy.scheme);
-      if (pinned.length !== order.length || pinned.some((id, i) => !id.equals(order[i]))) {
-        throw new PartitionViewError('topology', 'Partition view scheme does not match the pinned scheme.');
-      }
-    }
-    this._leaves.forEach((leaf, i) => {
-      if (!leaf.shardId.equals(order[i])) {
-        throw new PartitionViewError(
-          'topology',
-          `Leaf ${i} is shard "${leaf.shardId.toString()}", expected "${order[i].toString()}".`,
-        );
-      }
-      const pinned = policy.shardConfigurationHashes?.get(leaf.shardId.toString());
-      if (pinned && !areUint8ArraysEqual(pinned, leaf.shardConfigurationHash)) {
-        throw new PartitionViewError(
-          'config_not_admitted',
-          `Shard "${leaf.shardId.toString()}": configuration hash does not match the pinned configuration.`,
-        );
-      }
-    });
-  }
-
-  /**
    * Check that the view hashes into the unicity seal of the enclosing certificate: structure and topology are
    * validated, the partition certificate must be for the view's partition and the rebuilt shard tree root must evaluate
    * through it to the seal hash. The enclosing certificate's own shard leaf must match the view completely.
    *
-   * The seal signatures are NOT checked here, see {@link PartitionView.assembleCertificates}.
+   * The seal signatures are NOT checked here, see {@link PartitionViewAuthenticator.authenticate}.
    *
    * @param {UnicityCertificate} enclosingUc Certificate carrying the seal the view is committed under.
    * @param {bigint} partition Expected partition id.
@@ -418,7 +373,7 @@ export class PartitionView {
    * @returns {Promise<ShardTree>} The rebuilt shard tree.
    * @throws {PartitionViewError} If the view is not committed by the certificate.
    */
-  public async verifyTree(
+  public async checkCommitmentUnauthenticated(
     enclosingUc: UnicityCertificate,
     partition: bigint,
     policy: IPartitionViewPolicy = {},
@@ -494,6 +449,69 @@ export class PartitionView {
     return tree;
   }
 
+  /**
+   * Convert to CBOR bytes.
+   *
+   * @returns {Uint8Array} CBOR bytes.
+   */
+  public toCBOR(): Uint8Array {
+    const bytes = CborSerializer.encodeArray(
+      CborSerializer.encodeUnsignedInteger(this.version),
+      CborSerializer.encodeUnsignedInteger(this.partitionId),
+      CborSerializer.encodeArray(...this._leaves.map((leaf) => leaf.toCBOR())),
+    );
+    if (bytes.length > PartitionView.MAX_BYTES) {
+      throw new PartitionViewError(
+        'bounds',
+        `Encoded partition view is ${bytes.length} bytes, limit is ${PartitionView.MAX_BYTES}.`,
+      );
+    }
+    return bytes;
+  }
+
+  /**
+   * Check that the view is a well formed candidate for the given partition: its leaves are distinct valid shard ids
+   * forming a complete prefix-free scheme in canonical left-to-right order. The scheme is taken from the candidate
+   * itself (it is authenticated later by the seal commitment); pins in `policy` only narrow it. Does not touch any
+   * hash tree.
+   *
+   * @param {bigint} partition Expected partition id.
+   * @param {IPartitionViewPolicy} [policy] Optional pins.
+   * @returns {void}
+   * @throws {PartitionViewError} If the view does not match.
+   */
+  public validateStructure(partition: bigint, policy: IPartitionViewPolicy = {}): void {
+    if (this.partitionId !== partition) {
+      throw new PartitionViewError(
+        'topology',
+        `Partition view is for partition ${this.partitionId}, expected ${partition}.`,
+      );
+    }
+    const order = PartitionView.canonicalShardOrder(this.scheme);
+    if (policy.scheme) {
+      const pinned = PartitionView.canonicalShardOrder(policy.scheme);
+      if (pinned.length !== order.length || pinned.some((id, i) => !id.equals(order[i]))) {
+        throw new PartitionViewError('topology', 'Partition view scheme does not match the pinned scheme.');
+      }
+    }
+    const pins = this.resolvePins(policy.shardConfigurationPins);
+    this._leaves.forEach((leaf, i) => {
+      if (!leaf.shardId.equals(order[i])) {
+        throw new PartitionViewError(
+          'topology',
+          `Leaf ${i} is shard "${leaf.shardId.toString()}", expected "${order[i].toString()}".`,
+        );
+      }
+      const pinned = pins.get(leaf.shardId.toString());
+      if (pinned && !areUint8ArraysEqual(pinned, leaf.shardConfigurationHash)) {
+        throw new PartitionViewError(
+          'config_not_admitted',
+          `Shard "${leaf.shardId.toString()}": configuration hash does not match the pinned configuration.`,
+        );
+      }
+    });
+  }
+
   private deriveCertificate(
     leaf: PartitionViewLeaf,
     tree: ShardTree,
@@ -507,6 +525,28 @@ export class PartitionView {
       enclosingUc.unicityTreeCertificate,
       enclosingUc.unicitySeal,
     );
+  }
+
+  /** The pins by shard bit string; unknown shards, duplicates and wrong lengths are errors. */
+  private resolvePins(pins: readonly IShardConfigurationPin[] | undefined): Map<string, Uint8Array> {
+    const resolved = new Map<string, Uint8Array>();
+    for (const pin of pins ?? []) {
+      const key = pin.shard.toString();
+      if (pin.hash.length !== HASH_LENGTH) {
+        throw new PartitionViewError(
+          'bounds',
+          `Pinned configuration hash of shard "${key}" must be ${HASH_LENGTH} bytes, got ${pin.hash.length}.`,
+        );
+      }
+      if (resolved.has(key)) {
+        throw new PartitionViewError('topology', `Shard "${key}" is pinned more than once.`);
+      }
+      if (!this._leaves.some((leaf) => leaf.shardId.equals(pin.shard))) {
+        throw new PartitionViewError('topology', `Pinned shard "${key}" is not a shard of the view.`);
+      }
+      resolved.set(key, pin.hash);
+    }
+    return resolved;
   }
 }
 

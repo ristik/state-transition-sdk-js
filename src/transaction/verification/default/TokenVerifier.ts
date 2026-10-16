@@ -1,9 +1,9 @@
+import { beginOperationContext } from '../../../internal/OperationContext.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import type { Token } from '../../Token.js';
 import { ITokenVerifier } from '../ITokenVerifier.js';
 import { IVerificationContext } from '../IVerificationContext.js';
-import { beginOperationContext } from '../OperationContext.js';
 import { CertifiedMintTransactionVerificationRule } from '../rule/CertifiedMintTransactionVerificationRule.js';
 import { CertifiedTransferTransactionVerificationRule } from '../rule/CertifiedTransferTransactionVerificationRule.js';
 

@@ -1,10 +1,8 @@
-import { ITokenVerifier } from '../ITokenVerifier.js';
-import { IVerificationContext } from '../IVerificationContext.js';
-import { beginOperationContext } from '../OperationContext.js';
 import { IWorker } from './IWorker.js';
 import { RootTrustBase } from '../../../api/bft/RootTrustBase.js';
 import { UnicityCertificateVerifier } from '../../../api/bft/verification/UnicityCertificateVerifier.js';
 import { DataHash } from '../../../crypto/hash/DataHash.js';
+import { beginOperationContext } from '../../../internal/OperationContext.js';
 import { EncodedPredicate } from '../../../predicate/EncodedPredicate.js';
 import { PredicateVerifierService } from '../../../predicate/verification/PredicateVerifierService.js';
 import { CborDeserializer } from '../../../serialization/cbor/CborDeserializer.js';
@@ -13,6 +11,8 @@ import { VerificationResult } from '../../../verification/VerificationResult.js'
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { CertifiedTransferTransaction } from '../../CertifiedTransferTransaction.js';
 import type { Token } from '../../Token.js';
+import { ITokenVerifier } from '../ITokenVerifier.js';
+import { IVerificationContext } from '../IVerificationContext.js';
 import { CertifiedMintTransactionVerificationRule } from '../rule/CertifiedMintTransactionVerificationRule.js';
 import { CertifiedTransferTransactionVerificationRule } from '../rule/CertifiedTransferTransactionVerificationRule.js';
 
