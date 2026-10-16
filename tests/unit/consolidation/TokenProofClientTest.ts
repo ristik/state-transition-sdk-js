@@ -4,10 +4,13 @@ import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../src/api/bft/UnicitySeal.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
+import { CertificationData } from '../../../src/api/CertificationData.js';
 import { CertificationResponse } from '../../../src/api/CertificationResponse.js';
 import { InclusionProofBatch } from '../../../src/api/IBatchAggregatorClient.js';
 import { InclusionProof } from '../../../src/api/InclusionProof.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
+import { IRequestOptions } from '../../../src/api/IRequestOptions.js';
+import { StateId } from '../../../src/api/StateId.js';
 import { ConsolidationError } from '../../../src/consolidation/ConsolidationError.js';
 import { ConsolidationResult } from '../../../src/consolidation/ConsolidationResult.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
@@ -25,7 +28,6 @@ jest.setTimeout(120_000);
 function routingOf(s: IScenario): ShardRouting {
   return new ShardRouting({
     endpoints: s.world.bits.map((b) => ({ client: s.world.client(b), shard: shardIdFromBits(b) })),
-    networkId: s.world.network,
     partitionId: WORLD_PARTITION,
     scheme: s.world.scheme,
   });
@@ -262,12 +264,6 @@ describe('TokenProofClient', () => {
         'limit_exceeded',
         false,
       ],
-      [
-        'withheld partition view',
-        (s): void => void s.world.faults.set('', { withholdView: true }),
-        'partition_view_unavailable',
-        true,
-      ],
       ['publication lag', (s): void => void s.world.faults.set('', { lag: 1 }), 'pending_publication', true],
     ];
 
@@ -310,30 +306,49 @@ describe('TokenProofClient', () => {
       expect(result.reason).toEqual('target_not_retained');
     });
 
-    it('does not emulate a missing batch capability, and makes no request', async () => {
+    it('refuses an endpoint without the batch capability when the routing is built, naming the shard', async () => {
       const s = await scenario(1);
-      const token = await spanning(s, 3, 1);
-      s.world.requests.length = 0;
-      const routing = new ShardRouting({
-        endpoints: s.world.bits.map((b) => {
-          const full = s.world.client(b);
-          // a custom transport that only has the required methods
-          return {
-            client: {
-              getInclusionProof: (id, o): Promise<InclusionProofResponse> => full.getInclusionProof(id, o),
-              submitCertificationRequest: (d): Promise<CertificationResponse> => full.submitCertificationRequest(d),
-            },
-            shard: shardIdFromBits(b),
-          };
-        }),
-        partitionId: WORLD_PARTITION,
-        scheme: s.world.scheme,
+      for (const bits of s.world.bits) {
+        const full = s.world.client(bits);
+        // a custom transport that only has the required methods
+        const plain = {
+          getInclusionProof: (id: StateId, o?: IRequestOptions): Promise<InclusionProofResponse> =>
+            full.getInclusionProof(id, o),
+          submitCertificationRequest: (d: CertificationData): Promise<CertificationResponse> =>
+            full.submitCertificationRequest(d),
+        };
+        let error: unknown;
+        try {
+          new ShardRouting({
+            endpoints: [
+              { client: plain as never, shard: shardIdFromBits(bits) },
+              ...s.world.bits
+                .filter((b) => b !== bits)
+                .map((b) => ({ client: s.world.client(b), shard: shardIdFromBits(b) })),
+            ],
+            partitionId: WORLD_PARTITION,
+            scheme: s.world.scheme,
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(error).toBeInstanceOf(ConsolidationError);
+        expect(error).toMatchObject({ kind: 'input' });
+        expect((error as ConsolidationError).message).toContain(`shard "${bits}"`);
+      }
+      expect(() => ShardRouting.single({} as never, WORLD_PARTITION)).toThrow(ConsolidationError);
+    });
+
+    it('reports what the service says when a shard has no such method: unsupported_capability', async () => {
+      const s = await scenario(0);
+      const token = await s.history(2);
+      s.world.faults.set('', {
+        failBatch: [
+          new BatchProofError('unsupported', 'Method not found', { code: -32601, detail: 'method_not_found' }),
+        ],
       });
-      const result = unavailable(
-        await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token),
-      );
+      const result = unavailable(await clientOf(s).consolidate(token));
       expect(result.reason).toEqual('unsupported_capability');
-      expect(s.world.requests).toHaveLength(0);
     });
   });
 
@@ -373,17 +388,6 @@ describe('TokenProofClient', () => {
       expect(s.world.requests).toHaveLength(0);
     });
 
-    it('refuses a routing for another network than the trust base', async () => {
-      const s = await scenario(0);
-      const routing = new ShardRouting({
-        endpoints: [{ client: s.world.client(''), shard: shardIdFromBits('') }],
-        networkId: (await import('../../../src/api/NetworkId.js')).NetworkId.MAINNET,
-        partitionId: WORLD_PARTITION,
-        scheme: [],
-      });
-      expect(() => new TokenProofClient({ routing, verificationContext: s.context })).toThrow(ConsolidationError);
-    });
-
     it('refuses a master that does not take part', async () => {
       const s = await scenario(1);
       const token = await spanning(s, 1, 1);
@@ -391,7 +395,11 @@ describe('TokenProofClient', () => {
       if (shardsOf(token).has(missing)) {
         return;
       }
-      await expectError(clientOf(s).consolidate(token, { master: shardIdFromBits(missing) }), 'input', 'invalid_input');
+      await expectError(
+        clientOf(s).consolidate(token, { advanced: { master: shardIdFromBits(missing) } }),
+        'input',
+        'invalid_input',
+      );
     });
   });
 

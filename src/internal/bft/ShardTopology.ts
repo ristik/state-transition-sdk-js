@@ -1,8 +1,8 @@
-import { PartitionViewError } from './PartitionViewError.js';
-import { ShardId } from './ShardId.js';
+import { PartitionViewError } from '../../api/bft/PartitionViewError.js';
+import { ShardId } from '../../api/bft/ShardId.js';
 
 /** The single shard of an unsharded partition: the empty shard id, native encoding `80`. */
-export const SINGLE_SHARD = ShardId.decode(new Uint8Array([0x80]));
+export const SINGLE_SHARD = ShardId.ROOT;
 
 /**
  * Hardware-independent work counter of a topology validation.

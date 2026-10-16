@@ -11,6 +11,8 @@ import { InclusionProof } from '../../InclusionProof.js';
 import { RootTrustBase } from '../RootTrustBase.js';
 import { UnicityCertificate } from '../UnicityCertificate.js';
 
+const OPERATION_CAPABILITY = Symbol('beginOperation');
+
 /**
  * Result of a {@link UnicityCertificateVerifier} run.
  */
@@ -96,7 +98,7 @@ export class UnicityCertificateVerifier {
     ) {
       return this;
     }
-    return new OperationUnicityCertificateVerifier(this.quorumSignaturesRule, session);
+    return new OperationUnicityCertificateVerifier(OPERATION_CAPABILITY, this.quorumSignaturesRule, session);
   }
 
   /**
@@ -165,11 +167,22 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
   private readonly sessions = new Map<RootTrustBase, SealVerificationSession>();
 
   /**
+   * Not constructible by applications: obtain it with {@link UnicityCertificateVerifier.beginOperation}, so that an
+   * operation always starts from the caller's own verifier and rule.
+   *
+   * @param {symbol} capability Module private capability.
    * @param {UnicitySealQuorumSignaturesVerificationRule} rule Quorum rule of the verifier this operation began from.
    * @param {SealVerificationSession} [session] Session to adopt for its trust base.
    */
-  public constructor(rule: UnicitySealQuorumSignaturesVerificationRule, session?: SealVerificationSession) {
+  public constructor(
+    capability: symbol,
+    rule: UnicitySealQuorumSignaturesVerificationRule,
+    session?: SealVerificationSession,
+  ) {
     super(rule);
+    if (capability !== OPERATION_CAPABILITY) {
+      throw new TypeError('An operation verifier is obtained with UnicityCertificateVerifier.beginOperation().');
+    }
     if (session) {
       this.sessions.set(session.sourceTrustBase, session);
     }
@@ -228,7 +241,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
       return UnicityCertificateVerificationResult.fail(results);
     }
 
-    result = await this.session(trustBase).verifyQuorum(certificate.unicitySeal);
+    result = await this.session(trustBase).verifyQuorumSignaturesOnly(certificate.unicitySeal);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
       return UnicityCertificateVerificationResult.fail(results);

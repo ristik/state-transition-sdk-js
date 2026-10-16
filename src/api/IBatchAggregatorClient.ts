@@ -5,13 +5,16 @@ import { IRequestOptions } from './IRequestOptions.js';
 import { StateId } from './StateId.js';
 import { DataHash } from '../crypto/hash/DataHash.js';
 
+/** Most state ids of one `get_inclusion_proofs.v1` call. */
+export const BATCH_MAX_STATE_IDS = 256;
+
 /**
  * Options of {@link IBatchAggregatorClient.getInclusionProofs}.
  */
 export interface IBatchRequestOptions extends IRequestOptions {
   /**
-   * Exact state root (the `InputRecord.hash` of the target unicity certificate). Omitted means the latest finalized
-   * view. An exact root is never replaced by the latest one.
+   * Exact state root (the `InputRecord.hash` of the target unicity certificate), a SHA-256 hash. Omitted means the
+   * latest finalized view. An exact root is never replaced by the latest one.
    */
   readonly stateRoot?: DataHash;
 }
@@ -66,8 +69,11 @@ export class InclusionProofBatch {
  */
 export interface IBatchAggregatorClient extends IAggregatorClient {
   /**
-   * `get_inclusion_proofs.v1`: 1..256 distinct state ids, all routed to this shard, answered atomically from one
-   * finalized view or not at all.
+   * `get_inclusion_proofs.v1`: 1..{@link BATCH_MAX_STATE_IDS} distinct state ids, all routed to this shard, answered
+   * atomically from one finalized view or not at all.
+   *
+   * Implementations should honour `options.signal`, but callers (the consolidation) do not rely on it: they race every
+   * request against their deadline, so a transport that ignores the signal cannot hang an attempt.
    *
    * @param {StateId[]} stateIds State ids to prove.
    * @param {IBatchRequestOptions} [options] Optional exact root and abort signal.

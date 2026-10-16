@@ -1,6 +1,6 @@
-import { snapshotPartitionViewMetrics } from '../../../src/api/bft/PartitionViewMetrics.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
+import { snapshotPartitionViewMetrics } from '../../../src/internal/bft/PartitionViewMetrics.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { scenario } from '../../utils/ConsolidationScenario.js';
 import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';

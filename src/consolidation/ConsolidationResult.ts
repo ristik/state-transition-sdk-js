@@ -1,3 +1,4 @@
+import type { ShardId } from '../api/bft/ShardId.js';
 import type { Token } from '../transaction/Token.js';
 
 /**
@@ -48,8 +49,8 @@ export interface IProofSummary {
   readonly evidenceQuorumChecks: number;
   /** Root chain round of the master seal. */
   readonly masterRound: bigint;
-  /** Bit string of the master shard. */
-  readonly masterShard: string;
+  /** The master shard. */
+  readonly masterShard: ShardId;
   /** Distinct complete seals among the original outer proofs. */
   readonly originalSeals: number;
   /** Number of replaceable proofs in the outer history (genesis and every transfer). */

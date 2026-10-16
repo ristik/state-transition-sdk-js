@@ -1,6 +1,5 @@
 import { InputRecord } from '../../../src/api/bft/InputRecord.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
-import { authorityIdentityBuildCount } from '../../../src/api/bft/verification/authorityIdentity.js';
 import { UnicitySealHashMatchesWithRootHashRule } from '../../../src/api/bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import {
@@ -11,6 +10,7 @@ import { InclusionProof } from '../../../src/api/InclusionProof.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
+import { authorityIdentityBuildCount } from '../../../src/internal/bft/authorityIdentity.js';
 import { CborDeserializer } from '../../../src/serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { Token } from '../../../src/transaction/Token.js';

@@ -44,7 +44,10 @@ export class InputRecord {
   }
 
   /**
-   * Get the hash. Empty when the native record carries CBOR null (initial state), see {@link nullableHash}.
+   * Get the hash. Empty when the native record carries CBOR null (initial state), so an empty result is NOT a hash and
+   * two records with null hashes must never be treated as equal roots.
+   *
+   * @deprecated Use {@link InputRecord.nullableHash}, which tells null from a value.
    */
   public get hash(): Uint8Array {
     return new Uint8Array(this._hash ?? new Uint8Array(0));
@@ -73,6 +76,8 @@ export class InputRecord {
 
   /**
    * Get the summary value. Empty when the native record carries CBOR null, see {@link nullableSummaryValue}.
+   *
+   * @deprecated Use {@link InputRecord.nullableSummaryValue}, which tells null from a value.
    */
   public get summaryValue(): Uint8Array {
     return new Uint8Array(this._summaryValue ?? new Uint8Array(0));

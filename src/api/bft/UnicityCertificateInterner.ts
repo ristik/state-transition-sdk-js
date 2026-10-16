@@ -34,7 +34,7 @@ export class UnicityCertificateInterner {
     private readonly maxEntries: number = 64,
   ) {
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
-      throw new Error('UnicityCertificateInterner maxEntries must be a positive integer');
+      throw new RangeError('UnicityCertificateInterner maxEntries must be a positive integer');
     }
   }
 
