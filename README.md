@@ -115,28 +115,55 @@ if (result.status !== VerificationStatus.OK) {
 
 ### Proof status hints (pending / expired / unknown)
 
-When asked with `getInclusionProof(stateId, { includeStatus: true })`, an aggregator that supports it answers `{ proof, status }`
-with `status` one of `included`, `pending`, `expired`, `unknown`; `proof` is the unchanged result and `response.status` carries
-the hint (`null` for a server that sends a plain string, which is the legacy behavior, or for a value this SDK does not know).
-Without the option the request and the result are exactly as before. `waitInclusionProof` asks for the hint: `pending` keeps
-waiting at the poll interval, `expired` fails at once with `InclusionProofExpiredError`, and `unknown` fails with
-`InclusionProofUnknownError` once it has persisted for a grace period (default two intervals, `unknownGraceMs` in the last
-argument), because a wait that starts right after submission can hit an HA instance that has not seen the request yet. After
-either error the same signed request may be submitted again. Resubmitting a request that is still pending never creates a
-second leaf. The Mongo backed queue rejects the copy with a duplicate key error on the **state id** (a Redis backed one accepts
-and drops it), which only says that *a* request for this state id is queued, not that it is yours: a different transaction for
-the same state is rejected the same way, and the queued one is certified. `submitCertificationRequest` therefore returns the
-SDK-classified status `STATE_ID_QUEUED` for that error (instead of throwing) with `isAccepted === false`: wait for the proof and
-compare. `waitInclusionProof` throws `InclusionProofConflictError` (still an `Error` with the legacy message text) when the
-proof served for the state certifies another request; that proof is not yet authenticated at that point. `ALREADY_SUBMITTED`
-(`isAccepted === true`) is only taken from a server that has compared the queued request with yours; the SDK never infers it.
-Other errors, including other internal errors, still throw. Consolidation reports the batch details `state_pending`
-(retryable), `state_expired`, `state_unknown` and `state_not_in_root` (not retryable) as the `unavailable` reasons of the same
-names, with `proofIndexes` naming the outer proofs concerned when the service sent request indexes.
+An aggregator can tell, next to an empty proof, what it knows about the request. Ask with
+`getInclusionProof(stateId, { includeStatusHint: true })` (the wire parameter is `includeStatus`): an aggregator that supports it
+answers `{ proof, status }`, `proof` is the unchanged result and `response.statusHint` carries the hint (`included`, `pending`,
+`expired` or `unknown`; `null` for a server that sends a plain string, which is the legacy behavior, or for a value this SDK does
+not know). Without the option the request and the result are exactly as before.
 
-**The status is an unauthenticated hint.** It is not signed, not part of any proof, and never changes how a proof, token or
-transaction is verified (a proof that is present is verified whatever the status says). `unknown` or `expired` is **not** a
-proof of absence and must never be used to conclude that a state is unspent.
+**A hint is not a verdict and not evidence.** It is unauthenticated: not signed, not part of any proof, and it never changes how
+a proof, token or transaction is verified (a proof that is present is verified whatever the hint says). `unknown` or `expired`
+is **not** a proof of absence and must never be used to conclude that a state is unspent. That is why every identifier says
+*hint*, and why `response.status` does not exist (`CertificationResponse.status` is the authoritative result of a call).
+
+`waitInclusionProof(client, trustBase, predicateVerifier, certificateVerifier, transaction, options?)` asks for the hint
+(`{ signal, intervalMs, statusHints, unknownGraceMs }`; the positional `(signal, interval)` form of 3.0 still works and
+behaves exactly as in 3.0). `pending` keeps waiting. `expired` fails at once with `InclusionProofExpiredError` and `unknown`
+fails with `InclusionProofUnknownError` once it has persisted for a grace period (default two intervals), because a wait that
+starts right after submission can reach an HA instance that has not seen the request yet. Pass `statusHints: false` to get the
+3.0 behavior exactly (the wait ends with a proof, an error or the signal, and no hint is requested or acted on).
+
+All waiting errors extend `InclusionProofWaitError` (`code`: `expired` | `unknown` | `conflict`, `resubmittable`, `stateId`);
+the hint-driven ones also extend `InclusionProofStatusError` with the literal `status`. After `expired` or `unknown` the same
+signed request may be submitted again. Resubmitting a request that is still pending never creates a second leaf. The Mongo
+backed queue rejects the copy with a duplicate key error on the **state id** (a Redis backed one accepts and drops it), which
+only says that *a* request for this state id is queued, not that it is yours: a different transaction for the same state is
+rejected the same way, and the queued one is certified. `submitCertificationRequest` therefore returns the SDK-classified status
+`STATE_ID_QUEUED` for that error (a heuristic match on the server's error text for the `stateId` index) with `isAccepted ===
+false`: wait for the proof and compare. `waitInclusionProof` throws `InclusionProofConflictError` (`resubmittable === false`,
+still an `Error` with the legacy message text) when the proof served for the state certifies another request; that proof is
+`unverifiedInclusionProof`, not yet authenticated. `ALREADY_SUBMITTED` (`isAccepted === true`) is only taken from a server that
+has compared the queued request with yours; the SDK never infers it. Other errors, including other internal errors, still throw.
+
+**What to do with a consolidation reason** (`ConsolidationResult` with `status: 'unavailable'`):
+
+| reason | meaning | action |
+|---|---|---|
+| `pending_publication` | the master view is behind the token's proofs, or no finalized view yet | retry later (`retryable`) |
+| `state_pending` | a shard accepted a request of the token and has not certified it | retry later (`retryable`) |
+| `state_expired` | a shard dropped a request of the token before inclusion | do not retry; resubmit the request if it is yours |
+| `state_unknown` | a shard does not know a request of the token (misrouted, lost, restarted, other instance) | do not retry blindly; check routing and the endpoint; hints are not evidence |
+| `state_not_in_root` | the state is not a leaf of the root the master view commits to | do not retry; routing or input problem |
+| `target_not_retained`, `busy`, `partition_view_unavailable` | the service cannot serve this attempt now | retry a new attempt later (`retryable` as sent) |
+| `unsupported_capability`, `unsupported_configuration`, `limit_exceeded` | the endpoint or the token cannot use this API | do not retry |
+
+Note that `unknown` is a transient answer for a *wait right after submission* (grace period) but not for consolidation, where
+the original proofs already exist.
+
+**Upgrading notes (new in this release line):** `waitInclusionProof` can now reject earlier with `InclusionProofExpiredError` /
+`InclusionProofUnknownError` (opt out with `statusHints: false`), `CertificationStatus` has two more members
+(`STATE_ID_QUEUED`, `ALREADY_SUBMITTED`: exhaustive `switch` statements over it need a case) and `submitCertificationRequest`
+returns `STATE_ID_QUEUED` where it used to throw on that duplicate key error.
 
 ### Prepare a token for EVM or zkVM verification
 

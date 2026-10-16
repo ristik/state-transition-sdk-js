@@ -17,8 +17,8 @@ export interface IInclusionProofRequestOptions extends IRequestOptions {
   /**
    * Ask the aggregator for its status hint (`included` / `pending` / `expired` / `unknown`) next to the proof. Opt-in:
    * without it the request and the result are exactly what they always were. A server without the feature ignores
-   * the flag and answers as before, which is the legacy behavior (no status). The status is an **unauthenticated
-   * hint**, see {@link ProofStatus}.
+   * the flag (the wire parameter is called `includeStatus`) and answers as before, which is the legacy behavior (no
+   * hint). The hint is **unauthenticated**, see {@link ProofStatusHint}.
    */
-  readonly includeStatus?: boolean;
+  readonly includeStatusHint?: boolean;
 }

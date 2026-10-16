@@ -7,7 +7,7 @@ import {
   InclusionProofUnknownError,
 } from '../../../src/api/InclusionProofStatusError.js';
 import { IInclusionProofRequestOptions } from '../../../src/api/IRequestOptions.js';
-import { ProofStatus } from '../../../src/api/ProofStatus.js';
+import { ProofStatusHint } from '../../../src/api/ProofStatusHint.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { SigningService } from '../../../src/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '../../../src/predicate/builtin/SignaturePredicate.js';
@@ -78,30 +78,25 @@ describe('proof status hints in waitInclusionProof', () => {
     transaction: MintTransaction,
     signal: AbortSignal,
     interval = 5,
-    options?: { unknownGraceMs?: number },
+    options?: { statusHints?: boolean; unknownGraceMs?: number },
   ): ReturnType<typeof waitInclusionProof> =>
-    waitInclusionProof(
-      new StateTransitionClient(client),
-      world.trustBase,
-      predicateVerifier,
-      verifier,
-      transaction,
+    waitInclusionProof(new StateTransitionClient(client), world.trustBase, predicateVerifier, verifier, transaction, {
+      intervalMs: interval,
       signal,
-      interval,
-      options,
-    );
+      ...options,
+    });
 
   const hint =
-    (status: ProofStatus | null): Script =>
+    (status: ProofStatusHint | null): Script =>
     (_call, real) =>
-      real().then((r) => r.withStatus(status));
+      real().then((r) => r.withStatusHint(status));
 
   it('asks for the status hint on every poll', async () => {
     const { certify, transaction, world } = await setup();
     await certify();
     const client = new Scripted(world.client(''), hint('included'));
     await wait(world, client, transaction, AbortSignal.timeout(5000));
-    expect(client.options.every((o) => o?.includeStatus === true && o.signal instanceof AbortSignal)).toBe(true);
+    expect(client.options.every((o) => o?.includeStatusHint === true && o.signal instanceof AbortSignal)).toBe(true);
   });
 
   it('keeps waiting while the status is pending and returns the verified proof once it exists', async () => {
@@ -110,7 +105,7 @@ describe('proof status hints in waitInclusionProof', () => {
       if (call === 4) {
         await certify();
       }
-      return real().then((r) => r.withStatus(call < 4 ? 'pending' : 'included'));
+      return real().then((r) => r.withStatusHint(call < 4 ? 'pending' : 'included'));
     });
     const proof = await wait(world, client, transaction, AbortSignal.timeout(5000));
     expect(client.calls).toEqual(4);
@@ -146,7 +141,7 @@ describe('proof status hints in waitInclusionProof', () => {
       if (call === 3) {
         await certify();
       }
-      return real().then((r) => r.withStatus(call < 3 ? 'unknown' : 'included'));
+      return real().then((r) => r.withStatusHint(call < 3 ? 'unknown' : 'included'));
     });
     await wait(world, client, transaction, AbortSignal.timeout(5000), 5, { unknownGraceMs: 200 });
     expect(client.calls).toEqual(3);
@@ -163,7 +158,7 @@ describe('proof status hints in waitInclusionProof', () => {
 
   it('behaves as before without a status, and for a status it does not know', async () => {
     const { transaction, world } = await setup();
-    for (const status of [null, 'future-status' as unknown as ProofStatus]) {
+    for (const status of [null, 'future-status' as unknown as ProofStatusHint]) {
       const client = new Scripted(world.client(''), hint(status));
       await expect(wait(world, client, transaction, AbortSignal.timeout(120))).rejects.toThrow(SleepError);
       expect(client.calls).toBeGreaterThan(2);
@@ -194,7 +189,7 @@ describe('proof status hints in waitInclusionProof', () => {
       if (call === 2) {
         controller.abort(new Error('deadline'));
       }
-      return real().then((r) => r.withStatus('pending'));
+      return real().then((r) => r.withStatusHint('pending'));
     });
     await expect(wait(world, client, transaction, controller.signal)).rejects.toThrow(SleepError);
   });
@@ -221,7 +216,7 @@ describe('proof status hints in waitInclusionProof', () => {
     expect((error as Error).message).toContain('Invalid inclusion proof status: TRANSACTION_HASH_MISMATCH');
     // the proof is carried (certifying the first request) but it has not been authenticated yet
     expect(
-      (error as InclusionProofConflictError).inclusionProof.certificationData.transactionHash.equals(
+      (error as InclusionProofConflictError).unverifiedInclusionProof.certificationData.transactionHash.equals(
         await first.calculateTransactionHash(),
       ),
     ).toBe(true);

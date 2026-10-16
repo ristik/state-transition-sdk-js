@@ -42,7 +42,7 @@ export class BatchProofError extends Error {
       readonly code?: number;
       readonly detail?: string;
       readonly indexes?: readonly number[];
-      readonly indexesByClass?: Readonly<Record<string, readonly number[]>>;
+      readonly indexesByClass?: BatchIndexesByClass;
       readonly retryable?: boolean;
     } = {},
   ) {
@@ -72,13 +72,23 @@ export class BatchProofError extends Error {
   }
 
   /**
-   * @returns {Record<string, number[]>|undefined} The offending request positions of every class the service reported
-   *   (`pending`, `expired`, `unknown`, or `not_in_root`). A mixed outcome is reported under its most severe class
-   *   (`unknown` over `expired` over `pending`) in {@link BatchProofError.detail}, the others are still listed here.
+   * @returns {BatchIndexesByClass|undefined} The offending request positions of every class the service reported. A
+   *   mixed outcome is reported under its most severe class (`unknown` over `expired` over `pending`) in
+   *   {@link BatchProofError.detail}, the others are still listed here. Copies.
    */
-  public get indexesByClass(): Record<string, number[]> | undefined {
+  public get indexesByClass(): { -readonly [K in BatchIndexClass]?: number[] } | undefined {
     const classes = this.info.indexesByClass;
-    return classes ? Object.fromEntries(Object.entries(classes).map(([k, v]) => [k, v.slice()])) : undefined;
+    if (!classes) {
+      return undefined;
+    }
+    const copy: { -readonly [K in BatchIndexClass]?: number[] } = {};
+    for (const klass of BATCH_INDEX_CLASSES) {
+      const list = classes[klass];
+      if (list) {
+        copy[klass] = list.slice();
+      }
+    }
+    return copy;
   }
 
   /**
@@ -88,6 +98,15 @@ export class BatchProofError extends Error {
     return this.info.retryable ?? false;
   }
 }
+
+/**
+ * The classes of offending request positions a state status error can list.
+ */
+export const BATCH_INDEX_CLASSES = ['expired', 'not_in_root', 'pending', 'unknown'] as const;
+
+export type BatchIndexClass = (typeof BATCH_INDEX_CLASSES)[number];
+
+export type BatchIndexesByClass = { readonly [K in BatchIndexClass]?: readonly number[] };
 
 /**
  * Details of the state status errors of `get_inclusion_proofs.v1` (`proof_unavailable`). Like the single proof status

@@ -13,7 +13,7 @@ export interface IAggregatorClient {
    *
    * @param {StateId} stateId State identifier to query.
    * @param {IInclusionProofRequestOptions} options Optional per-request options, e.g. an abort signal, or
-   *   `includeStatus` to receive the aggregator's (unauthenticated) status hint in `InclusionProofResponse.status`.
+   *   `includeStatusHint` to receive the aggregator's unauthenticated hint in `InclusionProofResponse.statusHint`.
    * @returns {Promise<InclusionProofResponse>} Inclusion proof response from the aggregator.
    */
   getInclusionProof(stateId: StateId, options?: IInclusionProofRequestOptions): Promise<InclusionProofResponse>;

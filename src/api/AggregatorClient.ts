@@ -1,4 +1,10 @@
-import { BatchProofError, isBatchStateDetail } from './BatchProofError.js';
+import {
+  BATCH_INDEX_CLASSES,
+  BatchIndexClass,
+  BatchIndexesByClass,
+  BatchProofError,
+  isBatchStateDetail,
+} from './BatchProofError.js';
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
@@ -12,7 +18,7 @@ import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
-import { parseProofStatus } from './ProofStatus.js';
+import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
 import { HexConverter } from '../util/HexConverter.js';
 
@@ -111,8 +117,11 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     if (!(e instanceof JsonRpcDataError) || e.code !== -32603) {
       return false;
     }
+    // Heuristic: free text of a server internal error. Only a duplicate on the state id index counts (the Mongo error
+    // names the index, `index: stateId_1`); a duplicate on any other index is a real failure. A structured server
+    // status replaces this once there is one.
     const text = `${e.message} ${typeof e.data === 'string' ? e.data : ''}`;
-    return /E11000|duplicate key/i.test(text);
+    return /E11000|duplicate key/i.test(text) && /index:\s*stateId_/i.test(text);
   }
 
   /**
@@ -120,21 +129,22 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
    * (`{"pending":[0],"expired":[2],"unknown":[3]}`, `{"not_in_root":[...]}` for an exact root). Malformed lists are
    * ignored, never trusted for control flow.
    */
-  private static offendingIndexes(data: Record<string, unknown>): Record<string, number[]> | undefined {
+  private static offendingIndexes(data: Record<string, unknown>): BatchIndexesByClass | undefined {
     const raw = data.indexes;
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       return undefined;
     }
-    const classes: Record<string, number[]> = {};
+    const classes: { -readonly [K in BatchIndexClass]?: number[] } = {};
     let total = 0;
     for (const [klass, list] of Object.entries(raw)) {
-      if (!Array.isArray(list)) {
+      // an unknown class name is dropped, not kept under a free string
+      if (!Array.isArray(list) || !(BATCH_INDEX_CLASSES as readonly string[]).includes(klass)) {
         continue;
       }
       const valid = list.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
       total += list.length;
       if (valid.length === list.length && total <= AggregatorClient.BATCH_MAX_STATE_IDS) {
-        classes[klass] = valid;
+        classes[klass as BatchIndexClass] = valid;
       }
     }
     return Object.keys(classes).length > 0 ? classes : undefined;
@@ -180,9 +190,9 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
   private static stateIndexes(
     data: Record<string, unknown>,
     detail: string,
-  ): { indexes?: number[]; indexesByClass?: Record<string, number[]> } {
+  ): { indexes?: readonly number[]; indexesByClass?: BatchIndexesByClass } {
     const indexesByClass = AggregatorClient.offendingIndexes(data);
-    const own = indexesByClass?.[detail.replace(/^state_/, '')];
+    const own = indexesByClass?.[detail.replace(/^state_/, '') as BatchIndexClass];
     return { ...(indexesByClass ? { indexesByClass } : {}), ...(own ? { indexes: own } : {}) };
   }
 
@@ -194,7 +204,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     options?: IInclusionProofRequestOptions,
   ): Promise<InclusionProofResponse> {
     const data: { includeStatus?: true; stateId: string } = { stateId: HexConverter.encode(stateId.data) };
-    if (options?.includeStatus === true) {
+    if (options?.includeStatusHint === true) {
       data.includeStatus = true;
     }
     const result = await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options);
@@ -208,7 +218,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
     const { proof, status } = result as { proof: string; status?: unknown };
     // an unrecognized status value is treated like no status at all
-    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatus(parseProofStatus(status));
+    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatusHint(parseProofStatusHint(status));
   }
 
   /**

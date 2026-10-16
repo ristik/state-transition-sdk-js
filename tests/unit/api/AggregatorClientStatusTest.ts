@@ -3,7 +3,7 @@ import { BatchProofError } from '../../../src/api/BatchProofError.js';
 import { CertificationData } from '../../../src/api/CertificationData.js';
 import { CertificationResponse, CertificationStatus } from '../../../src/api/CertificationResponse.js';
 import { JsonRpcResponseError } from '../../../src/api/json-rpc/JsonRpcResponseError.js';
-import { ProofStatus, parseProofStatus } from '../../../src/api/ProofStatus.js';
+import { ProofStatusHint, parseProofStatusHint } from '../../../src/api/ProofStatusHint.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { ProofUnavailableReason } from '../../../src/consolidation/ConsolidationResult.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
@@ -49,31 +49,31 @@ describe('get_inclusion_proof.v2 status hint', () => {
     expect(Object.keys(sent(spy).params)).toEqual(['stateId']);
 
     spy.mockClear();
-    await client.getInclusionProof(stateId, { includeStatus: false });
+    await client.getInclusionProof(stateId, { includeStatusHint: false });
     expect(Object.keys(sent(spy).params)).toEqual(['stateId']);
 
     spy.mockClear();
-    await client.getInclusionProof(stateId, { includeStatus: true });
+    await client.getInclusionProof(stateId, { includeStatusHint: true });
     expect(sent(spy).method).toEqual('get_inclusion_proof.v2');
     expect(sent(spy).params).toEqual({ includeStatus: true, stateId: HexConverter.encode(stateId.data) });
   });
 
   it('a plain string result is the legacy result: no status, unchanged', async () => {
     respond(await emptyProofHex());
-    for (const options of [undefined, { includeStatus: true }]) {
+    for (const options of [undefined, { includeStatusHint: true }]) {
       const response = await client.getInclusionProof(stateId, options);
-      expect(response.status).toBeNull();
+      expect(response.statusHint).toBeNull();
       expect(response.inclusionProof).toBeNull();
     }
   });
 
-  it.each(['included', 'pending', 'expired', 'unknown'] as ProofStatus[])(
+  it.each(['included', 'pending', 'expired', 'unknown'] as ProofStatusHint[])(
     'accepts the object result with status %s, the proof byte-identical to the legacy one',
     async (status) => {
       const proof = await emptyProofHex();
       respond({ proof, status });
-      const response = await client.getInclusionProof(stateId, { includeStatus: true });
-      expect(response.status).toEqual(status);
+      const response = await client.getInclusionProof(stateId, { includeStatusHint: true });
+      expect(response.statusHint).toEqual(status);
       expect(HexConverter.encode(response.toCBOR())).toEqual(proof);
     },
   );
@@ -83,8 +83,8 @@ describe('get_inclusion_proof.v2 status hint', () => {
     async (status) => {
       const proof = await emptyProofHex();
       respond({ proof, status });
-      const response = await client.getInclusionProof(stateId, { includeStatus: true });
-      expect(response.status).toBeNull();
+      const response = await client.getInclusionProof(stateId, { includeStatusHint: true });
+      expect(response.statusHint).toBeNull();
       expect(HexConverter.encode(response.toCBOR())).toEqual(proof);
     },
   );
@@ -93,17 +93,19 @@ describe('get_inclusion_proof.v2 status hint', () => {
     'rejects the malformed result %j',
     async (result) => {
       respond(result);
-      await expect(client.getInclusionProof(stateId, { includeStatus: true })).rejects.toThrow(JsonRpcResponseError);
+      await expect(client.getInclusionProof(stateId, { includeStatusHint: true })).rejects.toThrow(
+        JsonRpcResponseError,
+      );
     },
   );
 
   it('keeps the hint out of the wire form and parses only known values', async () => {
     const proof = await emptyProofHex();
     respond({ proof, status: 'pending' });
-    const response = await client.getInclusionProof(stateId, { includeStatus: true });
-    expect(response.withStatus(null).status).toBeNull();
-    expect(response.withStatus('expired').toCBOR()).toEqual(response.toCBOR());
-    expect(['included', 'pending', 'expired', 'unknown', 'x', 3, null].map(parseProofStatus)).toEqual([
+    const response = await client.getInclusionProof(stateId, { includeStatusHint: true });
+    expect(response.withStatusHint(null).statusHint).toBeNull();
+    expect(response.withStatusHint('expired').toCBOR()).toEqual(response.toCBOR());
+    expect(['included', 'pending', 'expired', 'unknown', 'x', 3, null].map(parseProofStatusHint)).toEqual([
       'included',
       'pending',
       'expired',

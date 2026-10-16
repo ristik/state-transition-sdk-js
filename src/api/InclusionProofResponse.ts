@@ -3,7 +3,7 @@ import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js'
 import { CertificationData } from './CertificationData.js';
 import { InclusionCertificate } from './InclusionCertificate.js';
 import { InclusionProof } from './InclusionProof.js';
-import { ProofStatus } from './ProofStatus.js';
+import { ProofStatusHint } from './ProofStatusHint.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../serialization/cbor/CborError.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
@@ -21,18 +21,19 @@ export class InclusionProofResponse {
     public readonly blockNumber: bigint,
     public readonly inclusionProof: InclusionProof | null,
     public readonly unicityCertificate: UnicityCertificate,
-    private readonly _status: ProofStatus | null = null,
+    private readonly _statusHint: ProofStatusHint | null = null,
   ) {}
 
   /**
-   * The aggregator's status hint, present only when the request asked for it (`includeStatus`) and the aggregator
-   * answered with a recognized one; `null` is the legacy behavior. **An unauthenticated hint**: it is not part of the
-   * proof, never changes how a proof is verified, and `unknown` or `expired` is not a proof of absence.
+   * The aggregator's **unauthenticated hint**, present only when the request asked for it (`includeStatusHint`) and the
+   * aggregator answered with a recognized one; `null` is the legacy behavior. It is not a verdict and not evidence: it
+   * is not part of the proof, never changes how a proof is verified, can accompany a missing proof (`included`
+   * without one), and `unknown` or `expired` is not a proof of absence.
    *
-   * @returns {ProofStatus|null} Status hint, or `null`.
+   * @returns {ProofStatusHint|null} Hint, or `null`.
    */
-  public get status(): ProofStatus | null {
-    return this._status;
+  public get statusHint(): ProofStatusHint | null {
+    return this._statusHint;
   }
 
   /**
@@ -135,13 +136,13 @@ export class InclusionProofResponse {
   }
 
   /**
-   * The same response with the aggregator's status hint attached. The hint is not encoded by {@link toCBOR}.
+   * The same response with the aggregator's (unauthenticated) hint attached. The hint is not encoded by {@link toCBOR}.
    *
-   * @param {ProofStatus|null} status Status hint, `null` for none.
+   * @param {ProofStatusHint|null} hint Hint, `null` for none.
    * @returns {InclusionProofResponse} New response.
    */
-  public withStatus(status: ProofStatus | null): InclusionProofResponse {
-    return new InclusionProofResponse(this.blockNumber, this.inclusionProof, this.unicityCertificate, status);
+  public withStatusHint(hint: ProofStatusHint | null): InclusionProofResponse {
+    return new InclusionProofResponse(this.blockNumber, this.inclusionProof, this.unicityCertificate, hint);
   }
 
   /**

@@ -18,7 +18,7 @@ export class StateTransitionClient {
    *
    * @param {StateId} stateId State id whose inclusion proof to retrieve.
    * @param {IInclusionProofRequestOptions} options Optional per-request options, e.g. an abort signal, or
-   *   `includeStatus` for the aggregator's unauthenticated status hint.
+   *   `includeStatusHint` for the aggregator's unauthenticated status hint.
    * @returns {Promise<InclusionProofResponse>} Inclusion proof response from the aggregator.
    */
   public getInclusionProof(stateId: StateId, options?: IInclusionProofRequestOptions): Promise<InclusionProofResponse> {

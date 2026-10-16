@@ -50,20 +50,20 @@ const id = (first: number, second = 0): StateId =>
 
   it('v2: no status without the opt-in (string result), the hint with it', async () => {
     for (const first of [1, 2, 3]) {
-      expect((await client.getInclusionProof(id(first))).status).toBeNull();
+      expect((await client.getInclusionProof(id(first))).statusHint).toBeNull();
     }
-    expect((await client.getInclusionProof(id(1), { includeStatus: true })).status).toEqual('pending');
-    expect((await client.getInclusionProof(id(2), { includeStatus: true })).status).toEqual('expired');
-    expect((await client.getInclusionProof(id(3), { includeStatus: true })).status).toEqual('unknown');
+    expect((await client.getInclusionProof(id(1), { includeStatusHint: true })).statusHint).toEqual('pending');
+    expect((await client.getInclusionProof(id(2), { includeStatusHint: true })).statusHint).toEqual('expired');
+    expect((await client.getInclusionProof(id(3), { includeStatusHint: true })).statusHint).toEqual('unknown');
     // the proof is the same bytes with and without the hint
     const plain = await client.getInclusionProof(id(2));
-    const hinted = await client.getInclusionProof(id(2), { includeStatus: true });
+    const hinted = await client.getInclusionProof(id(2), { includeStatusHint: true });
     expect(hinted.toCBOR()).toEqual(plain.toCBOR());
   });
 
   it('v2: a state with a proof is included even if a stale pending mark exists', async () => {
-    const response = await client.getInclusionProof(id(4), { includeStatus: true });
-    expect(response.status).toEqual('included');
+    const response = await client.getInclusionProof(id(4), { includeStatusHint: true });
+    expect(response.statusHint).toEqual('included');
     expect(response.inclusionProof).not.toBeNull();
   });
 
@@ -122,9 +122,7 @@ const id = (first: number, second = 0): StateId =>
         PredicateVerifierService.create(),
         createUnicityCertificateVerifier(),
         transaction as MintTransaction,
-        signal,
-        50,
-        { unknownGraceMs: grace },
+        { intervalMs: 50, signal, unknownGraceMs: grace },
       );
     };
 
