@@ -309,8 +309,12 @@ await step('HTTP 404 on a proof request keeps polling (legacy unknown answer)', 
   }
 });
 
+// HTTP requests the released client made through the SDK (the proxy steps are counted by the proxy, not here)
+const requestCounts = {};
+for (const r of sent) requestCounts[r.method] = (requestCounts[r.method] ?? 0) + 1;
 const report = {
   aggregator: values.url,
+  requestCounts,
   package: RELEASED,
   steps,
   verdict: steps.every((s) => s.status === 'pass') ? 'pass' : 'fail',
