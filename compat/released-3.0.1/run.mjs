@@ -25,7 +25,9 @@ const { values } = parseArgs({
   },
 });
 if (!values.url || !values['trust-base']) {
-  console.error('usage: node run.mjs --url <aggregator url> --trust-base <trust base json> [--api-key K] [--timeout-ms N] [--report file]');
+  console.error(
+    'usage: node run.mjs --url <aggregator url> --trust-base <trust base json> [--api-key K] [--timeout-ms N] [--report file]',
+  );
   process.exit(2);
 }
 const problems = integrityProblems();
@@ -104,7 +106,7 @@ const wait = (client, tx, signal) =>
 
 /** A proxy to the aggregator that can rewrite the proof answers; records what it saw. */
 async function proxy(rewrite) {
-  const seen = { requests: 0 };
+  const seen = { mutated: 0, requests: 0, upstreamFailures: 0 };
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -117,16 +119,27 @@ async function proxy(rewrite) {
         res.writeHead(answer.status, { 'content-type': 'text/plain' }).end(answer.body ?? 'not found');
         return;
       }
-      const upstream = await realFetch(values.url, {
-        body,
-        headers: { 'content-type': 'application/json', ...(values['api-key'] ? { 'x-api-key': values['api-key'] } : {}) },
-        method: 'POST',
-      });
-      let text = await upstream.text();
-      if (isProof && answer?.mutate) {
-        text = answer.mutate(text);
+      try {
+        const upstream = await realFetch(values.url, {
+          body,
+          headers: {
+            'content-type': 'application/json',
+            'x-compat-proxy': '1',
+            ...(values['api-key'] ? { 'x-api-key': values['api-key'] } : {}),
+          },
+          method: 'POST',
+        });
+        let text = await upstream.text();
+        if (upstream.ok && isProof && answer?.mutate) {
+          const mutated = answer.mutate(text);
+          if (mutated !== text) seen.mutated++;
+          text = mutated;
+        }
+        res.writeHead(upstream.status, { 'content-type': 'application/json' }).end(text);
+      } catch {
+        seen.upstreamFailures++;
+        res.writeHead(502, { 'content-type': 'text/plain' }).end('upstream failure');
       }
-      res.writeHead(upstream.status, { 'content-type': 'application/json' }).end(text);
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
@@ -158,7 +171,7 @@ await step('unknown state: empty answer or HTTP 404, never a proof', async () =>
     if (response.inclusionProof !== null) throw new Error('a proof for a state nobody submitted');
     return { outcome: 'empty_proof' };
   } catch (e) {
-    if (e?.name === 'JsonRpcNetworkError' || e?.status === 404 || e?.code === -32020 || e?.code === -32021) {
+    if ((e?.name === 'JsonRpcNetworkError' && e.status === 404) || e?.code === -32020 || e?.code === -32021) {
       return { outcome: `error ${e.status ?? e.code}` };
     }
     throw e;
@@ -178,6 +191,7 @@ await step('empty-to-included polling with full proof verification', async () =>
   if (!certified) throw new Error('no certified transaction');
   included = proof;
   const polls = sent.slice(before).filter((r) => r.method === 'get_inclusion_proof.v2').length;
+  // `polls === 1` is a server that certified before the first read; the empty answer is evidenced by the first step
   return { polls };
 });
 
@@ -237,18 +251,38 @@ await step('a proof corrupted in transit is rejected, never accepted', async () 
       return JSON.stringify(m);
     },
   };
+  // A rejection only counts when the released client's own decoding or verification refused a proof that really arrived,
+  // mutated by the proxy: not a transport/HTTP error, not the step's own timeout.
   const outcomes = {};
   for (const [name, mutate] of Object.entries(mutations)) {
     const p = await proxy(() => ({ mutate }));
+    let error;
     try {
-      await wait(clientFor(p.url), tx, AbortSignal.timeout(5000));
+      await wait(clientFor(p.url), tx, AbortSignal.timeout(10000));
       throw new Error(`${name}: a corrupted proof was accepted`);
     } catch (e) {
       if (String(e?.message).includes('was accepted')) throw e;
-      outcomes[name] = e?.name ?? 'Error';
+      error = e;
     } finally {
       p.close();
     }
+    if (p.seen.mutated < 1)
+      throw new Error(
+        `${name}: the proxy never delivered a mutated proof (${p.seen.requests} requests, ${p.seen.upstreamFailures} upstream failures)`,
+      );
+    if (
+      error instanceof SleepError ||
+      error?.name === 'JsonRpcNetworkError' ||
+      error?.name === 'JsonRpcError' ||
+      error?.name === 'TypeError'
+    ) {
+      throw new Error(`${name}: rejected by ${error?.name}, not by proof decoding/verification: ${error?.message}`);
+    }
+    outcomes[name] = {
+      error: error?.name ?? 'Error',
+      message: String(error?.message).slice(0, 120),
+      mutated: p.seen.mutated,
+    };
   }
   return outcomes;
 });
@@ -278,5 +312,7 @@ const report = {
   verdict: steps.every((s) => s.status === 'pass') ? 'pass' : 'fail',
 };
 if (values.report) writeFileSync(values.report, `${JSON.stringify(report, null, 2)}\n`);
-console.log(`\n${RELEASED.name}@${RELEASED.version}: ${report.verdict.toUpperCase()} (${steps.filter((s) => s.status === 'pass').length}/${steps.length})`);
+console.log(
+  `\n${RELEASED.name}@${RELEASED.version}: ${report.verdict.toUpperCase()} (${steps.filter((s) => s.status === 'pass').length}/${steps.length})`,
+);
 process.exit(report.verdict === 'pass' ? 0 : 1);
