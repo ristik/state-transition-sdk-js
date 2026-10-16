@@ -68,6 +68,7 @@ describe('waitMs / waitedMs lexical rules', () => {
     for (const [code, data] of [
       [-32602, { detail: 'wrong_shard', reason: 'invalid_request' }],
       [-32602, { detail: 'malformed_params', reason: 'other' }],
+      [-32602, { detail: 'malformed_params', reason: 'invalid_request', waitedMs: 0 }],
       [-32602, undefined],
       [-32602, 'malformed_params'],
       [-32600, { detail: 'malformed_params', reason: 'invalid_request' }],
@@ -294,6 +295,16 @@ describe('get_inclusion_proofs.v1 waitMs', () => {
       const error = await failure(client.getInclusionProofs(ids, { waitMs: 5_000 }));
       expect(sent).toHaveLength(2);
       expect(error).toMatchObject({ code: -32602, detail: 'malformed_params', kind: 'rejected', requests: 2 });
+    });
+
+    it('does not retry a malformed_params that carries waitedMs: the server understood the wait', async () => {
+      const understood = {
+        error: { ...MALFORMED.error, data: { ...MALFORMED.error.data, waitedMs: 0 } },
+      };
+      const { sent } = serve(understood);
+      const error = await failure(client.getInclusionProofs(ids, { waitMs: 5_000 }));
+      expect(sent).toHaveLength(1);
+      expect(error).toMatchObject({ detail: 'malformed_params', requests: 1, waitedMs: 0 });
     });
 
     it('is not remembered: the next call tries the wait again', async () => {

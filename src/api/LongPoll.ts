@@ -36,7 +36,8 @@ export function checkWaitMs(value: unknown): number {
 /**
  * Whether an error is the answer of a batch endpoint whose strict parser does not know a request field: the generic
  * `-32602` / `invalid_request` / `malformed_params`. The answer does not name the field, so the match is on the generic
- * class, and only for a response that carries the id of the request.
+ * class, and only for a response that carries the id of the request. An answer with `data.waitedMs` is not it: the
+ * server understood the wait.
  *
  * @param {unknown} code JSON-RPC error code.
  * @param {unknown} data The `error.data` member.
@@ -47,5 +48,6 @@ export function isMalformedParams(code: unknown, data: unknown): boolean {
     return false;
   }
   const { detail, reason } = data as { detail?: unknown; reason?: unknown };
-  return reason === 'invalid_request' && detail === 'malformed_params';
+  // an answer that carries the echo comes from a server that understood `waitMs`: its rejection is about something else
+  return reason === 'invalid_request' && detail === 'malformed_params' && !('waitedMs' in data);
 }
