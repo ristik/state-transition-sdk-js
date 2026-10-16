@@ -4,7 +4,7 @@
 //
 //   node scripts/lp-interop/run.mjs --url http://host:3000 --trust-base tests/e2e/trust-base.json \
 //        [--api-key K] [--label S2-LP] [--scenario l2,l3,l4,l5,l6,l7] [--wait-ms 5000] [--states 50] [--concurrency 10]
-//        [--interval-ms 1000] [--timeout-ms 60000] [--report out.json]
+//        [--interval-ms 1000] [--timeout-ms 60000] [--rate STATES_PER_SECOND] [--report out.json]
 //
 // Scenarios (brief-lp-interop.md): l2 happy path, l3 timeout, l4 batch, l5 fallback/pacing/parser retry, l6 cap (the same
 // flow as l2, read the echoes against a server started with LONG_POLL_MAX_WAITERS=0), l7 polling vs long poll under load.
@@ -19,6 +19,7 @@ const { values } = parseArgs({
     'api-key': { type: 'string' },
     concurrency: { default: '10', type: 'string' },
     'interval-ms': { default: '1000', type: 'string' },
+    rate: { type: 'string' },
     label: { default: 'server', type: 'string' },
     report: { type: 'string' },
     scenario: { default: 'l2,l3,l4,l5,l6,l7', type: 'string' },
@@ -46,6 +47,11 @@ const STATES = num('states');
 const CONCURRENCY = num('concurrency');
 const INTERVAL_MS = num('interval-ms');
 const TIMEOUT_MS = num('timeout-ms');
+const RATE = values.rate === undefined ? null : Number(values.rate);
+if (RATE !== null && !(Number.isFinite(RATE) && RATE > 0)) {
+  console.error('--rate must be a positive number of states per second');
+  process.exit(2);
+}
 
 // ---- request counting: every fetch of the SDK, attributed to the scenario/state that is running (AsyncLocalStorage)
 const scope = new AsyncLocalStorage();
@@ -101,7 +107,9 @@ const summarize = (requests) => {
     httpStatuses: [...new Set(proofs.map((r) => r.status))],
   };
 };
-const pct = (xs, p) => (xs.length ? [...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))] : null);
+const pct = (xs, p) =>
+  xs.length ? Math.round([...xs].sort((a, b) => a - b)[Math.min(xs.length - 1, Math.floor((p / 100) * xs.length))]) : null;
+const maxOrNull = (xs) => (xs.length ? Math.round(Math.max(...xs)) : null);
 
 // ---- the SDK under test
 const lib = (path) => import(`../../lib/${path}`);
@@ -194,19 +202,31 @@ const scenarios = {
     const { rec, value, error } = await counted(async () => {
       await submit(tx);
       const begun = performance.now();
-      const response = await client.getInclusionProof(id, { includeStatusHint: true, waitMs: WAIT_MS });
-      return { elapsedMs: Math.round(performance.now() - begun), response };
+      try {
+        const response = await client.getInclusionProof(id, {
+          includeStatusHint: true,
+          signal: AbortSignal.timeout(WAIT_MS + 2000),
+          waitMs: WAIT_MS,
+        });
+        return { elapsedMs: Math.round(performance.now() - begun), response };
+      } catch (e) {
+        if (e?.name === 'TimeoutError' || e?.name === 'AbortError') {
+          return { elapsedMs: Math.round(performance.now() - begun), timedOut: true };
+        }
+        throw e;
+      }
     });
     const r = value?.response;
     await wait(tx, { intervalMs: INTERVAL_MS }).catch(() => undefined); // let it finish, leave no pending request behind
     return {
-      ok: !error,
+      ok: !error && !value?.timedOut,
       error: error ? String(error?.message ?? error) : undefined,
       requestedWaitMs: WAIT_MS,
-      outcome: r ? (r.inclusionProof ? 'included' : `pending(${r.statusHint ?? 'no hint'})`) : null,
+      outcome: value?.timedOut ? 'timeout' : r ? (r.inclusionProof ? 'included' : `pending(${r.statusHint ?? 'no hint'})`) : null,
       waitedMs: r?.waitedMs ?? null,
       elapsedMs: value?.elapsedMs,
-      withinDeadline: value ? value.elapsedMs <= WAIT_MS + 2000 : null,
+      withinDeadline: value ? !value.timedOut && value.elapsedMs <= WAIT_MS + 2000 : null,
+      timedOut: value?.timedOut === true,
       ...summarize(rec.requests),
     };
   },
@@ -254,50 +274,78 @@ const scenarios = {
   },
   // cap: identical flow to l2; against LONG_POLL_MAX_WAITERS=0 the echoes are all 0 and gaps >= the interval
   async l6() {
-    return { ...(await happyPath()), intervalMs: INTERVAL_MS, note: 'expect echoes 0 and minGapMs >= intervalMs (capacity 0)' };
+    return { ...(await happyPath()), intervalMs: INTERVAL_MS, expectationNotChecked: 'against LONG_POLL_MAX_WAITERS=0 expect echoes all 0 and minGapMs >= intervalMs; `ok` does not check it' };
   },
-  // polling vs long poll at the same offered load
+  // polling vs long poll. Closed loop (default): `concurrency` workers, each submits its next state after the previous one
+  // verified, so the arrival rate follows the latency; request counts per state are comparable, latencies are not
+  // comparable between modes. Open loop (--rate R): state i is submitted at i/R whatever the latency, the same offered load
+  // for both runs. The report says which, and the achieved states/s.
   async l7() {
     const run = async (name, options) => {
       const txs = await Promise.all(Array.from({ length: STATES }, () => mint()));
       const latencies = [];
-      let verified = 0;
+      const verifiedRequests = [];
+      const failedRequests = [];
       let failed = 0;
-      const all = { requests: [] };
-      let next = 0;
       const begun = performance.now();
-      const worker = async () => {
-        while (next < txs.length) {
-          const tx = txs[next++];
-          const { rec, error } = await counted(async () => {
-            await submit(tx);
-            const t = performance.now();
-            await wait(tx, options);
-            latencies.push(performance.now() - t);
-          });
-          all.requests.push(...rec.requests);
-          if (error) failed++;
-          else verified++;
-        }
+      const one = async (tx) => {
+        const { rec, error } = await counted(async () => {
+          await submit(tx);
+          const t = performance.now();
+          await wait(tx, options);
+          latencies.push(performance.now() - t);
+        });
+        (error ? failedRequests : verifiedRequests).push(...rec.requests);
+        if (error) failed++;
       };
-      await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-      const s = summarize(all.requests);
+      if (RATE === null) {
+        let next = 0;
+        await Promise.all(
+          Array.from({ length: CONCURRENCY }, async () => {
+            while (next < txs.length) await one(txs[next++]);
+          }),
+        );
+      } else {
+        await Promise.all(
+          txs.map(async (tx, i) => {
+            const due = begun + (i * 1000) / RATE;
+            await new Promise((r) => setTimeout(r, Math.max(0, due - performance.now())));
+            await one(tx);
+          }),
+        );
+      }
+      const seconds = (performance.now() - begun) / 1000;
+      const verified = STATES - failed;
+      const ok = summarize(verifiedRequests);
+      const bad = summarize(failedRequests);
       return {
         mode: name,
+        loadModel: RATE === null ? `closed-loop, concurrency=${CONCURRENCY}` : `open-loop, offered ${RATE} states/s`,
         states: STATES,
-        concurrency: CONCURRENCY,
         verified,
         failed,
-        totalMs: Math.round(performance.now() - begun),
-        proofRequests: s.proofRequests,
-        proofRequestsPerVerifiedState: verified ? +(s.proofRequests / verified).toFixed(2) : null,
-        submissions: s.submissions,
-        latencyMs: { p50: Math.round(pct(latencies, 50)), p90: Math.round(pct(latencies, 90)), p99: Math.round(pct(latencies, 99)), max: Math.round(Math.max(0, ...latencies)) },
+        totalMs: Math.round(seconds * 1000),
+        achievedStatesPerSecond: +(verified / seconds).toFixed(2),
+        proofRequestsVerified: ok.proofRequests,
+        proofRequestsFailed: bad.proofRequests,
+        proofRequestsPerVerifiedState: verified ? +(ok.proofRequests / verified).toFixed(2) : null,
+        submissions: ok.submissions + bad.submissions,
+        latencyMs: { p50: pct(latencies, 50), p90: pct(latencies, 90), p99: pct(latencies, 99), max: maxOrNull(latencies) },
       };
     };
     const polling = await run('polling', { intervalMs: INTERVAL_MS, longPoll: false });
     const longPoll = await run('long-poll', { intervalMs: INTERVAL_MS });
-    return { ok: polling.failed === 0 && longPoll.failed === 0, polling, longPoll };
+    return {
+      ok: polling.failed === 0 && longPoll.failed === 0,
+      polling,
+      longPoll,
+      notMeasured: [
+        'rounds from admission to verified proof',
+        'publication-to-response delay as a fraction of the round period',
+        'peak parked waiters, server RSS/heap per waiter',
+        '(all need server-side data; wall-clock latencies are indicative only on this host)',
+      ],
+    };
   },
 };
 

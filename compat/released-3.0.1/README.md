@@ -23,7 +23,9 @@ full proof verification (`waitInclusionProof` and `toCertifiedTransaction`); the
 `get_inclusion_proof.v2` with `{stateId}` (no `waitMs`, no `includeStatus`); cancellation; proofs corrupted in transit (bit
 flips, truncation, through a local proxy) are rejected **by the released client's own decoding/verification** (the step fails if
 the proxy delivered no mutated proof, or if the rejection is an HTTP, transport or timeout error); HTTP 404 on proof requests keeps the wait polling. The JSON report
-records the step outcomes and the package identity, for the interop matrix.
+records the step outcomes, the package identity and request counts for the interop matrix: `steps[].requests` per step and
+`requestCounts` in total count only requests to the server under test; requests to the local corruption/404 proxies are listed
+separately in `proxyRequests`.
 
 The released package knows neither status hints nor the batch method, so those need the raw golden clients
 (`tests/fixtures/longpoll/golden`). `tests/unit/compat/ReleasedCompatRunnerTest.ts` self-tests the runner against an

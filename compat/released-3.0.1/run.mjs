@@ -43,13 +43,15 @@ if (!Number.isInteger(TIMEOUT_MS) || TIMEOUT_MS <= 0 || TIMEOUT_MS > 2 ** 31 - 1
 
 // every JSON-RPC request the released client makes, to prove what it puts on the wire
 const sent = [];
+let currentStep = null;
+const proxyUrls = new Set(); // requests to the local corruption/404 proxies are not requests to the server under test
 const realFetch = globalThis.fetch;
 globalThis.fetch = (url, init) => {
   try {
     const body = JSON.parse(init?.body ?? '{}');
-    sent.push({ method: body.method, params: body.params, url: String(url) });
+    sent.push({ method: body.method, params: body.params, step: currentStep, url: String(url) });
   } catch {
-    sent.push({ method: '?', params: null, url: String(url) });
+    sent.push({ method: '?', params: null, step: currentStep, url: String(url) });
   }
   return realFetch(url, init);
 };
@@ -147,18 +149,29 @@ async function proxy(rewrite) {
     });
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  return { close: () => server.close(), seen, url: `http://127.0.0.1:${server.address().port}` };
+  const proxyUrl = `http://127.0.0.1:${server.address().port}`;
+  proxyUrls.add(proxyUrl);
+  return { close: () => server.close(), seen, url: proxyUrl };
 }
 
+const isProxy = (r) => [...proxyUrls].some((u) => r.url.startsWith(u));
+const countsOf = (list) => {
+  const counts = {};
+  for (const r of list) counts[r.method] = (counts[r.method] ?? 0) + 1;
+  return counts;
+};
 const steps = [];
 async function step(name, fn) {
   const begun = Date.now();
+  currentStep = name;
   try {
     const detail = await fn();
     steps.push({ detail, ms: Date.now() - begun, name, status: 'pass' });
   } catch (e) {
     steps.push({ detail: String(e?.stack ?? e), ms: Date.now() - begun, name, status: 'fail' });
   }
+  currentStep = null;
+  steps.at(-1).requests = countsOf(sent.filter((r) => r.step === name && !isProxy(r)));
   const last = steps.at(-1);
   console.log(`${last.status.toUpperCase().padEnd(4)} ${name}${last.status === 'pass' ? '' : `\n     ${last.detail}`}`);
 }
@@ -309,11 +322,14 @@ await step('HTTP 404 on a proof request keeps polling (legacy unknown answer)', 
   }
 });
 
-// HTTP requests the released client made through the SDK (the proxy steps are counted by the proxy, not here)
-const requestCounts = {};
-for (const r of sent) requestCounts[r.method] = (requestCounts[r.method] ?? 0) + 1;
+// HTTP requests the released client made to the SERVER UNDER TEST (requests to the local proxies are excluded, they
+// are reported separately); per step in `steps[].requests`, the total here
+const serverRequests = sent.filter((r) => !isProxy(r));
+const requestCounts = countsOf(serverRequests);
+const proxyRequests = countsOf(sent.filter(isProxy));
 const report = {
   aggregator: values.url,
+  proxyRequests,
   requestCounts,
   package: RELEASED,
   steps,

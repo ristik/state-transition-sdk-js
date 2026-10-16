@@ -120,6 +120,8 @@ describe('released 3.0.1 compatibility runner', () => {
     expect(outcome.verdict).toBe('pass');
     expect(outcome.code).toBe(0);
     const corruption = outcome.steps.find((s) => s.name === CORRUPTION);
+    // requests to the local proxies are not requests to the server under test
+    expect((corruption as unknown as { requests: object }).requests).toEqual({});
     // decoding/verification of the released client refused each mutation, and each reached it mutated
     for (const result of Object.values(corruption?.detail as Record<string, { error: string; mutated: number }>)) {
       expect(result.mutated).toBeGreaterThanOrEqual(1);
