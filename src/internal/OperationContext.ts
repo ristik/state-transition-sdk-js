@@ -1,5 +1,5 @@
-import { IVerificationContext } from './IVerificationContext.js';
-import { VerificationContext } from './VerificationContext.js';
+import { IVerificationContext } from '../transaction/verification/IVerificationContext.js';
+import { VerificationContext } from '../transaction/verification/VerificationContext.js';
 
 /**
  * The context of one verification operation: the caller's context with only the certificate verifier replaced by the

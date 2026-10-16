@@ -1,5 +1,5 @@
-import { PartitionViewError } from './PartitionViewError.js';
-import { ShardId } from './ShardId.js';
+import { PartitionViewError } from '../../api/bft/PartitionViewError.js';
+import { ShardId } from '../../api/bft/ShardId.js';
 
 /** The single shard of an unsharded partition: the empty shard id, native encoding `80`. */
 export const SINGLE_SHARD = ShardId.ROOT;

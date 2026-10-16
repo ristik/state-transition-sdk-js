@@ -1,3 +1,5 @@
+import { SdkError } from './SdkError.js';
+
 /**
  * Classification of a failed `get_inclusion_proofs.v1` call. Applications switch on `kind` (and `detail`), they never
  * parse JSON-RPC reason strings.
@@ -19,8 +21,18 @@ export type BatchProofErrorKind =
  * Failure of a batch inclusion proof call. Caller cancellation is never wrapped: an aborted request rejects with the
  * platform's `AbortError`/`TimeoutError`.
  */
-export class BatchProofError extends Error {
-  public override readonly name: string = 'BatchProofError';
+export class BatchProofError extends SdkError<'BatchProofError'> {
+  public override readonly name = 'BatchProofError' as const;
+
+  private readonly _code: number | undefined;
+
+  private readonly _detail: string | undefined;
+
+  private readonly _indexes: readonly number[] | undefined;
+
+  private readonly _indexesByClass: BatchIndexesByClass | undefined;
+
+  private readonly _retryable: boolean;
 
   /**
    * @param {BatchProofErrorKind} kind Classification.
@@ -37,7 +49,7 @@ export class BatchProofError extends Error {
   public constructor(
     public readonly kind: BatchProofErrorKind,
     message: string,
-    public readonly info: {
+    info: {
       readonly cause?: unknown;
       readonly code?: number;
       readonly detail?: string;
@@ -47,20 +59,25 @@ export class BatchProofError extends Error {
     } = {},
   ) {
     super(message, { cause: info.cause });
+    this._code = info.code;
+    this._detail = info.detail;
+    this._indexes = info.indexes?.slice();
+    this._indexesByClass = info.indexesByClass;
+    this._retryable = info.retryable ?? false;
   }
 
   /**
    * @returns {number|undefined} JSON-RPC error code, if any.
    */
   public get code(): number | undefined {
-    return this.info.code;
+    return this._code;
   }
 
   /**
    * @returns {string|undefined} Service detail, if any.
    */
   public get detail(): string | undefined {
-    return this.info.detail;
+    return this._detail;
   }
 
   /**
@@ -68,7 +85,7 @@ export class BatchProofError extends Error {
    *   state status failure, when it sent them.
    */
   public get indexes(): number[] | undefined {
-    return this.info.indexes ? this.info.indexes.slice() : undefined;
+    return this._indexes ? this._indexes.slice() : undefined;
   }
 
   /**
@@ -77,7 +94,7 @@ export class BatchProofError extends Error {
    *   {@link BatchProofError.detail}, the others are still listed here. Copies.
    */
   public get indexesByClass(): { -readonly [K in BatchIndexClass]?: number[] } | undefined {
-    const classes = this.info.indexesByClass;
+    const classes = this._indexesByClass;
     if (!classes) {
       return undefined;
     }
@@ -95,7 +112,15 @@ export class BatchProofError extends Error {
    * @returns {boolean} Whether a new attempt may succeed. Never a promise that the same root will be served again.
    */
   public get retryable(): boolean {
-    return this.info.retryable ?? false;
+    return this._retryable;
+  }
+
+  /**
+   * @param {unknown} error Anything that was thrown.
+   * @returns {boolean} True for a batch proof error of this or another copy of the SDK.
+   */
+  public static override is(error: unknown): error is BatchProofError {
+    return SdkError.is(error) && error.name === 'BatchProofError';
   }
 }
 

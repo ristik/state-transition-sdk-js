@@ -120,6 +120,7 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  *
  * @param {IConsolidationOptions} options Options of an attempt.
  * @throws {ConsolidationError} `input` for an invalid `timeoutMs` or `maxParallel`.
+ * @internal
  */
 export function validateConsolidationOptions(options: IConsolidationOptions): void {
   const { maxParallel, timeoutMs } = options;
@@ -135,7 +136,11 @@ export function validateConsolidationOptions(options: IConsolidationOptions): vo
   }
 }
 
-/** One attempt's deadline and cancellation. */
+/**
+ * One attempt's deadline and cancellation.
+ *
+ * @internal
+ */
 export class AttemptClock {
   public readonly controller = new AbortController();
   private expired = false;
@@ -214,7 +219,7 @@ function integrity(
   shard?: ShardId,
   cause?: unknown,
 ): ConsolidationError {
-  return new ConsolidationError('integrity', message, { cause, outcome, shard: shard?.toString() });
+  return new ConsolidationError('integrity', message, { cause, outcome, shard });
 }
 
 function viewFailure(e: unknown, shard: ShardId): unknown {
@@ -266,17 +271,16 @@ export class ProofConsolidator {
     if (e instanceof ConsolidationError || e instanceof Unavailable) {
       return e;
     }
-    const bits = shard.toString();
     if (!(e instanceof BatchProofError)) {
       return isAbort(e)
-        ? new ConsolidationError('cancelled', 'The request was aborted.', { cause: e, shard: bits })
+        ? new ConsolidationError('cancelled', 'The request was aborted.', { cause: e, shard })
         : new ConsolidationError('transport', e instanceof Error ? e.message : String(e), {
             cause: e,
             retryable: true,
-            shard: bits,
+            shard,
           });
     }
-    const info = { cause: e, detail: e.detail, shard: bits };
+    const info = { cause: e, detail: e.detail, shard };
     switch (e.kind) {
       case 'unavailable': {
         const detail = e.detail ?? '';
@@ -309,7 +313,7 @@ export class ProofConsolidator {
       case 'server':
         return new ConsolidationError('server', e.message, { ...info, retryable: e.retryable });
       case 'invalid_response':
-        return new ConsolidationError('invalid_response', e.message, { ...info, outcome: 'invalid_input' });
+        return new ConsolidationError('invalid_response', e.message, info);
       default:
         return new ConsolidationError('transport', e.message, { ...info, retryable: true });
     }
@@ -384,7 +388,7 @@ export class ProofConsolidator {
       if (!seal.networkId.equals(this.session.trustBaseNetwork)) {
         throw integrity('unauthenticated', `Evidence ${i}: seal of another network than the trusted authority.`);
       }
-      const quorum = await this.session.verifyQuorum(seal);
+      const quorum = await this.session.verifyQuorumSignaturesOnly(seal);
       if (quorum.status !== VerificationStatus.OK) {
         throw integrity('unauthenticated', `Evidence ${i}: the seal is not authenticated.`, shard);
       }
@@ -398,7 +402,9 @@ export class ProofConsolidator {
   /** The source proofs are rooted at the state the master view commits to, for this very shard and partition. */
   private checkExactRoot(shardBatch: IShardBatch, target: UnicityCertificate, shard: ShardId): void {
     const local = this.commonUc(shardBatch, shard);
-    if (!areUint8ArraysEqual(local.inputRecord.hash, target.inputRecord.hash)) {
+    const localRoot = local.inputRecord.nullableHash;
+    const targetRoot = target.inputRecord.nullableHash;
+    if (localRoot?.length !== 32 || targetRoot?.length !== 32 || !areUint8ArraysEqual(localRoot, targetRoot)) {
       throw integrity('binding_mismatch', 'The source root differs from the master view root.', shard);
     }
     if (
@@ -440,7 +446,7 @@ export class ProofConsolidator {
       if (!response.inclusionProof) {
         throw new ConsolidationError('invalid_response', `Proof ${i} of shard "${shard.toString()}" is empty.`, {
           outcome: 'invalid_input',
-          shard: shard.toString(),
+          shard,
         });
       }
       const bytes = response.inclusionProof.unicityCertificate.toCBOR();
@@ -474,7 +480,7 @@ export class ProofConsolidator {
         throw new ConsolidationError(
           'invalid_response',
           `Got ${batch.proofs.length} proofs for ${ids.length} states.`,
-          { outcome: 'invalid_input', shard: group.endpoint.shard.toString() },
+          { outcome: 'invalid_input', shard: group.endpoint.shard },
         );
       }
       return { batch, group };
@@ -582,9 +588,9 @@ export class ProofConsolidator {
         shard,
       );
     }
-    const root = target.inputRecord.hash;
-    if (root.length !== 32) {
-      throw integrity('unsupported', `The target state root has ${root.length} bytes.`, shard);
+    const root = target.inputRecord.nullableHash;
+    if (root?.length !== 32) {
+      throw integrity('unsupported', `The target state root has ${root?.length ?? 'no'} bytes.`, shard);
     }
     const leafValue = await calculateLeafValue(item.certificationData.transactionHash, proof.referenceTime);
     if (!(await proof.inclusionCertificate.verify(stateId, leafValue, new DataHash(HashAlgorithm.SHA256, root)))) {
@@ -721,7 +727,15 @@ export class ProofConsolidator {
       } catch {
         throw integrity('binding_mismatch', 'A participating shard is not in the master view.', g.endpoint.shard);
       }
-      return new DataHash(HashAlgorithm.SHA256, leaf.inputRecord.hash);
+      const root = leaf.inputRecord.nullableHash;
+      if (root?.length !== 32) {
+        throw integrity(
+          'unsupported',
+          'A participating shard has no 32-byte state root in the master view.',
+          g.endpoint.shard,
+        );
+      }
+      return new DataHash(HashAlgorithm.SHA256, root);
     });
     const peerBatches = await this.fetchAll(peers, roots, stateIds, options.maxParallel, clock);
     requests += peers.length;

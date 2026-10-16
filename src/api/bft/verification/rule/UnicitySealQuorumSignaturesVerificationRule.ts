@@ -3,13 +3,13 @@ import { DataHasher } from '../../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../../crypto/hash/HashAlgorithm.js';
 import { ISignatureVerifier } from '../../../../crypto/ISignatureVerifier.js';
 import { Signature } from '../../../../crypto/secp256k1/Signature.js';
+import { authorityIdentity } from '../../../../internal/bft/authorityIdentity.js';
 import { CborSerializer } from '../../../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../../util/HexConverter.js';
 import { VerificationResult } from '../../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../../verification/VerificationStatus.js';
 import { RootTrustBase } from '../../RootTrustBase.js';
 import { UnicitySeal } from '../../UnicitySeal.js';
-import { authorityIdentity } from '../authorityIdentity.js';
 import { VerifiedSealCache } from '../VerifiedSealCache.js';
 
 /**

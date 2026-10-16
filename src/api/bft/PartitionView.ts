@@ -1,12 +1,12 @@
 import { InputRecord } from './InputRecord.js';
 import { PartitionViewError } from './PartitionViewError.js';
-import { partitionViewMetrics } from './PartitionViewMetrics.js';
 import { ShardId } from './ShardId.js';
-import { canonicalShardOrder } from './ShardTopology.js';
-import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './verification/SealVerificationSession.js';
+import { partitionViewMetrics } from '../../internal/bft/PartitionViewMetrics.js';
+import { canonicalShardOrder } from '../../internal/bft/ShardTopology.js';
+import { ShardTree } from '../../internal/bft/ShardTree.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';

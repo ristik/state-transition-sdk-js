@@ -11,11 +11,11 @@ import { ShardRouting } from './ShardRouting.js';
 import { ShardId } from '../api/bft/ShardId.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
 import { InclusionProof } from '../api/InclusionProof.js';
+import { scopedVerificationContext } from '../internal/OperationContext.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
 import { Token } from '../transaction/Token.js';
 import { IVerificationContext } from '../transaction/verification/IVerificationContext.js';
-import { scopedVerificationContext } from '../transaction/verification/OperationContext.js';
 import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
@@ -203,7 +203,7 @@ export class TokenProofClient {
           consolidatedSeals: 1,
           evidenceQuorumChecks,
           masterRound: items[0].proof.unicityCertificate.unicitySeal.rootChainRoundNumber,
-          masterShard: items[0].proof.unicityCertificate.shardTreeCertificate.shard.toString(),
+          masterShard: items[0].proof.unicityCertificate.shardTreeCertificate.shard,
           originalSeals,
           outerProofs: items.length,
           quorumChecks: 0,
@@ -256,7 +256,7 @@ export class TokenProofClient {
       consolidatedSeals,
       evidenceQuorumChecks,
       masterRound: attempt.masterRound,
-      masterShard: attempt.masterShard.toString(),
+      masterShard: attempt.masterShard,
       originalSeals,
       outerProofs: items.length,
       quorumChecks: session.stats.quorumChecks - evidenceQuorumChecks,

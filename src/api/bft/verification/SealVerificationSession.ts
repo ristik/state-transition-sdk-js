@@ -1,15 +1,31 @@
-import { authorityIdentity } from './authorityIdentity.js';
 import { ISealAuthenticator } from './ISealAuthenticator.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
+import { authorityIdentity } from '../../../internal/bft/authorityIdentity.js';
 import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../util/HexConverter.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { NetworkId } from '../../NetworkId.js';
+import { SdkError } from '../../SdkError.js';
 import { RootTrustBase } from '../RootTrustBase.js';
 import { UnicitySeal } from '../UnicitySeal.js';
+
+/**
+ * The session has as many distinct seal checks running as it allows. A resource limit of the operation, not a
+ * verification result: nothing about the seal is known. Retry later or verify with a larger `maxInFlight`.
+ */
+export class SealVerificationBusyError extends SdkError<'SealVerificationBusyError'> {
+  public override readonly name = 'SealVerificationBusyError' as const;
+
+  /**
+   * @param {number} maxInFlight The session's bound.
+   */
+  public constructor(public readonly maxInFlight: number) {
+    super(`Too many concurrent seal verifications in the session (limit ${maxInFlight}).`);
+  }
+}
 
 /**
  * Counters of a {@link SealVerificationSession}.
@@ -188,19 +204,24 @@ export class SealVerificationSession implements ISealAuthenticator {
       return Promise.resolve(new VerificationResult('SealAuthority', VerificationStatus.FAIL, failure));
     }
 
-    return this.verifyQuorum(seal);
+    return this.verifyQuorumSignaturesOnly(seal);
   }
 
   /**
-   * Quorum signatures of the seal against the session's trust base, memoized and in-flight deduplicated exactly like
-   * {@link SealVerificationSession.authenticate}, but WITHOUT the authority context checks (structure, epoch, epoch
-   * start). This is what the ordinary token verification does for the seals of original proofs, which may belong to
-   * earlier epochs; it shares the memo with the strict path, so one distinct complete seal is checked once.
+   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Quorum signatures of the seal against the
+   * session's trust base only: NO structure, network, epoch or epoch start checks. It exists for the ordinary token
+   * verification, which has always accepted the seals of original proofs (possibly of earlier epochs, or of fixtures
+   * with no timestamp) on signatures alone, and for authenticating such original proofs. Results are memoized and
+   * in-flight deduplicated like `authenticate`'s, and the memo is shared, so one distinct complete seal is checked once.
+   * Sharing is safe because `authenticate` re-runs the structure and authority checks before every memo lookup:
+   * a quorum-only success never lets a seal pass the strict path. (The structure check is deliberately not applied
+   * here: it would reject seals that the SDK has always accepted.)
    *
+   * @internal
    * @param {UnicitySeal} seal Seal.
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
-  public async verifyQuorum(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
+  public async verifyQuorumSignaturesOnly(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
     if (this.customRule) {
       this.counters.quorumChecks++;
       return this.quorumRule.verify(this.source, seal);
@@ -218,7 +239,7 @@ export class SealVerificationSession implements ISealAuthenticator {
     }
 
     if (this.inFlight.size >= (this.options.maxInFlight ?? 64)) {
-      throw new Error('Too many concurrent seal verifications in the session.');
+      throw new SealVerificationBusyError(this.options.maxInFlight ?? 64);
     }
 
     this.counters.quorumChecks++;

@@ -82,6 +82,8 @@ function observe(run: ConsolidationAttempt | ConsolidationError): string {
         return 'invalid_request';
       case 'server':
         return 'infrastructure';
+      case 'invalid_response':
+        return 'invalid_input';
       default:
         return run.outcome ?? run.kind;
     }

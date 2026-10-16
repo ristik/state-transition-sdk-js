@@ -1,7 +1,7 @@
-import { InputRecord } from './InputRecord.js';
-import { ShardId } from './ShardId.js';
-import { ShardTreeCertificate } from './ShardTreeCertificate.js';
-import { UnicityCertificate } from './UnicityCertificate.js';
+import { InputRecord } from '../../api/bft/InputRecord.js';
+import { ShardId } from '../../api/bft/ShardId.js';
+import { ShardTreeCertificate } from '../../api/bft/ShardTreeCertificate.js';
+import { UnicityCertificate } from '../../api/bft/UnicityCertificate.js';
 import { DataHasher } from '../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../crypto/hash/HashAlgorithm.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';

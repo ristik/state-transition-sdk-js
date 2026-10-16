@@ -1,13 +1,13 @@
 import { PartitionView, IPartitionViewPolicy, PartitionViewLeaf } from './PartitionView.js';
 import { PartitionViewError } from './PartitionViewError.js';
-import { partitionViewMetrics } from './PartitionViewMetrics.js';
 import { ShardId } from './ShardId.js';
-import { ShardTree } from './ShardTree.js';
 import { UnicityCertificate } from './UnicityCertificate.js';
 import { UnicitySeal } from './UnicitySeal.js';
 import { ISealAuthenticator } from './verification/ISealAuthenticator.js';
 import { DataHasher } from '../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../crypto/hash/HashAlgorithm.js';
+import { partitionViewMetrics } from '../../internal/bft/PartitionViewMetrics.js';
+import { ShardTree } from '../../internal/bft/ShardTree.js';
 import { CborDeserializer } from '../../serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../util/HexConverter.js';
@@ -128,7 +128,7 @@ export class AuthenticatedPartitionView {
   public certificateOf(shard: ShardId): UnicityCertificate {
     const position = this.#index.get(shard.toString());
     if (position === undefined) {
-      throw new Error(`Shard "${shard.toString()}" is not in the authenticated view.`);
+      throw new PartitionViewError('topology', `Shard "${shard.toString()}" is not in the authenticated view.`);
     }
     return this.derive(position);
   }
@@ -143,7 +143,7 @@ export class AuthenticatedPartitionView {
   public leafOf(shard: ShardId): PartitionViewLeaf {
     const position = this.#index.get(shard.toString());
     if (position === undefined) {
-      throw new Error(`Shard "${shard.toString()}" is not in the authenticated view.`);
+      throw new PartitionViewError('topology', `Shard "${shard.toString()}" is not in the authenticated view.`);
     }
     return PartitionViewLeaf.fromCBOR(this.#leaves[position]);
   }
