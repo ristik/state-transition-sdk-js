@@ -24,7 +24,7 @@ function recording(s: IScenario, seen: ISeen[], retried = false): ShardRouting {
           seen.push({ exact: options?.stateRoot !== undefined, waitMs: options?.waitMs });
           const batch = await real.getInclusionProofs(ids, options);
           return retried && options?.stateRoot === undefined
-            ? new InclusionProofBatch(batch.proofs, batch.partitionViewBytes, null, 2)
+            ? new InclusionProofBatch(batch.proofs, batch.partitionViewBytes, { requests: 2 })
             : batch;
         },
         submitCertificationRequest: (data) => real.submitCertificationRequest(data),
@@ -50,7 +50,7 @@ async function multiShardToken(s: IScenario): Promise<Token> {
   return token;
 }
 
-describe('consolidation masterWaitMs', () => {
+describe('consolidation masterLongPoll', () => {
   it('sends no wait unless enabled', async () => {
     const s = await scenario(2);
     const token = await multiShardToken(s);
@@ -67,7 +67,7 @@ describe('consolidation masterWaitMs', () => {
     const result = await new TokenProofClient({
       routing: recording(s, seen),
       verificationContext: s.context,
-    }).consolidate(token, { masterWaitMs: 3000 });
+    }).consolidate(token, { masterLongPoll: { windowMs: 3000 } });
     expect(result.status).toBe('consolidated');
     const masters = seen.filter((r) => !r.exact);
     expect(masters).toHaveLength(1);
@@ -80,28 +80,41 @@ describe('consolidation masterWaitMs', () => {
     expect(seen).toHaveLength(masters.length + peers.length);
   });
 
-  it('clamps the wait to the deadline less the 2s margin, and drops it when nothing fits', async () => {
+  it('true asks for the preferred window clamped to the deadline less the margin; nothing fitting drops it', async () => {
     const s = await scenario(0);
     const token = await s.history(3);
     const seen: ISeen[] = [];
     const client = new TokenProofClient({ routing: recording(s, seen), verificationContext: s.context });
-    await client.consolidate(token, { masterWaitMs: 60_000, timeoutMs: 5000 });
+    await client.consolidate(token, { masterLongPoll: true, timeoutMs: 5000 });
     expect(seen[0].waitMs).toBeLessThanOrEqual(3000);
     expect(seen[0].waitMs).toBeGreaterThan(2000);
 
     seen.length = 0;
-    await client.consolidate(token, { masterWaitMs: 60_000, timeoutMs: 1500 });
+    await client.consolidate(token, { masterLongPoll: true, timeoutMs: 1500 });
     expect(seen[0].waitMs).toBeUndefined();
   });
 
-  it('keeps an explicit zero (echo without waiting)', async () => {
+  it('the margin is configurable', async () => {
     const s = await scenario(0);
     const token = await s.history(3);
     const seen: ISeen[] = [];
-    await new TokenProofClient({ routing: recording(s, seen), verificationContext: s.context }).consolidate(token, {
-      masterWaitMs: 0,
-    });
-    expect(seen[0].waitMs).toBe(0);
+    const client = new TokenProofClient({ routing: recording(s, seen), verificationContext: s.context });
+    await client.consolidate(token, { masterLongPoll: { marginMs: 500 }, timeoutMs: 5000 });
+    expect(seen[0].waitMs).toBeGreaterThan(3500);
+    expect(seen[0].waitMs).toBeLessThanOrEqual(4500);
+  });
+
+  it('false and a zero window send nothing, so no negotiation cost', async () => {
+    const s = await scenario(0);
+    const token = await s.history(3);
+    for (const masterLongPoll of [false, { windowMs: 0 }]) {
+      const seen: ISeen[] = [];
+      await new TokenProofClient({ routing: recording(s, seen, true), verificationContext: s.context }).consolidate(
+        token,
+        { masterLongPoll },
+      );
+      expect(seen.every((r) => r.waitMs === undefined)).toBe(true);
+    }
   });
 
   it('counts the negotiation retry as a request', async () => {
@@ -113,7 +126,7 @@ describe('consolidation masterWaitMs', () => {
     const retried = await new TokenProofClient({
       routing: recording(s, [], true),
       verificationContext: s.context,
-    }).consolidate(token, { masterWaitMs: 1000 });
+    }).consolidate(token, { masterLongPoll: { windowMs: 1000 } });
     if (plain.status === 'consolidated' && retried.status === 'consolidated') {
       expect(retried.summary.requests).toBe(plain.summary.requests + 1);
     } else {
@@ -121,18 +134,21 @@ describe('consolidation masterWaitMs', () => {
     }
   });
 
-  it.each([-1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1])('rejects masterWaitMs %p as input', async (masterWaitMs) => {
-    const s = await scenario(0);
-    const token = await s.history(3);
-    const seen: ISeen[] = [];
-    const error = await new TokenProofClient({ routing: recording(s, seen), verificationContext: s.context })
-      .consolidate(token, { masterWaitMs })
-      .then(
-        () => null,
-        (e: unknown) => e,
-      );
-    expect(error).toBeInstanceOf(ConsolidationError);
-    expect((error as ConsolidationError).kind).toBe('input');
-    expect(seen).toHaveLength(0);
-  });
+  it.each([{ windowMs: -1 }, { windowMs: NaN }, { marginMs: -1 }, { windowMs: Number.MAX_SAFE_INTEGER + 1 }])(
+    'rejects masterLongPoll %j as input',
+    async (masterLongPoll) => {
+      const s = await scenario(0);
+      const token = await s.history(3);
+      const seen: ISeen[] = [];
+      const error = await new TokenProofClient({ routing: recording(s, seen), verificationContext: s.context })
+        .consolidate(token, { masterLongPoll })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(error).toBeInstanceOf(ConsolidationError);
+      expect((error as ConsolidationError).kind).toBe('input');
+      expect(seen).toHaveLength(0);
+    },
+  );
 });

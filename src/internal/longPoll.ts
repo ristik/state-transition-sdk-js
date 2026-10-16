@@ -18,6 +18,18 @@ export function isWireMilliseconds(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0);
 }
 
+import { ILongPollOptions } from '../api/ILongPollOptions.js';
+
+/** Preferred long poll window and response margin of the specification (revision 3, section 10). */
+const DEFAULT_WINDOW_MS = 20_000;
+const DEFAULT_MARGIN_MS = 2000;
+
+/** Settings of a long poll that sizes its waits from the time left. */
+export interface ILongPollSettings {
+  readonly marginMs: number;
+  readonly windowMs: number;
+}
+
 /**
  * Check a caller supplied `waitMs`, which is validated before anything is sent.
  *
@@ -49,4 +61,48 @@ export function isMalformedParams(code: unknown, data: unknown): boolean {
   const { detail, reason } = data as { detail?: unknown; reason?: unknown };
   // an answer that carries the echo comes from a server that understood `waitMs`: its rejection is about something else
   return reason === 'invalid_request' && detail === 'malformed_params' && !('waitedMs' in data);
+}
+
+/**
+ * @param {boolean|ILongPollOptions|undefined} option A `longPoll` style option.
+ * @param {boolean} defaultOn What `undefined` means.
+ * @returns {ILongPollSettings|null} The settings, or `null` when the long poll is off (`false`, `undefined` unless
+ *   `defaultOn`, or a zero window).
+ * @throws {RangeError} For a negative or non finite margin or window, or a window above `Number.MAX_SAFE_INTEGER`.
+ */
+export function longPollSettings(
+  option: boolean | ILongPollOptions | undefined,
+  defaultOn: boolean,
+): ILongPollSettings | null {
+  if (option === false || (option === undefined && !defaultOn)) {
+    return null;
+  }
+  const tuning = typeof option === 'object' ? option : {};
+  const marginMs = tuning.marginMs ?? DEFAULT_MARGIN_MS;
+  const windowMs = tuning.windowMs ?? DEFAULT_WINDOW_MS;
+  if (
+    !Number.isFinite(marginMs) ||
+    marginMs < 0 ||
+    !Number.isFinite(windowMs) ||
+    windowMs < 0 ||
+    windowMs > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new RangeError(
+      'longPoll.marginMs and longPoll.windowMs must be finite and not negative, windowMs at most Number.MAX_SAFE_INTEGER.',
+    );
+  }
+  return windowMs === 0 ? null : { marginMs, windowMs };
+}
+
+/**
+ * The `waitMs` of the next request: `floor(max(0, min(window, left - margin)))`, the window alone while the time left is
+ * unknown. `0` means no wait fits and an ordinary immediate lookup is made.
+ *
+ * @param {ILongPollSettings} settings Long poll settings.
+ * @param {number|undefined} left Milliseconds left, `undefined` if not known.
+ * @returns {number} Milliseconds to ask the aggregator to wait.
+ */
+export function longPollWindow(settings: ILongPollSettings, left: number | undefined): number {
+  const fit = left === undefined ? settings.windowMs : Math.min(settings.windowMs, left - settings.marginMs);
+  return Math.floor(Math.max(0, fit));
 }

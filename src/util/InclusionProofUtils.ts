@@ -1,5 +1,6 @@
 import { RootTrustBase } from '../api/bft/RootTrustBase.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
+import { ILongPollOptions } from '../api/ILongPollOptions.js';
 import { InclusionProof } from '../api/InclusionProof.js';
 import {
   InclusionProofConflictError,
@@ -9,7 +10,15 @@ import {
 import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
-import { abortable, removeAbortListener, SleepError, sleep, throwIfAborted } from '../internal/abortable.js';
+import {
+  abortable,
+  joinSignals,
+  removeAbortListener,
+  SleepError,
+  sleep,
+  throwIfAborted,
+} from '../internal/abortable.js';
+import { longPollSettings, longPollWindow } from '../internal/longPoll.js';
 import { PredicateVerifierService } from '../predicate/verification/PredicateVerifierService.js';
 import { StateTransitionClient } from '../StateTransitionClient.js';
 import { ITransaction } from '../transaction/ITransaction.js';
@@ -26,14 +35,17 @@ export interface IWaitInclusionProofOptions {
   readonly intervalMs?: number;
   /**
    * Ask the aggregator to hold each poll while the state is pending (long poll, `waitMs`) instead of answering at once.
-   * Defaults to `true`: the wait is then bounded by the budget below, never by this option. `false` polls exactly as
+   * Defaults to `true`: the wait is then bounded by `timeoutMs` (or the signal), never by this option. `false` polls exactly as
    * SDK 3.0 did, no `waitMs` is sent. An object tunes the long poll, see {@link ILongPollOptions}.
    *
    * A server without the feature ignores the request, the wait then falls back to normal polling for the rest of this
    * call (nothing is cached across calls). The positional form never long polls.
    */
   readonly longPoll?: boolean | ILongPollOptions;
-  /** Abort signal that terminates polling. Defaults to a 10s timeout unless `timeoutMs` is given. */
+  /**
+   * Abort signal that terminates polling. Defaults to a 10s timeout unless `timeoutMs` is given. To bound the wait in
+   * time prefer `timeoutMs`: a bare signal cannot be read as a deadline, so each poll asks for the full 20s window.
+   */
   readonly signal?: AbortSignal;
   /**
    * Ask the aggregator for its (unauthenticated) status hint and stop early on `expired` and `unknown`. Defaults to
@@ -57,65 +69,12 @@ export interface IWaitInclusionProofOptions {
   readonly unknownGraceMs?: number;
 }
 
-/**
- * Tuning of the long poll of {@link waitInclusionProof}.
- */
-export interface ILongPollOptions {
-  /**
-   * HTTP response margin in milliseconds that is kept between the end of a server wait and the end of the budget, and
-   * that the transport timeout of a request adds to its wait. Raise it for slow links or proxies. Defaults to 2000.
-   */
-  readonly marginMs?: number;
-  /** Preferred window of one long poll in milliseconds; the aggregator clamps it to its own maximum. Defaults to 20000. */
-  readonly windowMs?: number;
-}
-
-/** Preferred long poll window and response margin of the specification (revision 3, section 10). */
-const DEFAULT_WINDOW_MS = 20_000;
-const DEFAULT_MARGIN_MS = 2000;
 /** Budget of a wait that has neither a signal nor a `timeoutMs`: the behavior of SDK 3.0. */
 const DEFAULT_BUDGET_MS = 10_000;
 /** Pause that a long poll never undercuts, so that an instant or zero echo cannot make a tight loop. */
 const MIN_POLL_GAP_MS = 10;
 /** Greatest delay a platform timer accepts. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
-
-/** The settings of the long poll, or `null` when it is switched off. */
-function longPollSettings(
-  option: boolean | ILongPollOptions | undefined,
-): { marginMs: number; windowMs: number } | null {
-  if (option === false) {
-    return null;
-  }
-  const tuning = typeof option === 'object' ? option : {};
-  const marginMs = tuning.marginMs ?? DEFAULT_MARGIN_MS;
-  const windowMs = tuning.windowMs ?? DEFAULT_WINDOW_MS;
-  if (
-    !Number.isFinite(marginMs) ||
-    marginMs < 0 ||
-    !Number.isFinite(windowMs) ||
-    windowMs < 0 ||
-    windowMs > Number.MAX_SAFE_INTEGER
-  ) {
-    throw new RangeError(
-      'longPoll.marginMs and longPoll.windowMs must be finite and not negative, windowMs at most Number.MAX_SAFE_INTEGER.',
-    );
-  }
-  return { marginMs, windowMs };
-}
-
-/**
- * The `waitMs` of the next poll: `floor(max(0, min(window, left - margin)))`, the window alone while the time left is
- * unknown. `0` means no wait fits and an ordinary immediate lookup is made.
- *
- * @param {object} settings Long poll settings.
- * @param {number|undefined} left Milliseconds left of the total budget, `undefined` if it is not known.
- * @returns {number} Milliseconds to ask the aggregator to wait.
- */
-function longPollWindow(settings: { marginMs: number; windowMs: number }, left: number | undefined): number {
-  const fit = left === undefined ? settings.windowMs : Math.min(settings.windowMs, left - settings.marginMs);
-  return Math.floor(Math.max(0, fit));
-}
 
 /**
  * The pause after a pending answer to a poll that asked for a wait. An immediate re-call is allowed only for a valid
@@ -284,7 +243,7 @@ export async function waitInclusionProof(
   const budgetMs = timeoutMs ?? (callerSignal === undefined ? DEFAULT_BUDGET_MS : undefined);
   const interval = positional ? (positionalInterval ?? 1000) : (options.intervalMs ?? 1000);
   const statusHints = positional ? false : options.statusHints !== false;
-  const longPoll = positional ? null : longPollSettings(options.longPoll);
+  const longPoll = positional ? null : longPollSettings(options.longPoll, true);
   const deadline = new Deadline(callerSignal, timeoutMs, budgetMs);
   const signal = deadline.signal;
   // Long polling is dropped for the rest of this call when an answer shows the endpoint does not honor it; nothing
@@ -311,6 +270,7 @@ export async function waitInclusionProof(
       requestTimedOut = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       let signalOfRequest = requestSignal;
+      let joined: { signal: AbortSignal; dispose(): void } | undefined;
       if (waitMs > 0 && longPoll !== null) {
         const transport = new AbortController();
         const left = remainingMs();
@@ -321,7 +281,8 @@ export async function waitInclusionProof(
           },
           Math.min(waitMs + longPoll.marginMs, left ?? Infinity, MAX_TIMER_MS),
         );
-        signalOfRequest = AbortSignal.any([requestSignal, transport.signal]);
+        joined = joinSignals(requestSignal, transport.signal);
+        signalOfRequest = joined.signal;
       }
       let response;
       try {
@@ -332,6 +293,7 @@ export async function waitInclusionProof(
         });
       } finally {
         clearTimeout(timer);
+        joined?.dispose();
       }
       const { inclusionProof } = response;
       // without statusHints nothing but the proof counts, also what a server volunteers
@@ -430,4 +392,5 @@ export async function waitInclusionProof(
   }
 }
 
+export type { ILongPollOptions };
 export { SleepError };

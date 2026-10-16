@@ -6,10 +6,10 @@ import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { BatchProofError } from '../../../src/api/BatchProofError.js';
 import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcResponseError } from '../../../src/api/json-rpc/JsonRpcResponseError.js';
-import { isWireMilliseconds } from '../../../src/api/LongPoll.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { DataHash } from '../../../src/crypto/hash/DataHash.js';
 import { HashAlgorithm } from '../../../src/crypto/hash/HashAlgorithm.js';
+import { isWireMilliseconds } from '../../../src/internal/longPoll.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { ShardedWorld } from '../../utils/ShardedWorld.js';
 

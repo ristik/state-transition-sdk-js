@@ -17,15 +17,16 @@ import {
   InclusionProofBatch,
   isBatchAggregatorClient,
 } from '../api/IBatchAggregatorClient.js';
+import { ILongPollOptions } from '../api/ILongPollOptions.js';
 import { InclusionProof } from '../api/InclusionProof.js';
 import { InclusionProofResponse } from '../api/InclusionProofResponse.js';
 import { calculateLeafValue } from '../api/LeafValue.js';
-import { isWireMilliseconds } from '../api/LongPoll.js';
 import { NetworkId } from '../api/NetworkId.js';
 import { StateId } from '../api/StateId.js';
 import { DataHash } from '../crypto/hash/DataHash.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
 import { abortable, SleepError } from '../internal/abortable.js';
+import { longPollSettings, longPollWindow } from '../internal/longPoll.js';
 import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
@@ -44,15 +45,14 @@ export interface IConsolidationOptions {
   /** Master shard to use instead of the shard of the newest original proof; it must take part. */
   readonly master?: ShardId;
   /**
-   * Ask the master shard to hold its **latest** request for up to this many milliseconds while the proofs are merely
-   * pending (long poll), opt-in. It applies to that one request only: exact-root requests to the other shards never
-   * wait, and nothing is polled again, so an attempt is still one request per shard. The value is clamped to what the
-   * total deadline leaves minus a 2s response margin; `0` asks for the aggregator's echo without waiting. The one
-   * exception to "one request" is the aggregator's generic `malformed_params` answer to a wait it does not know: the
-   * request is repeated once without it and both requests are counted. Must be an integer in
-   * `[0, Number.MAX_SAFE_INTEGER]`.
+   * Opt in to one long poll on the master shard's **latest** request, off by default. `true` asks for the preferred 20s
+   * window, an object tunes it (`windowMs`, `marginMs`, the same shape as `waitInclusionProof`'s `longPoll`); either way
+   * the wait is clamped to what the total deadline leaves minus the margin, and omitted when nothing fits. It applies to
+   * that one request only: exact-root requests to the other shards never wait, and nothing is polled again, so an attempt
+   * is still one request per shard. The one exception is the aggregator's generic `malformed_params` answer to a wait it
+   * does not know: the request is repeated once without it and both requests are counted in the summary.
    */
-  readonly masterWaitMs?: number;
+  readonly masterLongPoll?: boolean | ILongPollOptions;
   /** Upper bound on concurrent exact-root requests of the second wave. Default 4. */
   readonly maxParallel?: number;
   /** Aborts the attempt and every outstanding request. */
@@ -140,13 +140,15 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  * at once, a non finite parallelism starts no request at all.
  *
  * @param {IConsolidationOptions} options Options of an attempt.
- * @throws {ConsolidationError} `input` for an invalid `timeoutMs`, `maxParallel` or `masterWaitMs`.
+ * @throws {ConsolidationError} `input` for an invalid `timeoutMs`, `maxParallel` or `masterLongPoll`.
  * @internal
  */
 export function validateConsolidationOptions(options: IConsolidationOptions): void {
-  const { masterWaitMs, maxParallel, timeoutMs } = options;
-  if (masterWaitMs !== undefined && !isWireMilliseconds(masterWaitMs)) {
-    throw new ConsolidationError('input', 'masterWaitMs must be an integer in [0, Number.MAX_SAFE_INTEGER].', {
+  const { masterLongPoll, maxParallel, timeoutMs } = options;
+  try {
+    longPollSettings(masterLongPoll, false);
+  } catch (e) {
+    throw new ConsolidationError('input', (e as Error).message.replace('longPoll.', 'masterLongPoll.'), {
       outcome: 'invalid_input',
     });
   }
@@ -279,9 +281,6 @@ export class ProofConsolidator {
 
   public static readonly DEFAULT_TIMEOUT_MS = 10_000;
 
-  /** Response margin that a master wait leaves before the attempt deadline. */
-  public static readonly WAIT_MARGIN_MS = 2000;
-
   private readonly pins: ReadonlyMap<string, Uint8Array>;
 
   /**
@@ -295,13 +294,11 @@ export class ProofConsolidator {
     this.pins = new Map(routing.shardConfigurationPins?.map((pin) => [pin.shard.toString(), pin.hash]));
   }
 
-  /** The wait that fits the attempt deadline, or none: `min(requested, left - margin)`; `0` stays an echo request. */
-  private static masterWait(requested: number | undefined, clock: AttemptClock): number | undefined {
-    if (requested === undefined || requested === 0) {
-      return requested;
-    }
-    const fit = Math.floor(Math.min(requested, clock.remainingMs() - ProofConsolidator.WAIT_MARGIN_MS));
-    return fit > 0 ? fit : undefined;
+  /** The wait that fits the attempt deadline, or none: `min(window, left - margin)`. */
+  private static masterWait(option: boolean | ILongPollOptions | undefined, clock: AttemptClock): number | undefined {
+    const settings = longPollSettings(option, false);
+    const wait = settings === null ? 0 : longPollWindow(settings, clock.remainingMs());
+    return wait > 0 ? wait : undefined;
   }
 
   private static requestFailure(
@@ -815,7 +812,7 @@ export class ProofConsolidator {
       clock,
       'master',
       clock.signal,
-      ProofConsolidator.masterWait(options.masterWaitMs, clock),
+      ProofConsolidator.masterWait(options.masterLongPoll, clock),
     );
     // the one retry without the wait, if the aggregator did not know it, is a request too
     requests += masterBatch.batch.requests;

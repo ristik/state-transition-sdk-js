@@ -141,7 +141,7 @@ so the preferred 20s window is asked for and the wait stops when the signal fire
 extends a deadline, never replaces proof verification, and a missing or zero echo only means normal paced polling for the rest
 of that call (nothing is cached). Low level: `getInclusionProof(id, { waitMs })` and `getInclusionProofs(ids, { waitMs })`
 (latest view only; a server that rejects the unknown field with the generic `malformed_params` gets one repeat without it,
-`batch.requests === 2`). `consolidate(token, { masterWaitMs })` opts in to one wait on the master's latest request.
+`batch.requests === 2`). `consolidate(token, { masterLongPoll: true })` (or `{ windowMs, marginMs }`) opts in to one wait on the master's latest request. An invalid `waitMs` is a `RangeError` on `getInclusionProof`, a `BatchProofError` (`rejected`) on `getInclusionProofs` and a `ConsolidationError` (`input`) for consolidation: each surface keeps its own error type.
 
 All waiting errors extend `InclusionProofWaitError` (`code`: `expired` | `unknown` | `conflict`, `resubmittable`, `stateId`);
 the hint-driven ones also extend `InclusionProofStatusError` with the literal `status`. After `expired` or `unknown` the same
