@@ -211,7 +211,13 @@ export class TokenProofClient {
       timeoutMs: remainingMs(),
     });
     if (attempt.status === 'unavailable') {
-      return { detail: attempt.detail, reason: attempt.reason, retryable: attempt.retryable, status: 'unavailable' };
+      return {
+        detail: attempt.detail,
+        proofIndexes: attempt.proofIndexes,
+        reason: attempt.reason,
+        retryable: attempt.retryable,
+        status: 'unavailable',
+      };
     }
 
     // rebuild from the original signed bytes with only the replaceable proofs swapped, then verify everything again

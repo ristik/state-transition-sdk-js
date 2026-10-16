@@ -50,6 +50,7 @@ export interface IF1Expected {
   readonly pipelineOutcome?: string;
   readonly rMin?: string;
   readonly rootRound?: string;
+  readonly rpc?: { code: number; detail?: string; reason?: string; retryable?: boolean; role: string; shard: string };
   readonly stage: string;
 }
 

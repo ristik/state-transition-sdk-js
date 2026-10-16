@@ -258,5 +258,30 @@ describe('F1 negative cases', () => {
 
     const run = await execute(c);
     expect(observe(run)).toEqual(outcome);
+
+    // the aggregator's state status details are reported under their own names, retryability as the contract says
+    const detail = c.expected.rpc?.detail;
+    if (
+      stage === 'rpc' &&
+      ['state_pending', 'state_expired', 'state_unknown', 'state_not_in_root'].includes(detail ?? '')
+    ) {
+      const rpc = c.expected.rpc;
+      const failing =
+        rpc?.role === 'master' ? c.responses.master : c.responses.peers?.find((p) => p.shard === rpc?.shard)?.response;
+      const data = (failing?.error as { data: { indexes: Record<string, number[]> } }).data;
+      const own = data.indexes[(detail ?? '').replace(/^state_/, '')];
+      // positions of the failing shard's batch, as positions in the evidence (the token's outer history)
+      const shardOfEvidence = evidenceOf(c.requests).map((e) =>
+        e.proof.unicityCertificate.shardTreeCertificate.shard.toString(),
+      );
+      const group = shardOfEvidence.flatMap((shard, i) => (shard === rpc?.shard ? [i] : []));
+      expect(run).toMatchObject({
+        detail,
+        proofIndexes: own.map((i) => group[i]),
+        reason: detail,
+        retryable: rpc?.retryable,
+        status: 'unavailable',
+      });
+    }
   });
 });

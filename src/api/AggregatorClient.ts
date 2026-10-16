@@ -1,17 +1,24 @@
-import { BatchProofError } from './BatchProofError.js';
+import {
+  BATCH_INDEX_CLASSES,
+  BatchIndexClass,
+  BatchIndexesByClass,
+  BatchProofError,
+  isBatchStateDetail,
+} from './BatchProofError.js';
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
 import { CertificationRequest } from './CertificationRequest.js';
-import { CertificationResponse } from './CertificationResponse.js';
+import { CertificationResponse, CertificationStatus } from './CertificationResponse.js';
 import { IAggregatorClient } from './IAggregatorClient.js';
 import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
-import { IRequestOptions } from './IRequestOptions.js';
+import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
+import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
 import { HexConverter } from '../util/HexConverter.js';
 
@@ -106,6 +113,43 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
   }
 
+  private static isDuplicateSubmission(e: unknown): boolean {
+    if (!(e instanceof JsonRpcDataError) || e.code !== -32603) {
+      return false;
+    }
+    // Heuristic: free text of a server internal error. Only a duplicate on the state id index counts (the Mongo error
+    // names the index, `index: stateId_1`); a duplicate on any other index is a real failure. A structured server
+    // status replaces this once there is one.
+    const text = `${e.message} ${typeof e.data === 'string' ? e.data : ''}`;
+    return /E11000|duplicate key/i.test(text) && /index:\s*stateId_/i.test(text);
+  }
+
+  /**
+   * The offending request indexes of a state status error: `data.indexes` is an object with one list per class
+   * (`{"pending":[0],"expired":[2],"unknown":[3]}`, `{"not_in_root":[...]}` for an exact root). Malformed lists are
+   * ignored, never trusted for control flow.
+   */
+  private static offendingIndexes(data: Record<string, unknown>): BatchIndexesByClass | undefined {
+    const raw = data.indexes;
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return undefined;
+    }
+    const classes: { -readonly [K in BatchIndexClass]?: number[] } = {};
+    let total = 0;
+    for (const [klass, list] of Object.entries(raw)) {
+      // an unknown class name is dropped, not kept under a free string
+      if (!Array.isArray(list) || !(BATCH_INDEX_CLASSES as readonly string[]).includes(klass)) {
+        continue;
+      }
+      const valid = list.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
+      total += list.length;
+      if (valid.length === list.length && total <= AggregatorClient.BATCH_MAX_STATE_IDS) {
+        classes[klass as BatchIndexClass] = valid;
+      }
+    }
+    return Object.keys(classes).length > 0 ? classes : undefined;
+  }
+
   private static rpcFailure(e: JsonRpcDataError): BatchProofError {
     const data = typeof e.data === 'object' && e.data !== null ? (e.data as Record<string, unknown>) : {};
     const detail = typeof data.detail === 'string' ? data.detail : undefined;
@@ -113,6 +157,15 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     const code = e.code;
     switch (code) {
       case -32008: // proof unavailable
+        if (isBatchStateDetail(detail)) {
+          // by the contract only a pending state is worth another attempt, whatever else the data says
+          return new BatchProofError('unavailable', e.message, {
+            code,
+            detail,
+            ...AggregatorClient.stateIndexes(data, detail),
+            retryable: detail === 'state_pending',
+          });
+        }
         return detail === 'unsupported_configuration'
           ? new BatchProofError('unsupported', e.message, { code, detail })
           : new BatchProofError('unavailable', e.message, { code, detail, retryable });
@@ -134,16 +187,38 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
   }
 
+  private static stateIndexes(
+    data: Record<string, unknown>,
+    detail: string,
+  ): { indexes?: readonly number[]; indexesByClass?: BatchIndexesByClass } {
+    const indexesByClass = AggregatorClient.offendingIndexes(data);
+    const own = indexesByClass?.[detail.replace(/^state_/, '') as BatchIndexClass];
+    return { ...(indexesByClass ? { indexesByClass } : {}), ...(own ? { indexes: own } : {}) };
+  }
+
   /**
    * @inheritDoc
    */
-  public async getInclusionProof(stateId: StateId, options?: IRequestOptions): Promise<InclusionProofResponse> {
-    const data = { stateId: HexConverter.encode(stateId.data) };
-    return InclusionProofResponse.fromCBOR(
-      HexConverter.decode(
-        (await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options)) as string,
-      ),
-    );
+  public async getInclusionProof(
+    stateId: StateId,
+    options?: IInclusionProofRequestOptions,
+  ): Promise<InclusionProofResponse> {
+    const data: { includeStatus?: true; stateId: string } = { stateId: HexConverter.encode(stateId.data) };
+    if (options?.includeStatusHint === true) {
+      data.includeStatus = true;
+    }
+    const result = await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options);
+
+    // a plain string is the legacy result (and the answer of a server that ignores the flag): no status
+    if (typeof result === 'string') {
+      return InclusionProofResponse.fromCBOR(HexConverter.decode(result));
+    }
+    if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
+      throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
+    }
+    const { proof, status } = result as { proof: string; status?: unknown };
+    // an unrecognized status value is treated like no status at all
+    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatusHint(parseProofStatusHint(status));
   }
 
   /**
@@ -219,12 +294,25 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       headers.set('X-API-Key', this.#key);
     }
 
-    const response = await this.transport.request(
-      'certification_request',
-      HexConverter.encode(request.toCBOR()),
-      headers,
-      options,
-    );
+    let response: unknown;
+    try {
+      response = await this.transport.request(
+        'certification_request',
+        HexConverter.encode(request.toCBOR()),
+        headers,
+        options,
+      );
+    } catch (e) {
+      // The Mongo backed queue rejects a second request for a state id by its unique state id index, and the server
+      // reports that as an internal error naming the duplicate key. That says a request for this state id is queued,
+      // not that it is THIS request (a different transaction for the same state is rejected the same way), so the
+      // submission is not reported as accepted: the caller waits for the proof and compares it. A server that compares
+      // the queued request answers ALREADY_SUBMITTED explicitly.
+      if (AggregatorClient.isDuplicateSubmission(e)) {
+        return CertificationResponse.create(CertificationStatus.STATE_ID_QUEUED);
+      }
+      throw e;
+    }
 
     return CertificationResponse.fromJSON(response);
   }
