@@ -3,9 +3,11 @@ import { ProofUnavailableReason } from './ConsolidationResult.js';
 import { IShardEndpoint, ShardRouting } from './ShardRouting.js';
 import { BatchProofError, isBatchStateDetail } from '../api/BatchProofError.js';
 import { PartitionViewAuthenticator } from '../api/bft/AuthenticatedPartitionView.js';
+import { PartitionViewLeaf } from '../api/bft/PartitionView.js';
 import { PartitionViewError } from '../api/bft/PartitionViewError.js';
 import { ShardId } from '../api/bft/ShardId.js';
 import { UnicityCertificate } from '../api/bft/UnicityCertificate.js';
+import { UnicitySeal } from '../api/bft/UnicitySeal.js';
 import { UnicitySealHashMatchesWithRootHashRule } from '../api/bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
 import { CertificationData } from '../api/CertificationData.js';
@@ -89,6 +91,14 @@ export type ConsolidationAttempt =
       readonly retryable: boolean;
       readonly status: 'unavailable';
     };
+
+/** What the replacement certificates are derived from: an authenticated view or the unsharded certificate itself. */
+interface IConsolidationTarget {
+  readonly networkId: NetworkId;
+  readonly seal: UnicitySeal;
+  certificateOf(shard: ShardId): UnicityCertificate;
+  leafOf(shard: ShardId): PartitionViewLeaf;
+}
 
 /** Service outcome that ends the attempt as `unavailable`, internal control flow. */
 class Unavailable extends Error {
@@ -242,6 +252,7 @@ function viewFailure(e: unknown, shard: ShardId): unknown {
  */
 export class ProofConsolidator {
   public static readonly DEFAULT_MAX_PARALLEL = 4;
+
   public static readonly DEFAULT_TIMEOUT_MS = 10_000;
 
   private readonly pins: ReadonlyMap<string, Uint8Array>;
@@ -360,6 +371,64 @@ export class ProofConsolidator {
   }
 
   /**
+   * The master target of an unsharded partition: the ordinary certificate itself. With the empty shard id and no
+   * shard tree siblings the shard tree is the one leaf, so the certificate already commits to everything a one-leaf
+   * partition view would repeat; no view is received, decoded, authenticated or derived. This is not an optional
+   * view: it holds only for a certificate that is for the configured partition, the empty shard (one routed group,
+   * no peers, scheme empty) and an empty shard path, and it passes the same pins, structure, seal-hash path and strict
+   * seal authentication (network, epoch interval, quorum) as any other target. Anything else is an integrity error,
+   * never a fallback.
+   */
+  private async authenticateDirect(
+    enclosing: UnicityCertificate,
+    masterShard: ShardId,
+    groupCount: number,
+  ): Promise<IConsolidationTarget> {
+    const shardPath = enclosing.shardTreeCertificate;
+    if (masterShard.length !== 0 || groupCount !== 1 || this.routing.scheme.length !== 0) {
+      throw integrity(
+        'binding_mismatch',
+        'A direct target needs the unsharded partition with one routed shard.',
+        masterShard,
+      );
+    }
+    if (shardPath.shard.length !== 0 || shardPath.siblingHashList.length !== 0) {
+      throw integrity(
+        'binding_mismatch',
+        'A certificate without partition view must have the empty shard and path.',
+        masterShard,
+      );
+    }
+    enclosing.unicityTreeCertificate.steps.forEach((step, i) => {
+      if (step == null) {
+        throw integrity('invalid_input', `Unicity tree certificate hash step ${i} is nil.`, masterShard);
+      }
+    });
+    this.checkUcShape(0, enclosing, masterShard);
+    if ((await UnicitySealHashMatchesWithRootHashRule.verify(enclosing)).status !== VerificationStatus.OK) {
+      throw integrity('binding_mismatch', 'The certificate path does not reach the seal hash.', masterShard);
+    }
+    const result = await this.session.authenticate(enclosing.unicitySeal);
+    if (result.status !== VerificationStatus.OK) {
+      throw integrity('unauthenticated', `Authenticating unicity seal: ${result.message || 'failed'}.`, masterShard);
+    }
+    const fixed = enclosing;
+    return {
+      certificateOf: (shard: ShardId): UnicityCertificate => {
+        if (shard.length !== 0) {
+          throw new PartitionViewError('topology', 'A direct target has only the empty shard.');
+        }
+        return fixed;
+      },
+      leafOf: (): never => {
+        throw new PartitionViewError('topology', 'A direct target has no peer shards.');
+      },
+      networkId: enclosing.unicitySeal.networkId,
+      seal: enclosing.unicitySeal,
+    };
+  }
+
+  /**
    * Authenticate every original proof (shard and partition path to its seal hash, leaf rules, seal quorum under the
    * trusted authority) and derive R_min: the highest root round among them. All seals must be of one network.
    */
@@ -397,6 +466,23 @@ export class ProofConsolidator {
       }
     }
     return best as { network: NetworkId; round: bigint; shard: ShardId };
+  }
+
+  /** The master target from its authenticated partition view: one leaf per shard, every certificate derived from it. */
+  private async authenticateView(
+    viewBytes: Uint8Array,
+    enclosing: UnicityCertificate,
+    masterShard: ShardId,
+  ): Promise<IConsolidationTarget> {
+    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
+      scheme: this.routing.scheme,
+      shardConfigurationPins: this.routing.shardConfigurationPins,
+    });
+    try {
+      return await authenticator.authenticate(viewBytes, enclosing);
+    } catch (e) {
+      throw viewFailure(e, masterShard);
+    }
   }
 
   /** The source proofs are rooted at the state the master view commits to, for this very shard and partition. */
@@ -686,27 +772,23 @@ export class ProofConsolidator {
     const masterBatch = await this.fetch(master, stateIds, undefined, clock, 'master');
     requests++;
     const viewBytes = masterBatch.batch.partitionViewBytes;
-    if (!viewBytes) {
-      throw new Unavailable('partition_view_unavailable', true, master.endpoint.shard.toString());
-    }
-    clock.throwIfDone();
     const masterShard = master.endpoint.shard;
+    clock.throwIfDone();
     const enclosing = this.commonUc(masterBatch, masterShard);
+    // decided on the SERVED certificate, like the Go and Rust clients: a sharded partition is never consolidated without
+    // its authenticated view, and only a certificate of the empty shard (the partition's single leaf) may do without
+    // one, see authenticateDirect. A certificate that contradicts the trusted routing is an integrity failure.
+    if (!viewBytes && enclosing.shardTreeCertificate.shard.length !== 0) {
+      throw new Unavailable('partition_view_unavailable', true, masterShard.toString());
+    }
     if (!enclosing.shardTreeCertificate.shard.equals(masterShard)) {
       throw integrity('binding_mismatch', 'The master certificate is of another shard.', masterShard);
     }
 
-    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
-      scheme: this.routing.scheme,
-      shardConfigurationPins: this.routing.shardConfigurationPins,
-    });
     const quorumBefore = this.session.stats.quorumChecks;
-    let authenticated;
-    try {
-      authenticated = await authenticator.authenticate(viewBytes, enclosing);
-    } catch (e) {
-      throw viewFailure(e, masterShard);
-    }
+    const authenticated = viewBytes
+      ? await this.authenticateView(viewBytes, enclosing, masterShard)
+      : await this.authenticateDirect(enclosing, masterShard, groups.length);
     const quorumChecks = this.session.stats.quorumChecks - quorumBefore;
     if (!authenticated.networkId.equals(bound.network)) {
       throw integrity('incompatible_lineage', 'The master seal is of another network than the original proofs.');

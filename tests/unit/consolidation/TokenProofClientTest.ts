@@ -264,12 +264,6 @@ describe('TokenProofClient', () => {
         'limit_exceeded',
         false,
       ],
-      [
-        'withheld partition view',
-        (s): void => void s.world.faults.set('', { withholdView: true }),
-        'partition_view_unavailable',
-        true,
-      ],
       ['publication lag', (s): void => void s.world.faults.set('', { lag: 1 }), 'pending_publication', true],
     ];
 

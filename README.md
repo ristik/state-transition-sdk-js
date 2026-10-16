@@ -177,6 +177,10 @@ never emulated) and a trusted `ShardRouting` configured once. The result is `con
 failures are thrown as `ConsolidationError` and are never reported as unavailability. Proofs nested in signed mint
 justifications, split/burn dependencies and predicate data stay byte for byte unchanged and may need other seals; tokens do
 not get smaller. The target verifier (contract, zkVM guest) must authenticate the seal itself, a host verdict is not evidence.
+An unsharded partition (a routing with the empty shard id and an empty scheme) needs no partition view: the latest response
+may omit it and the authenticated certificate itself is the target (one request, no exact-root requests). That holds only
+for the empty shard with an empty shard path under the same pins, path and strict seal authentication; a sharded partition
+without its view stays `unavailable` (`partition_view_unavailable`), and there is no option to relax it.
 See the [consolidation example](./tests/examples/consolidation/ExampleTest.ts).
 
 ## Security
