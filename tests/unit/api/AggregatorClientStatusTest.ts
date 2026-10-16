@@ -308,7 +308,7 @@ describe('resubmitting a request the aggregator already holds', () => {
     return token.genesis.inclusionProof.certificationData;
   }
 
-  it('a duplicate key error of the queue is "already submitted", not a failure', async () => {
+  it('a duplicate key error of the queue is a queued state id, which may not be this request: not accepted', async () => {
     const data = await certificationData();
     rpcError(
       -32603,
@@ -316,9 +316,24 @@ describe('resubmitting a request the aggregator already holds', () => {
       'failed to store certificationRequest: failed to store commitment: write exception: write errors: [E11000 duplicate key error collection: aggregator.certification_requests index: stateId_1 dup key: { stateId: "ab" }]',
     );
     const response = await client.submitCertificationRequest(data);
-    expect(response.status).toEqual(CertificationStatus.ALREADY_SUBMITTED);
+    expect(response.status).toEqual(CertificationStatus.STATE_ID_QUEUED);
+    expect(response.isStateIdQueued).toBe(true);
+    expect(response.isAccepted).toBe(false);
+    expect(response.isAlreadySubmitted).toBe(false);
+  });
+
+  it('only a server that compared the queued request can say already submitted', async () => {
+    const data = await certificationData();
+    jest.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const id = (JSON.parse(init?.body as string) as { id: string }).id;
+      return Promise.resolve(
+        new Response(JSON.stringify({ id, jsonrpc: '2.0', result: { status: 'ALREADY_SUBMITTED' } })),
+      );
+    });
+    const response = await client.submitCertificationRequest(data);
     expect(response.isAlreadySubmitted).toBe(true);
     expect(response.isAccepted).toBe(true);
+    expect(response.isStateIdQueued).toBe(false);
   });
 
   it('only that error is: other internal errors, other codes and other messages still fail', async () => {

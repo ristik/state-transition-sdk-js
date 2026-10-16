@@ -1,7 +1,11 @@
 import { RootTrustBase } from '../api/bft/RootTrustBase.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
-import { InclusionProofExpiredError, InclusionProofUnknownError } from '../api/InclusionProofStatusError.js';
+import {
+  InclusionProofConflictError,
+  InclusionProofExpiredError,
+  InclusionProofUnknownError,
+} from '../api/InclusionProofStatusError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
 import { PredicateVerifierService } from '../predicate/verification/PredicateVerifierService.js';
@@ -178,6 +182,8 @@ export interface IWaitInclusionProofOptions {
  * @throws {SleepError} If the abort signal fires before a proof is available.
  * @throws {InclusionProofExpiredError} If the aggregator reports the request as expired (no proof): it was dropped
  *   before inclusion. Fails fast instead of polling until the deadline.
+ * @throws {InclusionProofConflictError} If the proof served for the state id certifies another request than the
+ *   transaction (a conflicting submission was queued first); the proof is not yet authenticated.
  * @throws {InclusionProofUnknownError} If the aggregator keeps reporting the request as unknown (no proof) for longer
  *   than `unknownGraceMs` since the wait began.
  *
@@ -234,6 +240,14 @@ export async function waitInclusionProof(
     );
 
     if (verificationStatus.status !== InclusionProofVerificationStatus.OK) {
+      // another request was certified for this state id: typed, so that a conflicting submission is not reported as a
+      // generic verification failure
+      if (
+        verificationStatus.status === InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH ||
+        verificationStatus.status === InclusionProofVerificationStatus.CERTIFICATION_DATA_MISMATCH
+      ) {
+        throw new InclusionProofConflictError(verificationStatus.status, stateId, inclusionProof);
+      }
       throw new Error(`Invalid inclusion proof status: ${verificationStatus.status}`);
     }
 

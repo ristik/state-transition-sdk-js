@@ -1,7 +1,11 @@
 import { CertificationData } from '../../../src/api/CertificationData.js';
 import { IAggregatorClient } from '../../../src/api/IAggregatorClient.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
-import { InclusionProofExpiredError, InclusionProofUnknownError } from '../../../src/api/InclusionProofStatusError.js';
+import {
+  InclusionProofConflictError,
+  InclusionProofExpiredError,
+  InclusionProofUnknownError,
+} from '../../../src/api/InclusionProofStatusError.js';
 import { IInclusionProofRequestOptions } from '../../../src/api/IRequestOptions.js';
 import { ProofStatus } from '../../../src/api/ProofStatus.js';
 import { StateId } from '../../../src/api/StateId.js';
@@ -193,5 +197,58 @@ describe('proof status hints in waitInclusionProof', () => {
       return real().then((r) => r.withStatus('pending'));
     });
     await expect(wait(world, client, transaction, controller.signal)).rejects.toThrow(SleepError);
+  });
+
+  it('reports a conflicting submission: the certified request for the state id is another one', async () => {
+    const world = await ShardedWorld.create(0);
+    const salt = TokenSalt.generate();
+    const tokenType = TokenType.generate();
+    const mint = (recipient: SigningService): Promise<MintTransaction> =>
+      MintTransaction.create(world.network, SignaturePredicate.create(recipient.publicKey), { salt, tokenType });
+    // the same salt gives the same state id: R1 pays one recipient, R2 another, the queue admits only the first
+    const first = await mint(owner);
+    const second = await mint(SigningService.generate());
+    expect((await StateId.fromTransaction(first)).equals(await StateId.fromTransaction(second))).toBe(true);
+    expect((await first.calculateTransactionHash()).equals(await second.calculateTransactionHash())).toBe(false);
+    await world.router.submitCertificationRequest(await CertificationData.fromMintTransaction(first));
+
+    const client = new Scripted(world.client(''), hint('included'));
+    const error = await wait(world, client, second, AbortSignal.timeout(5000)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(InclusionProofConflictError);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toMatchObject({ name: 'InclusionProofConflictError', reason: 'TRANSACTION_HASH_MISMATCH' });
+    // legacy text kept
+    expect((error as Error).message).toContain('Invalid inclusion proof status: TRANSACTION_HASH_MISMATCH');
+    // the proof is carried (certifying the first request) but it has not been authenticated yet
+    expect(
+      (error as InclusionProofConflictError).inclusionProof.certificationData.transactionHash.equals(
+        await first.calculateTransactionHash(),
+      ),
+    ).toBe(true);
+
+    // the first transaction's own wait is unaffected
+    expect(
+      (await wait(world, new Scripted(world.client(''), hint('included')), first, AbortSignal.timeout(5000)))
+        .referenceTime,
+    ).toBeGreaterThan(0n);
+  });
+
+  it('keeps the generic error for other verification failures', async () => {
+    const { certify, transaction, world } = await setup();
+    await certify();
+    // verified against another authority: the proof matches the transaction, its seal does not verify
+    const other = await ShardedWorld.create(0);
+    const error = await waitInclusionProof(
+      new StateTransitionClient(world.client('')),
+      other.trustBase,
+      predicateVerifier,
+      verifier,
+      transaction,
+      AbortSignal.timeout(5000),
+      5,
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(InclusionProofConflictError);
+    expect((error as Error).message).toContain('Invalid inclusion proof status');
   });
 });

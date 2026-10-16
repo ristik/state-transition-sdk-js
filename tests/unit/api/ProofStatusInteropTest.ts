@@ -93,12 +93,13 @@ const id = (first: number, second = 0): StateId =>
     expect([notInRoot.detail, notInRoot.retryable, notInRoot.indexes]).toEqual(['state_not_in_root', false, [0]]);
   });
 
-  it('resubmitting a request the queue already holds is already submitted, not a failure', async () => {
+  it('resubmitting a request whose state id the queue already holds is a queued state id, not a failure', async () => {
     const s = await scenario(0);
     const token = await s.history(0);
     const response = await client.submitCertificationRequest(token.genesis.inclusionProof.certificationData);
-    expect(response.status).toEqual(CertificationStatus.ALREADY_SUBMITTED);
-    expect(response.isAccepted).toBe(true);
+    // a queued state id, not necessarily this request: not accepted, the caller waits for the proof and compares
+    expect(response.status).toEqual(CertificationStatus.STATE_ID_QUEUED);
+    expect(response.isAccepted).toBe(false);
   });
 
   describe('waitInclusionProof', () => {

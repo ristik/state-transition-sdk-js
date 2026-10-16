@@ -293,12 +293,13 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         options,
       );
     } catch (e) {
-      // Resubmitting a request that is still pending (e.g. after an `unknown` status hint from another HA instance):
-      // the Mongo backed queue rejects the copy by its unique state id index and the server reports it as an internal
-      // error naming the duplicate key, while a Redis backed one accepts and drops it. Either way the earlier copy is
-      // held, so this is "already submitted", not a failure.
+      // The Mongo backed queue rejects a second request for a state id by its unique state id index, and the server
+      // reports that as an internal error naming the duplicate key. That says a request for this state id is queued,
+      // not that it is THIS request (a different transaction for the same state is rejected the same way), so the
+      // submission is not reported as accepted: the caller waits for the proof and compares it. A server that compares
+      // the queued request answers ALREADY_SUBMITTED explicitly.
       if (AggregatorClient.isDuplicateSubmission(e)) {
-        return CertificationResponse.create(CertificationStatus.ALREADY_SUBMITTED);
+        return CertificationResponse.create(CertificationStatus.STATE_ID_QUEUED);
       }
       throw e;
     }
