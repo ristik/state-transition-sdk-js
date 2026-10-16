@@ -172,7 +172,7 @@ export class PartitionViewLeaf {
  *
  * Untagged, explicitly versioned CBOR array `[1, partitionId, [[shardId, inputRecord, trHash, shardConfHash], ...]]`
  * from which the ordinary unicity certificates of every shard can be derived. A decoded view is NOT trusted:
- * {@link PartitionView.assembleCertificates} authenticates it against the enclosing certificate and the seal.
+ * {@link PartitionViewAuthenticator.authenticate} authenticates it against the enclosing certificate and the seal.
  */
 export class PartitionView {
   /** Maximum size of an encoded view. */
@@ -193,8 +193,6 @@ export class PartitionView {
   private static readonly MAX_PARTITION_ID = 0xffffffffn;
 
   private static readonly VERSION = 1n;
-
-  /** The pins by shard bit string; unknown shards, duplicates and wrong lengths are errors. */
 
   private readonly _leaves: PartitionViewLeaf[];
 
@@ -367,7 +365,7 @@ export class PartitionView {
    * validated, the partition certificate must be for the view's partition and the rebuilt shard tree root must evaluate
    * through it to the seal hash. The enclosing certificate's own shard leaf must match the view completely.
    *
-   * The seal signatures are NOT checked here, see {@link PartitionView.assembleCertificates}.
+   * The seal signatures are NOT checked here, see {@link PartitionViewAuthenticator.authenticate}.
    *
    * @param {UnicityCertificate} enclosingUc Certificate carrying the seal the view is committed under.
    * @param {bigint} partition Expected partition id.
@@ -529,6 +527,7 @@ export class PartitionView {
     );
   }
 
+  /** The pins by shard bit string; unknown shards, duplicates and wrong lengths are errors. */
   private resolvePins(pins: readonly IShardConfigurationPin[] | undefined): Map<string, Uint8Array> {
     const resolved = new Map<string, Uint8Array>();
     for (const pin of pins ?? []) {

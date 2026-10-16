@@ -1,4 +1,3 @@
-import { abortable, SleepError, sleep, throwIfAborted } from './abortable.js';
 import { RootTrustBase } from '../api/bft/RootTrustBase.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
@@ -9,6 +8,7 @@ import {
 } from '../api/InclusionProofStatusError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
+import { abortable, SleepError, sleep, throwIfAborted } from '../internal/abortable.js';
 import { PredicateVerifierService } from '../predicate/verification/PredicateVerifierService.js';
 import { StateTransitionClient } from '../StateTransitionClient.js';
 import { ITransaction } from '../transaction/ITransaction.js';

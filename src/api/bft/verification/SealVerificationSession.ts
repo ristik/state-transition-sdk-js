@@ -208,14 +208,14 @@ export class SealVerificationSession implements ISealAuthenticator {
   }
 
   /**
-   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Quorum signatures of the seal against the
-   * session's trust base only: NO structure, network, epoch or epoch start checks. It exists for the ordinary token
-   * verification, which has always accepted the seals of original proofs (possibly of earlier epochs, or of fixtures
-   * with no timestamp) on signatures alone, and for authenticating such original proofs. Results are memoized and
-   * in-flight deduplicated like `authenticate`'s, and the memo is shared, so one distinct complete seal is checked once.
-   * Sharing is safe because `authenticate` re-runs the structure and authority checks before every memo lookup:
-   * a quorum-only success never lets a seal pass the strict path. (The structure check is deliberately not applied
-   * here: it would reject seals that the SDK has always accepted.)
+   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Checks only the quorum signatures of
+   * the seal against the session's trust base: no structure, network, epoch or epoch start checks. Ordinary token
+   * verification needs exactly this, because it has always accepted original proofs' seals on signatures alone
+   * (including seals of earlier epochs and fixtures without a timestamp). Results are memoized and in-flight
+   * deduplicated like `authenticate`'s, in a memo shared with it, so a distinct complete seal is checked once.
+   * The structure check is deliberately not applied here, as it would reject seals the SDK has always accepted; the
+   * shared memo is still safe because `authenticate` runs its structure and authority checks before every memo lookup,
+   * so a quorum-only success can never admit a seal through the strict path.
    *
    * @internal
    * @param {UnicitySeal} seal Seal.

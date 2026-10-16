@@ -22,7 +22,7 @@ import { NetworkId } from '../api/NetworkId.js';
 import { StateId } from '../api/StateId.js';
 import { DataHash } from '../crypto/hash/DataHash.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
-import { abortable, SleepError } from '../util/abortable.js';
+import { abortable, SleepError } from '../internal/abortable.js';
 import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
