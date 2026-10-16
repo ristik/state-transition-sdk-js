@@ -4,13 +4,18 @@ import { join } from 'node:path';
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
-import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
+import {
+  OperationUnicityCertificateVerifier,
+  UnicityCertificateVerifier,
+} from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
 import {
   fetchMembershipEvidence,
   INonInclusionAggregatorClient,
   isNonInclusionAggregatorClient,
 } from '../../../src/api/INonInclusionAggregatorClient.js';
+import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js';
+import { JsonRpcNetworkError } from '../../../src/api/json-rpc/JsonRpcNetworkError.js';
 import { NonInclusionProof } from '../../../src/api/NonInclusionProof.js';
 import { NonInclusionProofError } from '../../../src/api/NonInclusionProofError.js';
 import { verifyNonInclusion, VerifiedAbsence } from '../../../src/api/NonInclusionVerification.js';
@@ -128,6 +133,8 @@ describe('AggregatorClient.getNonInclusionProof', () => {
       await expect(client.getNonInclusionProof(stateId)).rejects.toMatchObject({ kind: 'transport', retryable: true });
       respondWith(() => ({ error: { code: -32022, message: 'm' }, id: 'someone-else', jsonrpc: '2.0' }), 409);
       await expect(client.getNonInclusionProof(stateId)).rejects.toMatchObject({ kind: 'transport' });
+      respondWith((id) => ({ error: { code: -32022, message: 'm' }, id, jsonrpc: '1.0' }), 409);
+      await expect(client.getNonInclusionProof(stateId)).rejects.toMatchObject({ kind: 'transport' });
       respondWith(() => ({ error: { code: -32022, message: 'm' }, id: 'someone-else', jsonrpc: '2.0' }));
       await expect(client.getNonInclusionProof(stateId)).rejects.toMatchObject({ kind: 'invalid_response' });
       respondWith((id) => ({ error: { code: -32022, message: 'm' }, id, jsonrpc: '2.0', result: golden.wrapper }));
@@ -196,13 +203,49 @@ describe('AggregatorClient.getNonInclusionProof', () => {
       expect(inclusion).not.toHaveBeenCalled();
     });
 
-    it('does not accept an inclusion claim without a proof', async () => {
-      const claim: INonInclusionAggregatorClient = {
-        getInclusionProof: () => Promise.resolve({ inclusionProof: null } as unknown as InclusionProofResponse),
-        getNonInclusionProof: () => Promise.resolve({ kind: 'state_included_hint' }),
-        submitCertificationRequest: jest.fn(),
-      };
-      await expect(fetchMembershipEvidence(claim, stateId)).rejects.toMatchObject({ kind: 'invalid_response' });
+    const claiming = (
+      inclusion: INonInclusionAggregatorClient['getInclusionProof'],
+    ): INonInclusionAggregatorClient => ({
+      getInclusionProof: inclusion,
+      getNonInclusionProof: () => Promise.resolve({ kind: 'state_included_hint' }),
+      submitCertificationRequest: jest.fn(),
+    });
+
+    it('treats a claimed inclusion without a proof yet as a retryable race, not a bad response', async () => {
+      const client = claiming(() => Promise.resolve({ inclusionProof: null } as unknown as InclusionProofResponse));
+      await expect(fetchMembershipEvidence(client, stateId)).rejects.toMatchObject({
+        kind: 'unavailable',
+        retryable: true,
+      });
+    });
+
+    it('types every failure of the second call like the first, and bounds it by the signal', async () => {
+      await expect(
+        fetchMembershipEvidence(
+          claiming(() => Promise.reject(new JsonRpcNetworkError(502, 'bad gateway'))),
+          stateId,
+        ),
+      ).rejects.toMatchObject({ kind: 'transport', retryable: true });
+      await expect(
+        fetchMembershipEvidence(
+          claiming(() => Promise.reject(new JsonRpcDataError({ code: -32023, message: 'busy' }))),
+          stateId,
+        ),
+      ).rejects.toMatchObject({ kind: 'busy' });
+
+      // a second call that ignores the signal and never answers
+      const controller = new AbortController();
+      const reason = new Error('stop');
+      setTimeout(() => controller.abort(reason), 20);
+      const error = (await fetchMembershipEvidence(
+        claiming(() => new Promise(() => undefined)),
+        stateId,
+        {
+          signal: controller.signal,
+        },
+      ).catch((e: unknown) => e)) as NonInclusionProofError;
+      expect(error).toMatchObject({ kind: 'cancelled' });
+      expect(error.cause).toBe(reason);
     });
   });
 });
@@ -259,5 +302,14 @@ describe('non-inclusion API shape', () => {
     expect(NonInclusionProofError.is(new Error('x'))).toBe(false);
     const context: IVerificationContext['trustBase'] = trustBase;
     expect(context).toBeDefined();
+  });
+
+  it('shares the seal session of an operation scoped verifier: a seal is checked once, no extra knob', async () => {
+    const operation = verifier.beginOperation();
+    const context = { trustBase, unicityCertificateVerifier: operation };
+    const first = await verifyNonInclusion(proof, context, { expectedPartition: 161n });
+    const second = await verifyNonInclusion(proof, context, { expectedPartition: 161n });
+    expect([first.status, second.status]).toEqual([VerificationStatus.OK, VerificationStatus.OK]);
+    expect((operation as OperationUnicityCertificateVerifier).stats.quorumChecks).toEqual(1);
   });
 });

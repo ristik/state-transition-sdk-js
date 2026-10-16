@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
@@ -120,5 +121,54 @@ describe('non-inclusion corpus v1', () => {
         expect([c.expected.verdict, ...(c.expected.acceptable ?? [])]).toContain(verdict);
       }
     });
+  });
+});
+
+interface IRpcCase {
+  readonly body: string;
+  readonly expected: string;
+  readonly httpStatus: number;
+  readonly name: string;
+  readonly requestId: number;
+}
+
+/** The shared table of how a client classifies an answer, mapped to this SDK's vocabulary. */
+const RPC_KINDS: Record<string, string[]> = {
+  busy: ['busy'],
+  internal: ['server'],
+  invalid_params: ['rejected'],
+  method_not_found: ['rejected'],
+  state_included: ['state_included_hint'],
+  // not a complete matching envelope: never evidence, either a transport failure or an invalid response
+  transport_error: ['transport', 'invalid_response'],
+  unavailable: ['unavailable'],
+};
+
+describe('non-inclusion rpc-errors corpus', () => {
+  afterEach(() => jest.restoreAllMocks());
+  const cases = json<{ cases: IRpcCase[] }>('rpc-errors.json').cases;
+
+  it.each(cases.map((c) => [c.name, c] as const))('%s', async (_name, c) => {
+    jest.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+      const id = (JSON.parse(init?.body as string) as { id: string }).id;
+      // the table names the request id 7; ids other than 7 stay different from the real one
+      return Promise.resolve(
+        new Response(c.body.replace(`"id":${c.requestId}`, `"id":${JSON.stringify(id)}`), { status: c.httpStatus }),
+      );
+    });
+    const answer = await new AggregatorClient('https://example.com')
+      .getNonInclusionProof(stateIdOf('00'.repeat(32)))
+      .then(
+        (r) => ({ kind: r.kind }),
+        (e: unknown) => ({ code: (e as { code?: number }).code, kind: (e as { kind: string }).kind }),
+      );
+    if (c.expected === 'result') {
+      // the string is decoded by the wrapper rules: "00" is no wrapper
+      expect(answer.kind).toEqual('invalid_response');
+    } else if (c.expected.startsWith('rpc_error:')) {
+      expect(answer).toEqual({ code: Number(c.expected.slice('rpc_error:'.length)), kind: 'server' });
+    } else {
+      expect(RPC_KINDS[c.expected]).toContain(answer.kind);
+    }
   });
 });

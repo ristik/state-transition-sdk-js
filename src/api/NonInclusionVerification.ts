@@ -1,5 +1,6 @@
 import { UnicitySealHashMatchesWithRootHashRule } from './bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './bft/verification/SealVerificationSession.js';
+import { OperationUnicityCertificateVerifier } from './bft/verification/UnicityCertificateVerifier.js';
 import { NonInclusionProof } from './NonInclusionProof.js';
 import { StateId } from './StateId.js';
 import { IVerificationContext } from '../transaction/verification/IVerificationContext.js';
@@ -20,6 +21,7 @@ export class VerifiedAbsence {
   readonly #root: Uint8Array | null;
 
   /**
+   * @internal
    * @param {symbol} capability Module private capability, not available outside this module.
    * @param {StateId} stateId The state.
    * @param {bigint} absentAtRound Root-chain round of the authenticated seal.
@@ -76,8 +78,9 @@ export interface INonInclusionVerificationOptions {
    */
   readonly nextEpochStartRound?: bigint;
   /**
-   * Operation scoped seal session, anchored to the context's trust base. Share one with the verification of inclusion
-   * proofs (`unicityCertificateVerifier.beginOperation(session)`) so that a seal is checked once.
+   * Overrides the seal session. Not needed with an operation scoped context: if `unicityCertificateVerifier` came from
+   * `beginOperation()`, its session is used and seals shared with inclusion proofs are checked once. Must be anchored to
+   * the context's trust base.
    */
   readonly session?: SealVerificationSession;
   /** Pinned shard configuration hash of the (unsharded) partition. */
@@ -168,7 +171,13 @@ export async function verifyNonInclusion(
   }
 
   // 2. the authority, strictly
-  const session = options.session ?? new SealVerificationSession(trustBase, verifier.quorumRule);
+  // an operation scoped verifier (`beginOperation()`) shares its session, so seals already authenticated for inclusion
+  // proofs are not checked again; `options.session` overrides
+  const session =
+    options.session ??
+    (verifier instanceof OperationUnicityCertificateVerifier
+      ? verifier.sessionFor(trustBase)
+      : new SealVerificationSession(trustBase, verifier.quorumRule));
   const authenticated = await session.authenticate(seal);
   if (authenticated.status !== VerificationStatus.OK) {
     return reject('authority_rejected', authenticated.message || 'The seal is not authenticated.');

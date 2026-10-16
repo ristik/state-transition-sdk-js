@@ -121,13 +121,22 @@ export class JsonRpcHttpTransport {
     const body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
     const envelope = JsonRpcHttpTransport.parseEnvelope(body);
     if (!response.ok) {
-      // A complete JSON-RPC error envelope for this very request carries the service's own code whatever the HTTP status
-      // is (some deployments answer 404, 409 or 429); anything else (a proxy page, an empty body, another id) is a
-      // failure of the transport and says nothing about the request.
-      if (envelope !== null && envelope.error != null && envelope.result === undefined && envelope.id === id) {
-        throw JsonRpcHttpTransport.dataError(envelope.error, true);
+      // Always a network error with its status, as it has been. A complete JSON-RPC error envelope for this very request
+      // (version, id, an error and no result) is attached as `rpcError`: the service's own code, whatever the HTTP status
+      // is (some deployments answer 404, 409 or 429). Anything else (a proxy page, an empty body, another id or version)
+      // says nothing about the request.
+      let rpcError: JsonRpcDataError | undefined;
+      if (
+        envelope !== null &&
+        envelope.jsonrpc === '2.0' &&
+        envelope.error != null &&
+        envelope.result === undefined &&
+        envelope.id === id
+      ) {
+        const candidate = JsonRpcHttpTransport.dataError(envelope.error, true);
+        rpcError = candidate instanceof JsonRpcDataError ? candidate : undefined;
       }
-      throw new JsonRpcNetworkError(response.status, body);
+      throw new JsonRpcNetworkError(response.status, body, rpcError);
     }
 
     if (envelope === null) {

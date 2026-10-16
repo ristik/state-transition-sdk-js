@@ -1,9 +1,12 @@
 import { IAggregatorClient } from './IAggregatorClient.js';
 import { InclusionProof } from './InclusionProof.js';
+import { InclusionProofResponse } from './InclusionProofResponse.js';
 import { IRequestOptions } from './IRequestOptions.js';
 import { NonInclusionProof } from './NonInclusionProof.js';
 import { NonInclusionProofError } from './NonInclusionProofError.js';
 import { StateId } from './StateId.js';
+import { abortable } from '../internal/abortable.js';
+import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
 
 /**
  * What the service answered to a non-inclusion request.
@@ -60,7 +63,9 @@ export type MembershipEvidence =
  * @param {StateId} stateId The state.
  * @param {IRequestOptions} [options] Abort signal, used for both calls.
  * @returns {Promise<MembershipEvidence>} Unverified evidence.
- * @throws {NonInclusionProofError} If the calls fail, or the service claimed inclusion and then has no proof for it.
+ * @throws {NonInclusionProofError} Every failure of either call, typed like `getNonInclusionProof`'s (a cancellation with
+ *   `cause = signal.reason`); a service that claimed inclusion and has no inclusion proof yet is `unavailable`, retryable
+ *   (the calls are not atomic and may see different snapshots).
  */
 export async function fetchMembershipEvidence(
   client: INonInclusionAggregatorClient,
@@ -71,11 +76,21 @@ export async function fetchMembershipEvidence(
   if (answer.kind === 'absence_proof') {
     return { kind: 'absence', proof: answer.proof };
   }
-  const included = await client.getInclusionProof(stateId, options);
+  // the second call is bounded by the same signal, and its failures are typed like the first call's
+  const signal = options?.signal;
+  let included: InclusionProofResponse;
+  try {
+    included = await (signal
+      ? abortable((s) => client.getInclusionProof(stateId, { ...options, signal: s }), signal)
+      : client.getInclusionProof(stateId, options));
+  } catch (e) {
+    throw classifyNonInclusionFailure(e, signal) ?? e;
+  }
   if (!included.inclusionProof) {
     throw new NonInclusionProofError(
-      'invalid_response',
-      'The service claimed the state is included but returned no inclusion proof for it.',
+      'unavailable',
+      'The service claimed the state is included, but no inclusion proof is available yet.',
+      { retryable: true },
     );
   }
   return { kind: 'inclusion', proof: included.inclusionProof };
