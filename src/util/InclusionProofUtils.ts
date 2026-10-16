@@ -6,6 +6,7 @@ import {
   InclusionProofExpiredError,
   InclusionProofUnknownError,
 } from '../api/InclusionProofStatusError.js';
+import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
 import { abortable, SleepError, sleep, throwIfAborted } from '../internal/abortable.js';
@@ -38,6 +39,11 @@ export interface IWaitInclusionProofOptions {
    */
   readonly unknownGraceMs?: number;
 }
+
+/** Aggregator answer: accepted, not yet certified. */
+const CERTIFICATION_PENDING_CODE = -32021;
+/** Aggregator answer: no proof known for the state (the JSON-RPC form of HTTP 404). */
+const NOT_FOUND_CODE = -32020;
 
 function isSignalLike(value: unknown): value is AbortSignal {
   return (
@@ -186,10 +192,19 @@ export async function waitInclusionProof(
         return inclusionProof;
       }
     } catch (err) {
-      // A missing proof is the expected "not certified yet" answer; anything
-      // else — including the {@link SleepError} raised on abort — ends the wait.
-      if (!(err instanceof JsonRpcNetworkError && err.status === 404)) {
+      // A missing proof is the expected "not certified yet" answer. JSON-RPC -32021 (certification pending) always keeps
+      // polling. HTTP 404 and -32020 (no proof known for the state) are the legacy "unknown" answer: without status hints
+      // they keep polling, with hints they follow the `unknown` hint (grace period, then InclusionProofUnknownError).
+      // Anything else, including the {@link SleepError} raised on abort, ends the wait.
+      const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
+      const unknown =
+        (err instanceof JsonRpcNetworkError && err.status === 404) ||
+        (err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);
+      if (!pending && !unknown) {
         throw err;
+      }
+      if (unknown && statusHints && Date.now() - started >= unknownGraceMs) {
+        throw new InclusionProofUnknownError(stateId, Date.now() - started);
       }
     }
 
