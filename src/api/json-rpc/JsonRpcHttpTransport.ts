@@ -27,6 +27,28 @@ export class JsonRpcHttpTransport {
     this.maxResponseBytes = maxResponseBytes;
   }
 
+  /** The error object of an envelope as an error, or a response error if it is not a valid error object. */
+  private static dataError(error: unknown, idMatched: boolean): JsonRpcDataError | JsonRpcResponseError {
+    if (
+      typeof error !== 'object' ||
+      error === null ||
+      !Number.isSafeInteger((error as { code?: unknown }).code) ||
+      typeof (error as { message?: unknown }).message !== 'string'
+    ) {
+      return new JsonRpcResponseError('JSON-RPC error object needs an integer code and a message.');
+    }
+    return new JsonRpcDataError(error as { code: number; data?: unknown; message: string }, idMatched);
+  }
+
+  private static parseEnvelope(body: string): IJsonRpcResponse | null {
+    try {
+      const data: unknown = JSON.parse(body);
+      return typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as IJsonRpcResponse) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Read a response body as text, rejecting bodies larger than `maxBytes`.
    *
@@ -97,20 +119,21 @@ export class JsonRpcHttpTransport {
     });
 
     const body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
+    const envelope = JsonRpcHttpTransport.parseEnvelope(body);
     if (!response.ok) {
+      // A complete JSON-RPC error envelope for this very request carries the service's own code whatever the HTTP status
+      // is (some deployments answer 404, 409 or 429); anything else (a proxy page, an empty body, another id) is a
+      // failure of the transport and says nothing about the request.
+      if (envelope !== null && envelope.error != null && envelope.result === undefined && envelope.id === id) {
+        throw JsonRpcHttpTransport.dataError(envelope.error, true);
+      }
       throw new JsonRpcNetworkError(response.status, body);
     }
 
-    let data: IJsonRpcResponse;
-    try {
-      data = JSON.parse(body) as IJsonRpcResponse;
-    } catch {
-      throw new JsonRpcResponseError('JSON-RPC response is not valid JSON.');
+    if (envelope === null) {
+      throw new JsonRpcResponseError('JSON-RPC response is not a valid JSON object.');
     }
-
-    if (typeof data !== 'object' || data === null) {
-      throw new JsonRpcResponseError('JSON-RPC response must be an object.');
-    }
+    const data = envelope;
     if (data.jsonrpc !== '2.0') {
       throw new JsonRpcResponseError(`Unsupported JSON-RPC version: ${String(data.jsonrpc)}.`);
     }
@@ -122,7 +145,12 @@ export class JsonRpcHttpTransport {
     }
 
     if (data.error != null) {
-      throw new JsonRpcDataError(data.error);
+      // an error that answers no request of ours (a null id is what a server uses when it could not read the id) is
+      // kept for the callers that tolerate it, marked as not matched
+      if (data.id !== id && data.id !== null) {
+        throw new JsonRpcResponseError(`JSON-RPC response id mismatch: expected ${id}, got ${String(data.id)}.`);
+      }
+      throw JsonRpcHttpTransport.dataError(data.error, data.id === id);
     }
 
     if (data.id !== id) {
