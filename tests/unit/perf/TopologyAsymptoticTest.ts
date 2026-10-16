@@ -1,8 +1,8 @@
 import { InputRecord } from '../../../src/api/bft/InputRecord.js';
 import { PartitionViewError } from '../../../src/api/bft/PartitionViewError.js';
 import { ShardId } from '../../../src/api/bft/ShardId.js';
-import { canonicalShardOrder, ITopologyMetrics } from '../../../src/api/bft/ShardTopology.js';
-import { ShardTree } from '../../../src/api/bft/ShardTree.js';
+import { canonicalShardOrder, ITopologyMetrics } from '../../../src/internal/bft/ShardTopology.js';
+import { ShardTree } from '../../../src/internal/bft/ShardTree.js';
 
 const BIG = 1 << 16;
 

@@ -1,15 +1,31 @@
-import { authorityIdentity } from './authorityIdentity.js';
 import { ISealAuthenticator } from './ISealAuthenticator.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
+import { authorityIdentity } from '../../../internal/bft/authorityIdentity.js';
 import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../util/HexConverter.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { NetworkId } from '../../NetworkId.js';
+import { SdkError } from '../../SdkError.js';
 import { RootTrustBase } from '../RootTrustBase.js';
 import { UnicitySeal } from '../UnicitySeal.js';
+
+/**
+ * The session has as many distinct seal checks running as it allows. A resource limit of the operation, not a
+ * verification result: nothing about the seal is known. Retry later or verify with a larger `maxInFlight`.
+ */
+export class SealVerificationBusyError extends SdkError<'SealVerificationBusyError'> {
+  public override readonly name = 'SealVerificationBusyError' as const;
+
+  /**
+   * @param {number} maxInFlight The session's bound.
+   */
+  public constructor(public readonly maxInFlight: number) {
+    super(`Too many concurrent seal verifications in the session (limit ${maxInFlight}).`);
+  }
+}
 
 /**
  * Counters of a {@link SealVerificationSession}.
@@ -72,11 +88,11 @@ export class SealVerificationSession implements ISealAuthenticator {
   ) {
     const maxEntries = options.maxEntries ?? 64;
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
-      throw new Error('SealVerificationSession maxEntries must be a positive integer');
+      throw new RangeError('SealVerificationSession maxEntries must be a positive integer');
     }
     const maxInFlight = options.maxInFlight ?? 64;
     if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
-      throw new Error('SealVerificationSession maxInFlight must be a positive integer');
+      throw new RangeError('SealVerificationSession maxInFlight must be a positive integer');
     }
     // The operation's authority is snapshotted once: every check of this session verifies against the snapshot and
     // every memo key commits to its identity, which is computed exactly once. Later changes to the caller's object
@@ -188,19 +204,24 @@ export class SealVerificationSession implements ISealAuthenticator {
       return Promise.resolve(new VerificationResult('SealAuthority', VerificationStatus.FAIL, failure));
     }
 
-    return this.verifyQuorum(seal);
+    return this.verifyQuorumSignaturesOnly(seal);
   }
 
   /**
-   * Quorum signatures of the seal against the session's trust base, memoized and in-flight deduplicated exactly like
-   * {@link SealVerificationSession.authenticate}, but WITHOUT the authority context checks (structure, epoch, epoch
-   * start). This is what the ordinary token verification does for the seals of original proofs, which may belong to
-   * earlier epochs; it shares the memo with the strict path, so one distinct complete seal is checked once.
+   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Checks only the quorum signatures of
+   * the seal against the session's trust base: no structure, network, epoch or epoch start checks. Ordinary token
+   * verification needs exactly this, because it has always accepted original proofs' seals on signatures alone
+   * (including seals of earlier epochs and fixtures without a timestamp). Results are memoized and in-flight
+   * deduplicated like `authenticate`'s, in a memo shared with it, so a distinct complete seal is checked once.
+   * The structure check is deliberately not applied here, as it would reject seals the SDK has always accepted; the
+   * shared memo is still safe because `authenticate` runs its structure and authority checks before every memo lookup,
+   * so a quorum-only success can never admit a seal through the strict path.
    *
+   * @internal
    * @param {UnicitySeal} seal Seal.
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
-  public async verifyQuorum(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
+  public async verifyQuorumSignaturesOnly(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
     if (this.customRule) {
       this.counters.quorumChecks++;
       return this.quorumRule.verify(this.source, seal);
@@ -218,7 +239,7 @@ export class SealVerificationSession implements ISealAuthenticator {
     }
 
     if (this.inFlight.size >= (this.options.maxInFlight ?? 64)) {
-      throw new Error('Too many concurrent seal verifications in the session.');
+      throw new SealVerificationBusyError(this.options.maxInFlight ?? 64);
     }
 
     this.counters.quorumChecks++;

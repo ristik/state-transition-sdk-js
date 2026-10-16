@@ -7,6 +7,7 @@ import {
 } from '../../../../src/api/bft/AuthenticatedPartitionView.js';
 import { PartitionView } from '../../../../src/api/bft/PartitionView.js';
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
+import { ShardId } from '../../../../src/api/bft/ShardId.js';
 import { UnicityCertificate } from '../../../../src/api/bft/UnicityCertificate.js';
 import { UnicityTreeCertificate } from '../../../../src/api/bft/UnicityTreeCertificate.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
@@ -133,11 +134,11 @@ describe('AuthenticatedPartitionView', () => {
 
   it('includes pins in the identity of the authenticator and of the views it produces', async () => {
     const view = PartitionView.fromCBOR(viewBytes);
-    const hashes = new Map(view.leaves.map((l) => [l.shardId.toString(), l.shardConfigurationHash]));
+    const hashes = view.leaves.map((l) => ({ hash: l.shardConfigurationHash, shard: l.shardId }));
     const plain = new PartitionViewAuthenticator(PARTITION, session);
-    const pinned = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: hashes });
+    const pinned = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationPins: hashes });
     const otherPins = new PartitionViewAuthenticator(PARTITION, session, {
-      shardConfigurationHashes: new Map([['00', new Uint8Array(32).fill(1)]]),
+      shardConfigurationPins: [{ hash: new Uint8Array(32).fill(1), shard: ShardId.fromBits('00') }],
     });
     expect(new Set([plain.identity, pinned.identity, otherPins.identity]).size).toEqual(3);
     expect((await plain.authenticate(view, ucBytes)).policy).not.toEqual(
@@ -146,7 +147,7 @@ describe('AuthenticatedPartitionView', () => {
     await expect(otherPins.authenticate(view, ucBytes)).rejects.toMatchObject({ reason: 'config_not_admitted' });
     // same pins in another map order are the same policy
     const reordered = new PartitionViewAuthenticator(PARTITION, session, {
-      shardConfigurationHashes: new Map(Array.from(hashes.entries()).reverse()),
+      shardConfigurationPins: hashes.slice().reverse(),
     });
     expect(reordered.identity).toEqual(pinned.identity);
   });
@@ -168,13 +169,15 @@ describe('AuthenticatedPartitionView', () => {
   });
 
   describe('independence of caller owned state', () => {
-    const wrongPin = (): Map<string, Uint8Array> => new Map([['00', new Uint8Array(32).fill(1)]]);
+    const wrongPin = (): { hash: Uint8Array; shard: ShardId }[] => [
+      { hash: new Uint8Array(32).fill(1), shard: ShardId.fromBits('00') },
+    ];
 
     it('applies the pins snapshotted at construction, not the caller map afterwards', async () => {
       const pins = wrongPin();
-      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins });
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationPins: pins });
       const identity = authenticator.identity;
-      pins.clear();
+      pins.length = 0;
       await expect(authenticator.authenticate(viewBytes, ucBytes)).rejects.toMatchObject({
         reason: 'config_not_admitted',
       });
@@ -184,18 +187,18 @@ describe('AuthenticatedPartitionView', () => {
     it('does not let later mutation of pin buffers or maps change the applied policy or the memo', async () => {
       const view = PartitionView.fromCBOR(viewBytes);
       const good = new Uint8Array(view.leaves[0].shardConfigurationHash);
-      const pins = new Map([['00', good]]);
-      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins });
+      const pins = [{ hash: good, shard: ShardId.fromBits('00') }];
+      const authenticator = new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationPins: pins });
       const identity = authenticator.identity;
       const first = await authenticator.authenticate(viewBytes, ucBytes);
 
       good[0] ^= 1;
-      pins.set('01', new Uint8Array(32));
+      pins.push({ hash: new Uint8Array(32), shard: ShardId.fromBits('01') });
       expect(authenticator.identity).toEqual(identity);
       expect(await authenticator.authenticate(viewBytes, ucBytes)).toBe(first);
       // a fresh authenticator over the current (mutated) policy is a different policy and rejects
       await expect(
-        new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationHashes: pins }).authenticate(
+        new PartitionViewAuthenticator(PARTITION, session, { shardConfigurationPins: pins }).authenticate(
           viewBytes,
           ucBytes,
         ),

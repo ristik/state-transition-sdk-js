@@ -11,7 +11,12 @@ import { CertificationData } from './CertificationData.js';
 import { CertificationRequest } from './CertificationRequest.js';
 import { CertificationResponse, CertificationStatus } from './CertificationResponse.js';
 import { IAggregatorClient } from './IAggregatorClient.js';
-import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
+import {
+  BATCH_MAX_STATE_IDS,
+  IBatchAggregatorClient,
+  IBatchRequestOptions,
+  InclusionProofBatch,
+} from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
 import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
@@ -20,15 +25,13 @@ import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
 import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
+import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
 import { HexConverter } from '../util/HexConverter.js';
 
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
  */
 export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient {
-  /** Most state ids of one `get_inclusion_proofs.v1` call. */
-  public static readonly BATCH_MAX_STATE_IDS = 256;
-
   private readonly transport: JsonRpcHttpTransport;
   readonly #key: string | null;
 
@@ -143,7 +146,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       }
       const valid = list.filter((i): i is number => Number.isSafeInteger(i) && (i as number) >= 0);
       total += list.length;
-      if (valid.length === list.length && total <= AggregatorClient.BATCH_MAX_STATE_IDS) {
+      if (valid.length === list.length && total <= BATCH_MAX_STATE_IDS) {
         classes[klass as BatchIndexClass] = valid;
       }
     }
@@ -228,10 +231,10 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     stateIds: readonly StateId[],
     options?: IBatchRequestOptions,
   ): Promise<InclusionProofBatch> {
-    if (stateIds.length < 1 || stateIds.length > AggregatorClient.BATCH_MAX_STATE_IDS) {
+    if (stateIds.length < 1 || stateIds.length > BATCH_MAX_STATE_IDS) {
       throw new BatchProofError(
         'rejected',
-        `Batch must contain 1..${AggregatorClient.BATCH_MAX_STATE_IDS} state ids, got ${stateIds.length}.`,
+        `Batch must contain 1..${BATCH_MAX_STATE_IDS} state ids, got ${stateIds.length}.`,
         { detail: 'state_count' },
       );
     }
@@ -240,8 +243,11 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       throw new BatchProofError('rejected', 'Batch state ids must be distinct.', { detail: 'duplicate_state_id' });
     }
     const exact = options?.stateRoot !== undefined;
-    if (exact && options.stateRoot?.data.length !== 32) {
-      throw new BatchProofError('rejected', 'stateRoot must be a 32-byte hash.', { detail: 'invalid_state_root' });
+    // the roots of the state trees are SHA-256 hashes: another algorithm is a caller error, not a lookup that misses
+    if (exact && (options.stateRoot?.algorithm !== HashAlgorithm.SHA256 || options.stateRoot.data.length !== 32)) {
+      throw new BatchProofError('rejected', 'stateRoot must be a 32-byte SHA-256 hash.', {
+        detail: 'invalid_state_root',
+      });
     }
 
     let result: unknown;
