@@ -32,7 +32,7 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
 
   private readonly _indexesByClass: BatchIndexesByClass | undefined;
 
-  private readonly _requests: 1 | 2;
+  private readonly _requests: 0 | 1 | 2;
 
   private readonly _retryable: boolean;
 
@@ -50,7 +50,8 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
    * @param {boolean} [info.retryable] Whether a new attempt may succeed.
    * @param {number} [info.waitedMs] The aggregator's echo of the time it waited (`error.data.waitedMs`), when the request
    *   asked for a wait and the aggregator sent one.
-   * @param {number} [info.requests] HTTP requests the call took: 1, or 2 after the retry without `waitMs`.
+   * @param {number} [info.requests] HTTP requests the call sent: 0 for a rejection before anything was sent (the
+   *   default), 1, or 2 after the retry without `waitMs`.
    * @param {unknown} [info.cause] Underlying error.
    */
   public constructor(
@@ -62,7 +63,7 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
       readonly detail?: string;
       readonly indexes?: readonly number[];
       readonly indexesByClass?: BatchIndexesByClass;
-      readonly requests?: 1 | 2;
+      readonly requests?: 0 | 1 | 2;
       readonly retryable?: boolean;
       readonly waitedMs?: number;
     } = {},
@@ -74,7 +75,7 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
     this._indexesByClass = info.indexesByClass;
     this._retryable = info.retryable ?? false;
     this._waitedMs = info.waitedMs ?? null;
-    this._requests = info.requests ?? 1;
+    this._requests = info.requests ?? 0;
   }
 
   /**
@@ -120,10 +121,10 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
   }
 
   /**
-   * @returns {number} HTTP requests the failed call took: 2 if the first answer was the generic `malformed_params` of a
+   * @returns {number} HTTP requests the failed call sent: 0 if it was rejected locally before anything was sent, 2 if the first answer was the generic `malformed_params` of a
    *   server that does not know `waitMs` and the repeat without it failed as well.
    */
-  public get requests(): 1 | 2 {
+  public get requests(): 0 | 1 | 2 {
     return this._requests;
   }
 

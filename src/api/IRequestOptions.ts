@@ -31,7 +31,9 @@ export interface IInclusionProofRequestOptions extends IRequestOptions {
    *
    * This is a single request option, not a polling policy: the request returns the ordinary answer when the wait
    * ends, pending included. The HTTP exchange outlives the wait, so give the call a signal or deadline that is longer
-   * than `waitMs` (see `waitInclusionProof` for a ready made policy). Must be an integer in
+   * than `waitMs`. A v2 error answer (for example `no_finalized_view`) may carry `error.data.waitedMs`; the single call
+   * surfaces such an error as the plain `JsonRpcDataError` and does not interpret that echo, which only means "pace
+   * normally" for the wait helper (see `waitInclusionProof` for a ready made policy). Must be an integer in
    * `[0, Number.MAX_SAFE_INTEGER]`, otherwise the call throws a `RangeError` before anything is sent.
    */
   readonly waitMs?: number;
