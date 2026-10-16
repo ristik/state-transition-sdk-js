@@ -48,6 +48,12 @@ export interface ITokenConsolidationOptions {
     /** Master shard to use instead; it must take part in the token's outer history. */
     readonly master?: ShardId;
   };
+  /**
+   * Opt in to one long poll on the master shard's latest request, in milliseconds; see
+   * {@link IConsolidationOptions.masterWaitMs}. The other shards' exact-root requests never wait and the attempt is not
+   * repeated.
+   */
+  readonly masterWaitMs?: number;
   /** Upper bound on concurrent exact-root requests of the second wave. Default 4. */
   readonly maxParallel?: number;
   /**
@@ -131,6 +137,7 @@ export class TokenProofClient {
   public async consolidate(token: Token, options: ITokenConsolidationOptions = {}): Promise<ConsolidationResult> {
     const attemptOptions: IConsolidationOptions = {
       master: options.advanced?.master,
+      masterWaitMs: options.masterWaitMs,
       maxParallel: options.maxParallel,
       signal: options.signal,
       timeoutMs: options.timeoutMs,
@@ -217,6 +224,7 @@ export class TokenProofClient {
 
     const attempt = await new ProofConsolidator(this.options.routing, session).consolidate(items, {
       master: options.advanced?.master,
+      masterWaitMs: options.masterWaitMs,
       maxParallel: options.maxParallel,
       signal: clock.signal,
       timeoutMs: remainingMs(),

@@ -20,6 +20,7 @@ import {
 import { InclusionProof } from '../api/InclusionProof.js';
 import { InclusionProofResponse } from '../api/InclusionProofResponse.js';
 import { calculateLeafValue } from '../api/LeafValue.js';
+import { isWireMilliseconds } from '../api/LongPoll.js';
 import { NetworkId } from '../api/NetworkId.js';
 import { StateId } from '../api/StateId.js';
 import { DataHash } from '../crypto/hash/DataHash.js';
@@ -42,6 +43,16 @@ export interface IConsolidationItem {
 export interface IConsolidationOptions {
   /** Master shard to use instead of the shard of the newest original proof; it must take part. */
   readonly master?: ShardId;
+  /**
+   * Ask the master shard to hold its **latest** request for up to this many milliseconds while the proofs are merely
+   * pending (long poll), opt-in. It applies to that one request only: exact-root requests to the other shards never
+   * wait, and nothing is polled again, so an attempt is still one request per shard. The value is clamped to what the
+   * total deadline leaves minus a 2s response margin; `0` asks for the aggregator's echo without waiting. The one
+   * exception to "one request" is the aggregator's generic `malformed_params` answer to a wait it does not know: the
+   * request is repeated once without it and both requests are counted. Must be an integer in
+   * `[0, Number.MAX_SAFE_INTEGER]`.
+   */
+  readonly masterWaitMs?: number;
   /** Upper bound on concurrent exact-root requests of the second wave. Default 4. */
   readonly maxParallel?: number;
   /** Aborts the attempt and every outstanding request. */
@@ -129,11 +140,16 @@ const MAX_TIMEOUT_MS = 2 ** 31 - 1;
  * at once, a non finite parallelism starts no request at all.
  *
  * @param {IConsolidationOptions} options Options of an attempt.
- * @throws {ConsolidationError} `input` for an invalid `timeoutMs` or `maxParallel`.
+ * @throws {ConsolidationError} `input` for an invalid `timeoutMs`, `maxParallel` or `masterWaitMs`.
  * @internal
  */
 export function validateConsolidationOptions(options: IConsolidationOptions): void {
-  const { maxParallel, timeoutMs } = options;
+  const { masterWaitMs, maxParallel, timeoutMs } = options;
+  if (masterWaitMs !== undefined && !isWireMilliseconds(masterWaitMs)) {
+    throw new ConsolidationError('input', 'masterWaitMs must be an integer in [0, Number.MAX_SAFE_INTEGER].', {
+      outcome: 'invalid_input',
+    });
+  }
   if (timeoutMs !== undefined && !(Number.isFinite(timeoutMs) && timeoutMs > 0 && timeoutMs <= MAX_TIMEOUT_MS)) {
     throw new ConsolidationError('input', `timeoutMs must be a finite number in (0, ${MAX_TIMEOUT_MS}].`, {
       outcome: 'invalid_input',
@@ -153,12 +169,13 @@ export function validateConsolidationOptions(options: IConsolidationOptions): vo
  */
 export class AttemptClock {
   public readonly controller = new AbortController();
+  private readonly begun = performance.now();
   private expired = false;
   private readonly onAbort: () => void;
   private readonly timer: ReturnType<typeof setTimeout>;
 
   public constructor(
-    timeoutMs: number,
+    private readonly timeoutMs: number,
     private readonly external?: AbortSignal,
   ) {
     this.timer = setTimeout(() => {
@@ -196,6 +213,13 @@ export class AttemptClock {
         : new ConsolidationError('cancelled', 'The attempt was cancelled.', { cause: reason });
     }
     return null;
+  }
+
+  /**
+   * @returns {number} Milliseconds the attempt deadline leaves, on a monotonic clock (never negative).
+   */
+  public remainingMs(): number {
+    return Math.max(0, this.timeoutMs - (performance.now() - this.begun));
   }
 
   public throwIfDone(): void {
@@ -255,6 +279,9 @@ export class ProofConsolidator {
 
   public static readonly DEFAULT_TIMEOUT_MS = 10_000;
 
+  /** Response margin that a master wait leaves before the attempt deadline. */
+  public static readonly WAIT_MARGIN_MS = 2000;
+
   private readonly pins: ReadonlyMap<string, Uint8Array>;
 
   /**
@@ -266,6 +293,15 @@ export class ProofConsolidator {
     private readonly session: SealVerificationSession,
   ) {
     this.pins = new Map(routing.shardConfigurationPins?.map((pin) => [pin.shard.toString(), pin.hash]));
+  }
+
+  /** The wait that fits the attempt deadline, or none: `min(requested, left - margin)`; `0` stays an echo request. */
+  private static masterWait(requested: number | undefined, clock: AttemptClock): number | undefined {
+    if (requested === undefined || requested === 0) {
+      return requested;
+    }
+    const fit = Math.floor(Math.min(requested, clock.remainingMs() - ProofConsolidator.WAIT_MARGIN_MS));
+    return fit > 0 ? fit : undefined;
   }
 
   private static requestFailure(
@@ -551,10 +587,13 @@ export class ProofConsolidator {
     clock: AttemptClock,
     role: 'master' | 'peer',
     signal: AbortSignal = clock.signal,
+    waitMs?: number,
   ): Promise<IShardBatch> {
     clock.throwIfDone();
     const ids = group.indexes.map((i) => stateIds[i]);
-    const requestOptions: IBatchRequestOptions = { signal, stateRoot: root };
+    // only the latest request of the master can wait: an exact root is never waited on
+    const requestOptions: IBatchRequestOptions =
+      waitMs === undefined || root !== undefined ? { signal, stateRoot: root } : { signal, stateRoot: root, waitMs };
     try {
       // raced against the signal: a transport that ignores it cannot hang the attempt past its deadline
       const client = group.endpoint.client as unknown as {
@@ -769,8 +808,17 @@ export class ProofConsolidator {
     let requests = 0;
 
     // wave 1: the master's latest batch and partition view
-    const masterBatch = await this.fetch(master, stateIds, undefined, clock, 'master');
-    requests++;
+    const masterBatch = await this.fetch(
+      master,
+      stateIds,
+      undefined,
+      clock,
+      'master',
+      clock.signal,
+      ProofConsolidator.masterWait(options.masterWaitMs, clock),
+    );
+    // the one retry without the wait, if the aggregator did not know it, is a request too
+    requests += masterBatch.batch.requests;
     const viewBytes = masterBatch.batch.partitionViewBytes;
     const masterShard = master.endpoint.shard;
     clock.throwIfDone();
