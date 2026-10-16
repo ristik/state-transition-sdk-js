@@ -230,17 +230,33 @@ export class PartitionViewAuthenticator {
     const scheme = policy.scheme ? Object.freeze(policy.scheme.map((id) => ShardId.decode(id.encode()))) : undefined;
     // validates the pinned scheme and fixes the identity to its canonical order
     const order = scheme ? PartitionView.canonicalShardOrder(scheme) : undefined;
-    const hashes = policy.shardConfigurationHashes
-      ? new Map(
-          Array.from(policy.shardConfigurationHashes.entries()).map(([shard, hash]) => [shard, new Uint8Array(hash)]),
-        )
-      : undefined;
-    this.pins = Object.freeze({ scheme, shardConfigurationHashes: hashes });
+    // deep copies, validated now: a pin that is malformed or duplicated is an error of the configuration
+    const pins = policy.shardConfigurationPins?.map((pin) => ({
+      hash: new Uint8Array(pin.hash),
+      shard: ShardId.decode(pin.shard.encode()),
+    }));
+    const keys = new Set<string>();
+    for (const pin of pins ?? []) {
+      if (pin.hash.length !== 32) {
+        throw new PartitionViewError(
+          'bounds',
+          `Pinned configuration hash of shard "${pin.shard.toString()}" must be 32 bytes.`,
+        );
+      }
+      if (keys.has(pin.shard.toString())) {
+        throw new PartitionViewError('topology', `Shard "${pin.shard.toString()}" is pinned more than once.`);
+      }
+      keys.add(pin.shard.toString());
+    }
+    if (scheme && pins?.some((pin) => !order?.some((id) => id.equals(pin.shard)))) {
+      throw new PartitionViewError('topology', 'A pinned shard is not a shard of the pinned scheme.');
+    }
+    this.pins = Object.freeze({ scheme, shardConfigurationPins: pins ? Object.freeze(pins) : undefined });
     this.policyId = JSON.stringify([
       order ? order.map((id) => id.toString()) : null,
-      hashes
-        ? Array.from(hashes.entries())
-            .map(([shard, hash]) => [shard, HexConverter.encode(hash)])
+      pins
+        ? pins
+            .map((pin) => [pin.shard.toString(), HexConverter.encode(pin.hash)])
             .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
         : null,
     ]);
@@ -333,7 +349,7 @@ export class PartitionViewAuthenticator {
 
   async #run(view: PartitionView, uc: UnicityCertificate): Promise<AuthenticatedPartitionView> {
     // 1-3: candidate structure, tree and partition path to the seal hash, exact enclosing leaf
-    const tree = await view.verifyTree(uc, this.partition, this.pins);
+    const tree = await view.checkCommitmentUnauthenticated(uc, this.partition, this.pins);
 
     // 4: only then the seal, under the caller's anchored authority
     const authority = this.sealAuthenticator.identity;

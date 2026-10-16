@@ -8,7 +8,6 @@ import { SealVerificationSession } from '../../../src/api/bft/verification/SealV
 import { ConsolidationError } from '../../../src/consolidation/ConsolidationError.js';
 import { ConsolidationAttempt, ProofConsolidator } from '../../../src/consolidation/ProofConsolidator.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
-import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import {
@@ -61,10 +60,12 @@ function build(c: IF1Case): {
       client: new AggregatorClient(shardUrl(bits)),
       shard: shardIdOf(bits),
     })),
-    networkId: networkOf(c.context),
     partitionId: BigInt(c.context.partitionId),
     scheme,
-    shardConfigurationHashes: new Map(c.context.shardConfigs.map((s) => [s.shard, HexConverter.decode(s.hash)])),
+    shardConfigurationPins: c.context.shardConfigs.map((s) => ({
+      hash: HexConverter.decode(s.hash),
+      shard: shardIdOf(s.shard),
+    })),
   });
   const session = new SealVerificationSession(
     c.trustBase,
@@ -239,8 +240,13 @@ describe('F1 negative cases', () => {
       // the trusted context itself is refused when it is configured
       let observed = 'ok';
       try {
-        const { routing } = build(c);
-        new TokenProofClient({ routing, verificationContext: { trustBase: c.trustBase } as never });
+        build(c);
+        // the declared network of the context is the one of the trust base: no separate routing field to disagree
+        if (!networkOf(c.context).equals(c.trustBase.networkId)) {
+          throw new ConsolidationError('input', 'The context is for another network than the trust base.', {
+            outcome: 'incompatible_lineage',
+          });
+        }
       } catch (e) {
         observed = e instanceof ConsolidationError ? (e.outcome ?? e.kind) : 'unexpected';
       }

@@ -1,46 +1,50 @@
 import { ConsolidationError } from './ConsolidationError.js';
-import { PartitionView } from '../api/bft/PartitionView.js';
+import { IShardConfigurationPin, PartitionView } from '../api/bft/PartitionView.js';
 import { ShardId } from '../api/bft/ShardId.js';
-import { IAggregatorClient } from '../api/IAggregatorClient.js';
-import { NetworkId } from '../api/NetworkId.js';
+import { IBatchAggregatorClient, isBatchAggregatorClient } from '../api/IBatchAggregatorClient.js';
 import { StateId } from '../api/StateId.js';
 
 /**
  * Aggregator of one shard, configured by the application. URLs and credentials live in the client the application
  * built; nothing a token or a response says can add or replace an endpoint.
+ *
+ * The client must have the batch capability: consolidation cannot work without it, and a routing is static trusted
+ * configuration, so this is checked when the routing is built (types for TypeScript callers, a runtime check for
+ * JavaScript ones), not when a token is consolidated.
  */
 export interface IShardEndpoint {
-  readonly client: IAggregatorClient;
+  readonly client: IBatchAggregatorClient;
   readonly shard: ShardId;
 }
 
 /**
- * Trusted routing configuration of one partition.
+ * Trusted routing configuration of one partition. The network is the one of the verification context's trust base.
  */
 export interface IShardRoutingOptions {
   /** Endpoints of the shards that may take part. Their ids must be shards of the scheme. */
   readonly endpoints: readonly IShardEndpoint[];
-  /** Network the application expects; checked against the verification context's trust base. */
-  readonly networkId?: NetworkId;
   /** Partition id the application expects (nonzero 32-bit). The caller's intent, never inferred from a response. */
   readonly partitionId: bigint;
   /** Complete sharding scheme of the partition: empty for a single shard partition. */
   readonly scheme: readonly ShardId[];
-  /** Optional pinned shard configuration hashes by shard bit string, a stricter policy. */
-  readonly shardConfigurationHashes?: ReadonlyMap<string, Uint8Array>;
+  /**
+   * Optional pinned configuration hash per shard, a stricter policy. Every shard must be in the scheme, at most once,
+   * every hash 32 bytes; anything else is rejected when the routing is built, never silently ignored.
+   */
+  readonly shardConfigurationPins?: readonly IShardConfigurationPin[];
 }
 
 /**
  * Immutable routing from a state id to its shard endpoint, from the admitted shard prefix topology. No modulo rule,
- * no inference from timestamps. Invalid configurations (incomplete or overlapping scheme, endpoints outside it,
- * duplicates) are rejected at construction.
+ * no inference from timestamps. Invalid configurations (incomplete or overlapping scheme, endpoints without the batch
+ * capability or outside the scheme, duplicates, malformed pins) are rejected at construction.
  */
 export class ShardRouting {
-  public readonly networkId: NetworkId | null;
   public readonly partitionId: bigint;
+  private readonly _order: readonly ShardId[];
+  private readonly _pins: readonly IShardConfigurationPin[] | undefined;
   private readonly _scheme: readonly ShardId[];
   private readonly endpoints: readonly IShardEndpoint[];
-  private readonly hashes: ReadonlyMap<string, Uint8Array> | undefined;
 
   /**
    * @param {IShardRoutingOptions} options Routing configuration.
@@ -59,28 +63,56 @@ export class ShardRouting {
     } catch (e) {
       throw input(`Invalid sharding scheme: ${e instanceof Error ? e.message : String(e)}`, e);
     }
+    const label = (shard: ShardId): string => (shard.length === 0 ? '(root)' : shard.toString());
     const seen = new Set<string>();
     for (const endpoint of options.endpoints) {
       const key = endpoint.shard.toString();
       if (!order.some((id) => id.equals(endpoint.shard))) {
-        throw input(`Endpoint shard "${key}" is not in the scheme.`);
+        throw input(`Endpoint shard "${label(endpoint.shard)}" is not in the scheme.`);
       }
       if (seen.has(key)) {
-        throw input(`Duplicate endpoint for shard "${key}".`);
+        throw input(`Duplicate endpoint for shard "${label(endpoint.shard)}".`);
+      }
+      if (!isBatchAggregatorClient(endpoint.client)) {
+        throw input(
+          `Endpoint of shard "${label(endpoint.shard)}" has no getInclusionProofs: consolidation needs get_inclusion_proofs.v1.`,
+        );
       }
       seen.add(key);
     }
     if (options.endpoints.length === 0) {
       throw input('At least one endpoint is required.');
     }
+    const pinned = new Set<string>();
+    for (const pin of options.shardConfigurationPins ?? []) {
+      const key = pin.shard.toString();
+      if (!order.some((id) => id.equals(pin.shard))) {
+        throw input(`Pinned shard "${label(pin.shard)}" is not in the scheme.`);
+      }
+      if (pinned.has(key)) {
+        throw input(`Shard "${label(pin.shard)}" is pinned more than once.`);
+      }
+      if (pin.hash.length !== 32) {
+        throw input(`The pinned configuration hash of shard "${label(pin.shard)}" must be 32 bytes.`);
+      }
+      pinned.add(key);
+    }
 
     this.partitionId = options.partitionId;
-    this.networkId = options.networkId ?? null;
-    this._scheme = options.scheme.slice();
+    this._order = order;
+    this._scheme = options.scheme.map((id) => ShardId.decode(id.encode()));
     this.endpoints = options.endpoints.slice();
-    this.hashes = options.shardConfigurationHashes
-      ? new Map(Array.from(options.shardConfigurationHashes, ([shard, hash]) => [shard, new Uint8Array(hash)]))
-      : undefined;
+    this._pins = options.shardConfigurationPins?.map((pin) => ({
+      hash: new Uint8Array(pin.hash),
+      shard: ShardId.decode(pin.shard.encode()),
+    }));
+  }
+
+  /**
+   * @returns {ShardId[]} The shards of the scheme in canonical (left to right) order; one root shard if unsharded.
+   */
+  public get order(): ShardId[] {
+    return this._order.slice();
   }
 
   /**
@@ -91,27 +123,21 @@ export class ShardRouting {
   }
 
   /**
-   * @returns {ReadonlyMap<string, Uint8Array>|undefined} Pinned configuration hashes, if configured.
+   * @returns {IShardConfigurationPin[]|undefined} Copies of the pinned configuration hashes, if configured.
    */
-  public get shardConfigurationHashes(): ReadonlyMap<string, Uint8Array> | undefined {
-    return this.hashes ? new Map(Array.from(this.hashes, ([shard, hash]) => [shard, new Uint8Array(hash)])) : undefined;
+  public get shardConfigurationPins(): IShardConfigurationPin[] | undefined {
+    return this._pins?.map((pin) => ({ hash: new Uint8Array(pin.hash), shard: pin.shard }));
   }
 
   /**
    * Routing of a single shard partition served by one endpoint.
    *
-   * @param {IAggregatorClient} client Client of the shard aggregator.
+   * @param {IBatchAggregatorClient} client Client of the shard aggregator.
    * @param {bigint} partitionId Partition id.
-   * @param {NetworkId} [networkId] Expected network.
    * @returns {ShardRouting} Routing.
    */
-  public static single(client: IAggregatorClient, partitionId: bigint, networkId?: NetworkId): ShardRouting {
-    return new ShardRouting({
-      endpoints: [{ client, shard: ShardId.decode(new Uint8Array([0x80])) }],
-      networkId,
-      partitionId,
-      scheme: [],
-    });
+  public static single(client: IBatchAggregatorClient, partitionId: bigint): ShardRouting {
+    return new ShardRouting({ endpoints: [{ client, shard: ShardId.ROOT }], partitionId, scheme: [] });
   }
 
   /**

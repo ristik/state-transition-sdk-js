@@ -1,6 +1,5 @@
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { ShardId } from '../../../src/api/bft/ShardId.js';
-import { NetworkId } from '../../../src/api/NetworkId.js';
 import { ConsolidationError } from '../../../src/consolidation/ConsolidationError.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
@@ -29,7 +28,6 @@ function configureRouting(): ShardRouting {
       { client: new AggregatorClient('https://shard-0.example.org', 'api-key-0'), shard: shardOf('0') },
       { client: new AggregatorClient('https://shard-1.example.org', 'api-key-1'), shard: shardOf('1') },
     ],
-    networkId: NetworkId.TESTNET,
     partitionId: 168496141n,
     // the complete shard prefix topology of the partition
     scheme: [shardOf('0'), shardOf('1')],

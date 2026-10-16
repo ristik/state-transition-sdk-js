@@ -72,11 +72,11 @@ export class SealVerificationSession implements ISealAuthenticator {
   ) {
     const maxEntries = options.maxEntries ?? 64;
     if (!Number.isInteger(maxEntries) || maxEntries <= 0) {
-      throw new Error('SealVerificationSession maxEntries must be a positive integer');
+      throw new RangeError('SealVerificationSession maxEntries must be a positive integer');
     }
     const maxInFlight = options.maxInFlight ?? 64;
     if (!Number.isInteger(maxInFlight) || maxInFlight <= 0) {
-      throw new Error('SealVerificationSession maxInFlight must be a positive integer');
+      throw new RangeError('SealVerificationSession maxInFlight must be a positive integer');
     }
     // The operation's authority is snapshotted once: every check of this session verifies against the snapshot and
     // every memo key commits to its identity, which is computed exactly once. Later changes to the caller's object
