@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
 import { UnicitySeal } from '../../../../src/api/bft/UnicitySeal.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
+import { VerifiedSealCache } from '../../../../src/api/bft/verification/VerifiedSealCache.js';
 import { NetworkId } from '../../../../src/api/NetworkId.js';
 import { DataHash } from '../../../../src/crypto/hash/DataHash.js';
 import { HashAlgorithm } from '../../../../src/crypto/hash/HashAlgorithm.js';
@@ -18,6 +19,7 @@ interface IFixture {
     publicKeyCompressed: string;
     vectors: { accept: boolean; name: string; signature: string }[];
   };
+  recovery: { accept: boolean; digest: string; name: string; publicKeyCompressed: string; signature: string }[];
   seal: {
     cases: { accept: boolean; name: string; sealCbor: string }[];
     epoch: number;
@@ -30,11 +32,6 @@ interface IFixture {
 const fixture = JSON.parse(
   readFileSync(join(process.cwd(), 'tests/fixtures/signature-recovery/v1/vectors.json'), 'utf8'),
 ) as IFixture;
-
-// Cases where the corpus counts the non-conforming signature as zero votes and still accepts the seal on the others. JS
-// decodes the whole seal, and `Signature.decode` rejects a witness that is not 65 bytes with v in 0..3, so the seal is
-// rejected: stricter than the corpus, never more permissive. Documented divergence (questions.md), not weakened.
-const STRICTER_IN_JS = new Set(['one-v-out-of-range-quorum-met', 'surplus-compact-quorum-met']);
 
 describe('shared O3 signature recovery fixtures', () => {
   const verifier = new Secp256k1SignatureVerifier();
@@ -49,6 +46,22 @@ describe('shared O3 signature recovery fixtures', () => {
         accepted = await verifier.verify(hash, Signature.decode(HexConverter.decode(vector.signature)), publicKey);
       } catch {
         // not a 65-byte signature with v in 0..3: rejected on decoding
+      }
+      expect(accepted).toBe(vector.accept);
+    });
+  });
+
+  describe('recovery vectors', () => {
+    it.each(fixture.recovery.map((v) => [v.name, v] as const))('%s', async (_name, vector) => {
+      let accepted = false;
+      try {
+        accepted = await verifier.verify(
+          new DataHash(HashAlgorithm.SHA256, HexConverter.decode(vector.digest)),
+          Signature.decode(HexConverter.decode(vector.signature)),
+          HexConverter.decode(vector.publicKeyCompressed),
+        );
+      } catch {
+        // not a decodable signature: rejected
       }
       expect(accepted).toBe(vector.accept);
     });
@@ -83,9 +96,31 @@ describe('shared O3 signature recovery fixtures', () => {
         const seal = UnicitySeal.fromCBOR(HexConverter.decode(testCase.sealCbor));
         accepted = (await rule.verify(trustBase, seal)).status === VerificationStatus.OK;
       } catch {
-        // a seal carrying a signature that is not a 65-byte r||s||v with v in 0..3 does not decode
+        // only malformed CBOR may fail here: a malformed witness is zero votes, not a decode failure
+        throw new Error(`seal case ${testCase.name} must decode`);
       }
-      expect(accepted).toBe(STRICTER_IN_JS.has(testCase.name) ? false : testCase.accept);
+      expect(accepted).toBe(testCase.accept);
+    });
+
+    it('preserves every carried witness byte and keys the memo on them', async () => {
+      const valid = fixture.seal.cases.find((c) => c.name === 'valid-all-four');
+      const surplus = fixture.seal.cases.find((c) => c.name === 'one-v-out-of-range-quorum-met');
+      expect(valid && surplus).toBeTruthy();
+      const bytes = HexConverter.decode(surplus?.sealCbor ?? '');
+      const seal = UnicitySeal.fromCBOR(bytes);
+
+      // re-encoding is canonical and loses nothing, including the malformed witness
+      expect(HexConverter.encode(seal.toCBOR())).toBe(surplus?.sealCbor);
+      expect(Array.from(seal.witnesses?.values() ?? []).some((w) => w[64] > 3)).toBe(true);
+      // the public map lists only well-formed signatures
+      expect(seal.signatures?.size).toBe((seal.witnesses?.size ?? 0) - 1);
+
+      // a memoizing rule must not carry the verdict over from the valid seal to this one or back
+      const cached = new UnicitySealQuorumSignaturesVerificationRule(verifier, new VerifiedSealCache(8));
+      const validSeal = UnicitySeal.fromCBOR(HexConverter.decode(valid?.sealCbor ?? ''));
+      expect((await cached.verify(trustBase, validSeal)).status).toBe(VerificationStatus.OK);
+      expect(HexConverter.encode(validSeal.toCBOR())).not.toBe(HexConverter.encode(seal.toCBOR()));
+      expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.OK);
     });
   });
 });

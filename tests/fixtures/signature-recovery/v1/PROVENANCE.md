@@ -1,7 +1,7 @@
 # Provenance
 
-`vectors.json` is vendored byte-identical (sha256 `268c49429f2579ec89b17ed392e6d8ce8609a30b2a2338dec2b732d2e0739ff8`)
-from `unicitynetwork/bft-go-base` PR #11, branch `uc/o3-strict-recovery`, commit `7a1d36673dd646475cf6ec4e074d0f47beac021c`,
+`vectors.json` is vendored byte-identical (sha256 `14b5f068d744ed2ccfdcb96662f8a169b384e8cf0d7040ce5d14bfc60f0516cd`)
+from `unicitynetwork/bft-go-base` `uc-consolidation` commit `eeedaa7` (20 primitive, 18 recovery, 10 seal cases),
 path `testdata/signature-recovery/v1/vectors.json`.
 
 Do not edit. Re-vendor (and update this file) when dev-base extends the corpus. Rule (arch-o3.md §4): 65-byte `r||s||v`,
