@@ -34,7 +34,9 @@ export interface IInclusionProofRequestOptions extends IRequestOptions {
    * than `waitMs`. A v2 error answer (for example `no_finalized_view`) may carry `error.data.waitedMs`; the single call
    * surfaces such an error as the plain `JsonRpcDataError` and does not interpret that echo, which only means "pace
    * normally" for the wait helper (see `waitInclusionProof` for a ready made policy). Must be an integer in
-   * `[0, Number.MAX_SAFE_INTEGER]`, otherwise the call throws a `RangeError` before anything is sent.
+   * `[0, Number.MAX_SAFE_INTEGER]`, otherwise the call throws a `RangeError` before anything is sent (the batch call
+   * rejects with a `BatchProofError` and consolidation with a `ConsolidationError` instead: each surface keeps its own
+   * error type, do not write one `catch` for all three).
    */
   readonly waitMs?: number;
 }

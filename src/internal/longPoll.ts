@@ -5,10 +5,9 @@
  * The wait is a request to the aggregator, never an obligation: a server that does not know the field ignores it and
  * answers at once without an echo. The echo is **unauthenticated** timing metadata. It is not part of any proof, it
  * never authenticates state and the SDK never lets it extend a deadline.
+ *
+ * Internal: not part of the public API (`./lib/internal/*` is not exported), the negotiation heuristic may change.
  */
-
-/** Greatest `waitMs` / `waitedMs` the wire admits: the largest integer every JSON implementation represents exactly. */
-export const MAX_WAIT_MS = Number.MAX_SAFE_INTEGER;
 
 /**
  * @param {unknown} value Candidate wait duration or echo.
