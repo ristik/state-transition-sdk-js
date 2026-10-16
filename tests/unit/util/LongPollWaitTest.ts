@@ -175,11 +175,14 @@ describe('waitInclusionProof long poll', () => {
       expect(client.calls).toHaveLength(0);
     });
 
-    it.each([{ marginMs: -1 }, { windowMs: NaN }, { windowMs: -5 }])('rejects the tuning %j', async (longPoll) => {
-      const client = new Scripted([step(boom())]);
-      await expect(run(client, { longPoll })).rejects.toThrow(RangeError);
-      expect(client.calls).toHaveLength(0);
-    });
+    it.each([{ marginMs: -1 }, { windowMs: NaN }, { windowMs: -5 }, { windowMs: Number.MAX_SAFE_INTEGER + 1 }])(
+      'rejects the tuning %j',
+      async (longPoll) => {
+        const client = new Scripted([step(boom())]);
+        await expect(run(client, { longPoll })).rejects.toThrow(RangeError);
+        expect(client.calls).toHaveLength(0);
+      },
+    );
   });
 
   describe('pacing', () => {
@@ -213,6 +216,22 @@ describe('waitInclusionProof long poll', () => {
 
     it('a configured zero interval still pauses between instant zero echoes', async () => {
       const client = new Scripted([endsAt(4, pending(0))]);
+      await expect(run(client, { intervalMs: 0, timeoutMs: 5000 })).rejects.toThrow('boom');
+      for (const gap of gaps(client)) {
+        expect(gap).toBeGreaterThanOrEqual(8);
+      }
+    });
+
+    it('a missing echo with a configured zero interval is still floored (no spin on a server that ignores the wait)', async () => {
+      const client = new Scripted([endsAt(5, pending(null))]);
+      await expect(run(client, { intervalMs: 0, timeoutMs: 5000 })).rejects.toThrow('boom');
+      for (const gap of gaps(client)) {
+        expect(gap).toBeGreaterThanOrEqual(8);
+      }
+    });
+
+    it('a positive echo with a zero interval never re-calls back to back', async () => {
+      const client = new Scripted([endsAt(5, pending(1))]);
       await expect(run(client, { intervalMs: 0, timeoutMs: 5000 })).rejects.toThrow('boom');
       for (const gap of gaps(client)) {
         expect(gap).toBeGreaterThanOrEqual(8);

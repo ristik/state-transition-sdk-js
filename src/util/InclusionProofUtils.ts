@@ -90,8 +90,16 @@ function longPollSettings(
   const tuning = typeof option === 'object' ? option : {};
   const marginMs = tuning.marginMs ?? DEFAULT_MARGIN_MS;
   const windowMs = tuning.windowMs ?? DEFAULT_WINDOW_MS;
-  if (!Number.isFinite(marginMs) || marginMs < 0 || !Number.isFinite(windowMs) || windowMs < 0) {
-    throw new RangeError('longPoll.marginMs and longPoll.windowMs must be finite and not negative.');
+  if (
+    !Number.isFinite(marginMs) ||
+    marginMs < 0 ||
+    !Number.isFinite(windowMs) ||
+    windowMs < 0 ||
+    windowMs > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new RangeError(
+      'longPoll.marginMs and longPoll.windowMs must be finite and not negative, windowMs at most Number.MAX_SAFE_INTEGER.',
+    );
   }
   return { marginMs, windowMs };
 }
@@ -122,13 +130,15 @@ function longPollWindow(settings: { marginMs: number; windowMs: number }, left: 
  * @returns {number|null} Milliseconds to sleep, `null` for an immediate re-call.
  */
 function pacedPause(interval: number, tookMs: number, waitedMs: number | null, pending: boolean): number | null {
+  // every pause of a long polling call has a small positive floor, so a configured zero interval cannot spin
+  const paced = Math.max(interval, MIN_POLL_GAP_MS);
   if (waitedMs === null) {
-    return interval;
+    return paced;
   }
-  if (pending && waitedMs > 0 && tookMs >= interval) {
+  if (pending && waitedMs > 0 && tookMs >= paced) {
     return null;
   }
-  return pending ? Math.max(interval - tookMs, MIN_POLL_GAP_MS) : interval;
+  return pending ? Math.max(interval - tookMs, MIN_POLL_GAP_MS) : paced;
 }
 
 function checkTimeoutMs(timeoutMs: number | undefined): number | undefined {
@@ -372,7 +382,7 @@ export async function waitInclusionProof(
       const waitMs = longPolling && longPoll !== null ? longPollWindow(longPoll, remainingMs()) : 0;
       const callStarted = performance.now();
       // how long to pause before the next poll; `interval` is the legacy fixed pause
-      let pause: number | null = interval;
+      let pause: number | null = longPoll === null ? interval : Math.max(interval, MIN_POLL_GAP_MS);
       try {
         const outcome = await abortable((requestSignal) => poll(requestSignal, waitMs), signal);
         if (outcome.inclusionProof !== null) {
@@ -388,7 +398,7 @@ export async function waitInclusionProof(
         // endpoint does not honor the wait then: poll the normal way.
         if (requestTimedOut && !signal.aborted && waitMs > 0) {
           longPolling = false;
-          await sleep(interval, signal);
+          await sleep(Math.max(interval, MIN_POLL_GAP_MS), signal);
           continue;
         }
         // A missing proof is the expected "not certified yet" answer. JSON-RPC -32021 (certification pending) always keeps

@@ -14,7 +14,8 @@ import { HexConverter } from '../../../src/util/HexConverter.js';
 import { ShardedWorld } from '../../utils/ShardedWorld.js';
 
 /**
- * The frozen A0 wire fixtures of aggregator-go (`testdata/longpoll/`, PR 225), copied byte for byte. Source of truth:
+ * The A0 wire fixtures of aggregator-go (`testdata/longpoll/`, PR 225), copied byte for byte from the commit recorded in
+ * `tests/fixtures/longpoll/SOURCE`. They are copies of a branch under review: re-copy from the merged A0. Source of truth:
  * the Go server; do not edit these files here.
  */
 const DIR = join(__dirname, '../../fixtures/longpoll');
@@ -106,7 +107,7 @@ describe('long-poll A0 fixtures', () => {
   const client = new AggregatorClient('https://example.com');
   afterEach(() => jest.restoreAllMocks());
 
-  it('are the frozen files (sha256 of the README table)', () => {
+  it('are the copied files (sha256 of the README table)', () => {
     const table = [...read('README.md').matchAll(/\| `([^`]+)` \| ([0-9a-f]{64}) \|/g)];
     expect(table.map((m) => m[1]).sort()).toEqual([
       'capability.json',
