@@ -248,7 +248,7 @@ describe('get_inclusion_proofs.v1 waitMs', () => {
     const stateRoot = new DataHash(HashAlgorithm.SHA256, new Uint8Array(32));
     for (const waitMs of [0, 1000]) {
       const error = await failure(client.getInclusionProofs(ids, { stateRoot, waitMs }));
-      expect(error).toMatchObject({ detail: 'wait_with_state_root', kind: 'rejected' });
+      expect(error).toMatchObject({ detail: 'wait_with_state_root', kind: 'rejected', requests: 0 });
     }
     expect(spy).not.toHaveBeenCalled();
   });
