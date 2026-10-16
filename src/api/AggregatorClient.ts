@@ -13,19 +13,23 @@ import { CertificationResponse, CertificationStatus } from './CertificationRespo
 import { IAggregatorClient } from './IAggregatorClient.js';
 import { IBatchAggregatorClient, IBatchRequestOptions, InclusionProofBatch } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
+import { INonInclusionAggregatorClient, NonInclusionProofResponse } from './INonInclusionAggregatorClient.js';
 import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
+import { NonInclusionProof } from './NonInclusionProof.js';
+import { NonInclusionProofError } from './NonInclusionProofError.js';
 import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
+import { abortable } from '../internal/abortable.js';
 import { HexConverter } from '../util/HexConverter.js';
 
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
  */
-export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient {
+export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient, INonInclusionAggregatorClient {
   /** Most state ids of one `get_inclusion_proofs.v1` call. */
   public static readonly BATCH_MAX_STATE_IDS = 256;
 
@@ -122,6 +126,60 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     // status replaces this once there is one.
     const text = `${e.message} ${typeof e.data === 'string' ? e.data : ''}`;
     return /E11000|duplicate key/i.test(text) && /index:\s*stateId_/i.test(text);
+  }
+
+  /** A failure of `get_non_inclusion_proof.v1` or `null` for the service's claim that the state is included. */
+  private static nonInclusionFailure(e: unknown, signal?: AbortSignal): NonInclusionProofError | null {
+    if (NonInclusionProofError.is(e)) {
+      return e;
+    }
+    // the caller's cancellation or deadline: its own reason is the cause
+    const named = (x: unknown, name: string): boolean =>
+      typeof x === 'object' && x !== null && 'name' in x && x.name === name;
+    if (signal?.aborted || named(e, 'AbortError') || named(e, 'TimeoutError') || named(e, 'SleepError')) {
+      let reason: unknown = e;
+      if (signal?.aborted) {
+        reason = signal.reason;
+      } else if (named(e, 'SleepError') && typeof e === 'object' && e !== null && 'cause' in e) {
+        reason = e.cause;
+      }
+      return named(reason, 'TimeoutError')
+        ? new NonInclusionProofError('timeout', 'The deadline of the request expired.', {
+            cause: reason,
+            retryable: true,
+          })
+        : new NonInclusionProofError('cancelled', 'The request was cancelled.', { cause: reason });
+    }
+    if (e instanceof JsonRpcDataError) {
+      // a code in an envelope that did not carry our request id answers nothing
+      if (!e.idMatched) {
+        return new NonInclusionProofError('invalid_response', 'JSON-RPC error without the request id.', { cause: e });
+      }
+      switch (e.code) {
+        case -32020: // no certified snapshot yet
+          return new NonInclusionProofError('unavailable', e.message, { cause: e, code: e.code, retryable: true });
+        case -32022: // the claim, not an error: see getNonInclusionProof
+          return null;
+        case -32023: // proof admission limit
+          return new NonInclusionProofError('busy', e.message, { cause: e, code: e.code, retryable: true });
+        case -32600:
+        case -32601:
+        case -32602:
+          return new NonInclusionProofError('rejected', e.message, { cause: e, code: e.code });
+        default: // internal and unknown codes are kept, not interpreted
+          return new NonInclusionProofError('server', e.message, { cause: e, code: e.code });
+      }
+    }
+    if (e instanceof JsonRpcResponseError) {
+      return new NonInclusionProofError('invalid_response', e.message, { cause: e });
+    }
+    if (e instanceof JsonRpcNetworkError) {
+      return new NonInclusionProofError('transport', `HTTP ${e.status}`, { cause: e, retryable: true });
+    }
+    return new NonInclusionProofError('transport', e instanceof Error ? e.message : String(e), {
+      cause: e,
+      retryable: true,
+    });
   }
 
   /**
@@ -278,6 +336,40 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       return BigInt(response.blockNumber);
     }
     throw new Error('Invalid response format for block height');
+  }
+
+  /**
+   * @inheritDoc
+   */
+  public async getNonInclusionProof(stateId: StateId, options?: IRequestOptions): Promise<NonInclusionProofResponse> {
+    const params = { stateId: HexConverter.encode(stateId.data) };
+    let result: unknown;
+    try {
+      const call = (signal?: AbortSignal): Promise<unknown> =>
+        this.transport.request('get_non_inclusion_proof.v1', params, new Headers(), { signal });
+      // the request is raced against the signal: a transport that ignores it cannot outlive the caller's deadline
+      result = options?.signal ? await abortable(call, options.signal) : await call();
+    } catch (e) {
+      const failure = AggregatorClient.nonInclusionFailure(e, options?.signal);
+      if (failure === null) {
+        return { kind: 'state_included_hint' };
+      }
+      throw failure;
+    }
+
+    // the result is one hex string; its size is bounded before anything is decoded
+    if (typeof result !== 'string' || result.length > NonInclusionProof.MAX_WIRE_BYTES * 2 + 2) {
+      throw new NonInclusionProofError('invalid_response', 'The result must be a bounded hex string.');
+    }
+    try {
+      return { kind: 'absence_proof', proof: NonInclusionProof.decode(stateId, HexConverter.decode(result)) };
+    } catch (e) {
+      throw new NonInclusionProofError(
+        'invalid_response',
+        `Malformed non-inclusion proof: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
+    }
   }
 
   /**
