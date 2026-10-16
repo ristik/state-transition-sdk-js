@@ -175,4 +175,49 @@ describe('Unsharded direct target', () => {
       );
     });
   });
+
+  describe('a served certificate that contradicts the routing, without view (parity with Go and Rust)', () => {
+    const reshard = (
+      batch: InclusionProofBatch,
+      shard: ReturnType<typeof shardIdFromBits>,
+      siblings: number,
+    ): InclusionProofBatch =>
+      mutate(batch, (r) => {
+        const uc = (r.inclusionProof as InclusionProof).unicityCertificate;
+        return withUc(
+          r,
+          new UnicityCertificate(
+            uc.inputRecord,
+            uc.technicalRecordHash,
+            uc.shardConfigurationHash,
+            new ShardTreeCertificate(
+              shard,
+              Array.from({ length: siblings }, () => new Uint8Array(32)),
+            ),
+            uc.unicityTreeCertificate,
+            uc.unicitySeal,
+          ),
+        );
+      });
+
+    it('sharded routing, empty-shard certificate: integrity, not a retryable missing view', async () => {
+      const s = await scenario(1);
+      const token = await s.history(3);
+      for (const bits of s.world.bits) {
+        s.world.faults.set(bits, { tamper: (b) => reshard(b, shardIdFromBits(''), 0), withholdView: true });
+      }
+      await expectIntegrity(clientOf(s).consolidate(token), ['binding_mismatch']);
+    });
+
+    it('unsharded routing, sharded certificate: the view is unavailable, as in the reference clients', async () => {
+      const s = await scenario(0);
+      const token = await s.history(3);
+      s.world.faults.set('', { tamper: (b) => reshard(b, shardIdFromBits('1'), 1), withholdView: true });
+      expect(await clientOf(s).consolidate(token)).toMatchObject({
+        reason: 'partition_view_unavailable',
+        retryable: true,
+        status: 'unavailable',
+      });
+    });
+  });
 });

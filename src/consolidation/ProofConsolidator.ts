@@ -773,13 +773,14 @@ export class ProofConsolidator {
     requests++;
     const viewBytes = masterBatch.batch.partitionViewBytes;
     const masterShard = master.endpoint.shard;
-    // a sharded partition is never consolidated without its authenticated view; only the unsharded shard (the empty
-    // shard id, the partition's single leaf) may do without one, see authenticateDirect
-    if (!viewBytes && masterShard.length !== 0) {
-      throw new Unavailable('partition_view_unavailable', true, masterShard.toString());
-    }
     clock.throwIfDone();
     const enclosing = this.commonUc(masterBatch, masterShard);
+    // decided on the SERVED certificate, like the Go and Rust clients: a sharded partition is never consolidated without
+    // its authenticated view, and only a certificate of the empty shard (the partition's single leaf) may do without
+    // one, see authenticateDirect. A certificate that contradicts the trusted routing is an integrity failure.
+    if (!viewBytes && enclosing.shardTreeCertificate.shard.length !== 0) {
+      throw new Unavailable('partition_view_unavailable', true, masterShard.toString());
+    }
     if (!enclosing.shardTreeCertificate.shard.equals(masterShard)) {
       throw integrity('binding_mismatch', 'The master certificate is of another shard.', masterShard);
     }
