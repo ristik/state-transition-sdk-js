@@ -32,7 +32,11 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
 
   private readonly _indexesByClass: BatchIndexesByClass | undefined;
 
+  private readonly _requests: 1 | 2;
+
   private readonly _retryable: boolean;
+
+  private readonly _waitedMs: number | null;
 
   /**
    * @param {BatchProofErrorKind} kind Classification.
@@ -44,6 +48,9 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
    *   status details only).
    * @param {object} [info.indexesByClass] Offending positions by class, as the service sent them.
    * @param {boolean} [info.retryable] Whether a new attempt may succeed.
+   * @param {number} [info.waitedMs] The aggregator's echo of the time it waited (`error.data.waitedMs`), when the request
+   *   asked for a wait and the aggregator sent one.
+   * @param {number} [info.requests] HTTP requests the call took: 1, or 2 after the retry without `waitMs`.
    * @param {unknown} [info.cause] Underlying error.
    */
   public constructor(
@@ -55,7 +62,9 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
       readonly detail?: string;
       readonly indexes?: readonly number[];
       readonly indexesByClass?: BatchIndexesByClass;
+      readonly requests?: 1 | 2;
       readonly retryable?: boolean;
+      readonly waitedMs?: number;
     } = {},
   ) {
     super(message, { cause: info.cause });
@@ -64,6 +73,8 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
     this._indexes = info.indexes?.slice();
     this._indexesByClass = info.indexesByClass;
     this._retryable = info.retryable ?? false;
+    this._waitedMs = info.waitedMs ?? null;
+    this._requests = info.requests ?? 1;
   }
 
   /**
@@ -109,10 +120,27 @@ export class BatchProofError extends SdkError<'BatchProofError'> {
   }
 
   /**
+   * @returns {number} HTTP requests the failed call took: 2 if the first answer was the generic `malformed_params` of a
+   *   server that does not know `waitMs` and the repeat without it failed as well.
+   */
+  public get requests(): 1 | 2 {
+    return this._requests;
+  }
+
+  /**
    * @returns {boolean} Whether a new attempt may succeed. Never a promise that the same root will be served again.
    */
   public get retryable(): boolean {
     return this._retryable;
+  }
+
+  /**
+   * @returns {number|null} The aggregator's **unauthenticated** echo of how long it held the request, in milliseconds,
+   *   or `null` if the request asked for no wait or the aggregator sent no echo. Timing metadata only: it says nothing
+   *   about the state and never extends a deadline. A failure raised before the method ran has none.
+   */
+  public get waitedMs(): number | null {
+    return this._waitedMs;
   }
 
   /**

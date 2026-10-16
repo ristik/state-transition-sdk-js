@@ -17,6 +17,19 @@ export interface IBatchRequestOptions extends IRequestOptions {
    * latest finalized view. An exact root is never replaced by the latest one.
    */
   readonly stateRoot?: DataHash;
+
+  /**
+   * Ask the aggregator to hold a **latest** request for up to this many milliseconds while every state that is not yet
+   * proven is merely pending, and to echo the time it waited as {@link InclusionProofBatch.waitedMs} (or
+   * {@link BatchProofError.waitedMs} on a failure). Opt-in: omitted, the request is exactly what it always was. `0` asks
+   * for the echo without waiting. The aggregator bounds the wait. A server without the feature rejects the unknown
+   * field with the generic `malformed_params`, and the client then repeats the request **once** without `waitMs` under
+   * the same signal (see {@link InclusionProofBatch.requests}); nothing is remembered for later calls.
+   *
+   * Not allowed with `stateRoot`: an exact root request is never waited on and fails with a `rejected` error before
+   * anything is sent. Must be an integer in `[0, Number.MAX_SAFE_INTEGER]`, otherwise the same `rejected` error.
+   */
+  readonly waitMs?: number;
 }
 
 /**
@@ -30,8 +43,15 @@ export class InclusionProofBatch {
   /**
    * @param {InclusionProofResponse[]} proofs Decoded `get_inclusion_proof.v2` results, one per requested state.
    * @param {Uint8Array|null} partitionView Canonical CBOR of the partition view, present for latest requests only.
+   * @param {number|null} waitedMs The aggregator's echo of the time it waited, `null` if it sent none.
+   * @param {number} requests HTTP requests the call took: 1, or 2 after the one retry without `waitMs`.
    */
-  public constructor(proofs: readonly InclusionProofResponse[], partitionView: Uint8Array | null = null) {
+  public constructor(
+    proofs: readonly InclusionProofResponse[],
+    partitionView: Uint8Array | null = null,
+    public readonly waitedMs: number | null = null,
+    public readonly requests: 1 | 2 = 1,
+  ) {
     this._proofs = proofs.slice();
     this._partitionView = partitionView ? new Uint8Array(partitionView) : null;
   }
