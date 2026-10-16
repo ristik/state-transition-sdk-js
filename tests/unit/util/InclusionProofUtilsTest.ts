@@ -6,6 +6,7 @@ import { IAggregatorClient } from '../../../src/api/IAggregatorClient.js';
 import { InclusionProof } from '../../../src/api/InclusionProof.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
 import { IRequestOptions } from '../../../src/api/IRequestOptions.js';
+import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../../../src/api/json-rpc/JsonRpcNetworkError.js';
 import { NetworkId } from '../../../src/api/NetworkId.js';
 import { StateId } from '../../../src/api/StateId.js';
@@ -272,6 +273,57 @@ describe('waitInclusionProof', () => {
 
     await expect(wait(client, controller.signal, 1)).rejects.toThrow(SleepError);
     expect(client.callCount).toBe(3);
+  });
+
+  it.each([
+    [-32021, 'certification is pending'],
+    [-32020, 'not found'],
+  ])('should keep polling on JSON-RPC error %d', async (code, message) => {
+    const controller = new AbortController();
+    const client = new StubAggregatorClient((call) => {
+      if (call >= 3) {
+        controller.abort(new Error('deadline reached'));
+      }
+      return Promise.reject(new JsonRpcDataError({ code, message }));
+    });
+
+    await expect(wait(client, controller.signal, 1)).rejects.toThrow(SleepError);
+    expect(client.callCount).toBe(3);
+  });
+
+  it('should keep polling on -32021 with status hints requested', async () => {
+    const controller = new AbortController();
+    const client = new StubAggregatorClient((call) => {
+      if (call >= 2) {
+        controller.abort(new Error('deadline reached'));
+      }
+      return Promise.reject(new JsonRpcDataError({ code: -32021, message: 'certification is pending' }));
+    });
+
+    await expect(
+      waitInclusionProof(
+        new StateTransitionClient(client),
+        trustBase,
+        predicateVerifier,
+        unicityCertificateVerifier,
+        transaction,
+        {
+          intervalMs: 1,
+          signal: controller.signal,
+        },
+      ),
+    ).rejects.toThrow(SleepError);
+    expect(client.callCount).toBe(2);
+    expect(client.requests[0]).toMatchObject({ includeStatusHint: true });
+  });
+
+  it('should still propagate other JSON-RPC errors', async () => {
+    const client = new StubAggregatorClient(() =>
+      Promise.reject(new JsonRpcDataError({ code: -32603, message: 'internal error' })),
+    );
+
+    await expect(wait(client, AbortSignal.timeout(1000))).rejects.toThrow(JsonRpcDataError);
+    expect(client.callCount).toBe(1);
   });
 
   it('should not accumulate abort listeners across polls', async () => {

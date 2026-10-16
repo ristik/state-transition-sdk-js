@@ -6,6 +6,7 @@ import {
   InclusionProofExpiredError,
   InclusionProofUnknownError,
 } from '../api/InclusionProofStatusError.js';
+import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
 import { abortable, SleepError, sleep, throwIfAborted } from '../internal/abortable.js';
@@ -186,9 +187,13 @@ export async function waitInclusionProof(
         return inclusionProof;
       }
     } catch (err) {
-      // A missing proof is the expected "not certified yet" answer; anything
-      // else — including the {@link SleepError} raised on abort — ends the wait.
-      if (!(err instanceof JsonRpcNetworkError && err.status === 404)) {
+      // A missing proof is the expected "not certified yet" answer: HTTP 404, or the JSON-RPC codes -32020 (not found)
+      // and -32021 (certification pending) of the aggregator. Anything else — including the {@link SleepError} raised on
+      // abort — ends the wait.
+      const notYet =
+        (err instanceof JsonRpcNetworkError && err.status === 404) ||
+        (err instanceof JsonRpcDataError && (err.isCertificationPending || err.isNotFound));
+      if (!notYet) {
         throw err;
       }
     }
