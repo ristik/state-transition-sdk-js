@@ -1,7 +1,7 @@
 import { ConsolidationError, ConsolidationOutcome } from './ConsolidationError.js';
 import { ProofUnavailableReason } from './ConsolidationResult.js';
 import { IShardEndpoint, ShardRouting } from './ShardRouting.js';
-import { BatchProofError } from '../api/BatchProofError.js';
+import { BatchProofError, isBatchStateDetail } from '../api/BatchProofError.js';
 import { PartitionViewAuthenticator } from '../api/bft/AuthenticatedPartitionView.js';
 import { PartitionView } from '../api/bft/PartitionView.js';
 import { PartitionViewError } from '../api/bft/PartitionViewError.js';
@@ -79,6 +79,7 @@ export type ConsolidationAttempt =
   | ({ readonly status: 'consolidated' } & IConsolidatedProofs)
   | {
       readonly detail?: string;
+      readonly proofIndexes?: readonly number[];
       readonly reason: ProofUnavailableReason;
       readonly retryable: boolean;
       readonly status: 'unavailable';
@@ -90,6 +91,7 @@ class Unavailable extends Error {
     public readonly reason: ProofUnavailableReason,
     public readonly retryable: boolean,
     public readonly detail?: string,
+    public readonly proofIndexes?: readonly number[],
   ) {
     super(reason);
   }
@@ -225,7 +227,13 @@ export class ProofConsolidator {
     private readonly session: SealVerificationSession,
   ) {}
 
-  private static requestFailure(e: unknown, shard: ShardId, role: 'master' | 'peer', clock: AttemptClock): unknown {
+  private static requestFailure(
+    e: unknown,
+    shard: ShardId,
+    role: 'master' | 'peer',
+    clock: AttemptClock,
+    positions: readonly number[],
+  ): unknown {
     const done = clock.done();
     if (done && (isAbort(e) || !(e instanceof ConsolidationError))) {
       return done;
@@ -247,6 +255,11 @@ export class ProofConsolidator {
     switch (e.kind) {
       case 'unavailable': {
         const detail = e.detail ?? '';
+        if (isBatchStateDetail(detail)) {
+          // the offending request positions of this shard's batch, as positions in the token's outer history
+          const proofIndexes = e.indexes?.flatMap((i) => (i < positions.length ? [positions[i]] : []));
+          return new Unavailable(detail, detail === 'state_pending', detail, proofIndexes);
+        }
         if (detail.startsWith('busy')) {
           return new Unavailable('busy', true, detail);
         }
@@ -299,7 +312,13 @@ export class ProofConsolidator {
         if (done) {
           throw done;
         }
-        return { detail: e.detail, reason: e.reason, retryable: e.retryable, status: 'unavailable' };
+        return {
+          detail: e.detail,
+          proofIndexes: e.proofIndexes,
+          reason: e.reason,
+          retryable: e.retryable,
+          status: 'unavailable',
+        };
       }
       const done = clock.done();
       if (done && (isAbort(e) || !(e instanceof ConsolidationError))) {
@@ -435,7 +454,7 @@ export class ProofConsolidator {
       }
       return { batch, group };
     } catch (e) {
-      throw ProofConsolidator.requestFailure(e, group.endpoint.shard, role, clock);
+      throw ProofConsolidator.requestFailure(e, group.endpoint.shard, role, clock, group.indexes);
     }
   }
 

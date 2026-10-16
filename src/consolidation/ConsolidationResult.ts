@@ -13,12 +13,25 @@ import type { Token } from '../transaction/Token.js';
  * - `partition_view_unavailable`: the master served no partition view.
  * - `busy`: the service is under pressure.
  * - `limit_exceeded`: the token needs more states per shard than one batch carries (no chunking is attempted).
+ * - `state_pending`: a shard accepted a request of the token but has not certified it yet; retry later.
+ * - `state_expired`: a shard reports a request of the token as dropped before inclusion; not retryable.
+ * - `state_unknown`: a shard does not know a request of the token (misrouted, lost, restarted, another instance);
+ *   a routing or input problem, not retryable.
+ * - `state_not_in_root`: the state is not in the root the master view commits to for that shard; not retryable.
+ *
+ * The four `state_*` reasons carry the aggregator's status hints, which are unauthenticated: they classify the
+ * failure, they never make the token invalid or the state unspent. `proofIndexes` names the outer proofs concerned
+ * (0 is the genesis, i the i-th transfer) when the service sent request indexes.
  */
 export type ProofUnavailableReason =
   | 'busy'
   | 'limit_exceeded'
   | 'partition_view_unavailable'
   | 'pending_publication'
+  | 'state_expired'
+  | 'state_not_in_root'
+  | 'state_pending'
+  | 'state_unknown'
   | 'target_not_retained'
   | 'unsupported_capability'
   | 'unsupported_configuration';
@@ -59,6 +72,7 @@ export type ConsolidationResult =
   | { readonly status: 'consolidated'; readonly summary: IProofSummary; readonly token: Token }
   | {
       readonly detail?: string;
+      readonly proofIndexes?: readonly number[];
       readonly reason: ProofUnavailableReason;
       readonly retryable: boolean;
       readonly status: 'unavailable';

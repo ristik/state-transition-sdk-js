@@ -3,6 +3,7 @@ import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js'
 import { CertificationData } from './CertificationData.js';
 import { InclusionCertificate } from './InclusionCertificate.js';
 import { InclusionProof } from './InclusionProof.js';
+import { ProofStatusHint } from './ProofStatusHint.js';
 import { CborDeserializer } from '../serialization/cbor/CborDeserializer.js';
 import { CborError } from '../serialization/cbor/CborError.js';
 import { CborSerializer } from '../serialization/cbor/CborSerializer.js';
@@ -20,7 +21,20 @@ export class InclusionProofResponse {
     public readonly blockNumber: bigint,
     public readonly inclusionProof: InclusionProof | null,
     public readonly unicityCertificate: UnicityCertificate,
+    private readonly _statusHint: ProofStatusHint | null = null,
   ) {}
+
+  /**
+   * The aggregator's **unauthenticated hint**, present only when the request asked for it (`includeStatusHint`) and the
+   * aggregator answered with a recognized one; `null` is the legacy behavior. It is not a verdict and not evidence: it
+   * is not part of the proof, never changes how a proof is verified, can accompany a missing proof (`included`
+   * without one), and `unknown` or `expired` is not a proof of absence.
+   *
+   * @returns {ProofStatusHint|null} Hint, or `null`.
+   */
+  public get statusHint(): ProofStatusHint | null {
+    return this._statusHint;
+  }
 
   /**
    * The aggregator has certified this state.
@@ -119,6 +133,16 @@ export class InclusionProofResponse {
       CborSerializer.encodeUnsignedInteger(this.blockNumber),
       this.inclusionProof?.toCBOR() ?? this.encodeNoCertifiedLeaf(),
     );
+  }
+
+  /**
+   * The same response with the aggregator's (unauthenticated) hint attached. The hint is not encoded by {@link toCBOR}.
+   *
+   * @param {ProofStatusHint|null} hint Hint, `null` for none.
+   * @returns {InclusionProofResponse} New response.
+   */
+  public withStatusHint(hint: ProofStatusHint | null): InclusionProofResponse {
+    return new InclusionProofResponse(this.blockNumber, this.inclusionProof, this.unicityCertificate, hint);
   }
 
   /**
