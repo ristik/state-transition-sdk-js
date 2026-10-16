@@ -177,7 +177,7 @@ export class SealVerificationSession implements ISealAuthenticator {
     if (seal.timestamp < SealVerificationSession.GENESIS_TIME) {
       return 'Seal timestamp is invalid.';
     }
-    const signatures = seal.signatures;
+    const signatures = seal.witnesses;
     if (!signatures?.size) {
       return 'Seal has no signatures.';
     }
@@ -185,7 +185,7 @@ export class SealVerificationSession implements ISealAuthenticator {
       if (signer === '') {
         return 'Seal has a signature without signer ID.';
       }
-      if (signature.bytes.length === 0) {
+      if (signature.length === 0) {
         return `Seal has an empty signature for "${signer}".`;
       }
     }
