@@ -36,6 +36,10 @@ if (problems.length > 0) {
   process.exit(2);
 }
 const TIMEOUT_MS = Number(values['timeout-ms']);
+if (!Number.isInteger(TIMEOUT_MS) || TIMEOUT_MS <= 0 || TIMEOUT_MS > 2 ** 31 - 1) {
+  console.error(`--timeout-ms must be a positive integer number of milliseconds, got "${values['timeout-ms']}"`);
+  process.exit(2);
+}
 
 // every JSON-RPC request the released client makes, to prove what it puts on the wire
 const sent = [];

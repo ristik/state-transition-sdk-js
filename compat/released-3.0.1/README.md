@@ -1,7 +1,9 @@
 # Released-package compatibility runner (3.0.1)
 
-Runs the **published** npm package `@unicitylabs/state-transition-sdk@3.0.1` against an aggregator, to prove that clients which
-never send `waitMs` keep working byte for byte. Nothing here is built from this repository's sources.
+Runs the **published** npm package `@unicitylabs/state-transition-sdk@3.0.1` against an aggregator, to check that clients which
+never send `waitMs` keep working: it checks behaviour (submission, polling, verification, cancellation, rejection of corrupted
+proofs) and the request members the released client sends. It does not compare response bytes; that is the job of the raw
+golden clients (`tests/fixtures/longpoll/golden`), so a green run proves less than byte identity. Nothing here is built from this repository's sources.
 
 - Pinned: version `3.0.1`, integrity `sha512-ND4mW7nQjgr8yDdxvHNFheHH3gPijD4y0NS7XU2YPzjsdyDs4LDCYlRG/ZSSEDbz3xVgMh1biL3BY60nGPIsXQ==`,
   tag `v3.0.1` = git `f5f0737306901215860aa920a6ab570b699efba8` (recorded from `npm view`; the git head is not part of the
