@@ -24,13 +24,13 @@ import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
-import { checkWaitMs, isMalformedParams, isWireMilliseconds } from './LongPoll.js';
 import { NonInclusionProof } from './NonInclusionProof.js';
 import { NonInclusionProofError } from './NonInclusionProofError.js';
 import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
 import { abortable } from '../internal/abortable.js';
+import { checkWaitMs, isMalformedParams, isWireMilliseconds } from '../internal/longPoll.js';
 import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
 import { HexConverter } from '../util/HexConverter.js';
 
@@ -154,7 +154,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         return InclusionProofResponse.decodeWith(HexConverter.decode(proof), interner);
       });
       const view = typeof body.partitionView === 'string' ? HexConverter.decode(body.partitionView) : null;
-      return new InclusionProofBatch(proofs, view, body.waitedMs ?? null, sent.requests);
+      return new InclusionProofBatch(proofs, view, { requests: sent.requests, waitedMs: body.waitedMs ?? null });
     } catch (e) {
       throw invalid(`Malformed batch result: ${e instanceof Error ? e.message : String(e)}`, e);
     }
