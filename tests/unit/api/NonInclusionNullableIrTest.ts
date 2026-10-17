@@ -91,7 +91,7 @@ async function signedUc(ir: InputRecord): Promise<UnicityCertificate> {
   return new UnicityCertificate(ir, TR_HASH, CONF_HASH, shardPath, new UnicityTreeCertificate(PARTITION, []), seal);
 }
 
-async function verdictFor(ir: InputRecord, certificate = EMPTY): Promise<string> {
+async function outcomeFor(ir: InputRecord, certificate = EMPTY): Promise<{ message: string; verdict: string }> {
   const uc = await signedUc(ir);
   const wrapper = CborSerializer.encodeArray(
     CborSerializer.encodeUnsignedInteger(100n),
@@ -109,7 +109,11 @@ async function verdictFor(ir: InputRecord, certificate = EMPTY): Promise<string>
     { trustBase, unicityCertificateVerifier: verifier },
     { expectedPartition: PARTITION },
   );
-  return result.verdict;
+  return { message: result.message, verdict: result.verdict };
+}
+
+async function verdictFor(ir: InputRecord, certificate = EMPTY): Promise<string> {
+  return (await outcomeFor(ir, certificate)).verdict;
 }
 
 describe('nullable input record in the non-inclusion security path', () => {
@@ -145,16 +149,24 @@ describe('nullable input record in the non-inclusion security path', () => {
       new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
     );
     expect((await session.authenticate(uc.unicitySeal)).status).toEqual(VerificationStatus.OK);
-    const verdict = await verdictFor(inputRecord({ hash: EMPTY }));
-    expect(verdict).toEqual('uc_invalid');
+    expect(await outcomeFor(inputRecord({ hash: EMPTY }))).toEqual({
+      message: 'The state root must be null (the empty tree) or 32 bytes.',
+      verdict: 'uc_invalid',
+    });
   });
 
   it('rejects an independently signed zero hash as the empty root', async () => {
-    expect(await verdictFor(inputRecord({ hash: new Uint8Array(32) }))).not.toEqual('absent');
+    expect(await outcomeFor(inputRecord({ hash: new Uint8Array(32) }))).toEqual({
+      message: 'The path is invalid.',
+      verdict: 'certificate_invalid',
+    });
   });
 
   it('rejects the empty certificate against a signed nonempty root, and a nonempty hash of the wrong length', async () => {
     expect(await verdictFor(inputRecord({ hash: new Uint8Array(32).fill(9) }))).toEqual('certificate_invalid');
-    expect(await verdictFor(inputRecord({ hash: new Uint8Array(31).fill(9) }))).toEqual('uc_invalid');
+    expect(await outcomeFor(inputRecord({ hash: new Uint8Array(31).fill(9) }))).toEqual({
+      message: 'The state root must be null (the empty tree) or 32 bytes.',
+      verdict: 'uc_invalid',
+    });
   });
 });
