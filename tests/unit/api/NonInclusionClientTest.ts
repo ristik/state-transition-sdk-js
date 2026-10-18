@@ -3,6 +3,7 @@ import { join } from 'node:path';
 
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
+import { ShardId } from '../../../src/api/bft/ShardId.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import {
   OperationUnicityCertificateVerifier,
@@ -19,7 +20,7 @@ import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js'
 import { JsonRpcNetworkError } from '../../../src/api/json-rpc/JsonRpcNetworkError.js';
 import { NonInclusionProof } from '../../../src/api/NonInclusionProof.js';
 import { NonInclusionProofError } from '../../../src/api/NonInclusionProofError.js';
-import { verifyNonInclusion, VerifiedAbsence } from '../../../src/api/NonInclusionVerification.js';
+import { NonInclusionSnapshot, verifyNonInclusion } from '../../../src/api/NonInclusionVerification.js';
 import { ProofStatusHint } from '../../../src/api/ProofStatusHint.js';
 import { SdkError } from '../../../src/api/SdkError.js';
 import { StateId } from '../../../src/api/StateId.js';
@@ -32,10 +33,9 @@ import { TokenSalt } from '../../../src/transaction/TokenSalt.js';
 import { TokenType } from '../../../src/transaction/TokenType.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
-import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
 import { ShardedWorld } from '../../utils/ShardedWorld.js';
 
-const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v1');
+const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
 const golden = JSON.parse(readFileSync(join(ROOT, 'cases/golden-two-leaf.json'), 'utf8')) as {
   query: string;
   wrapper: string;
@@ -95,14 +95,14 @@ describe('AggregatorClient.getNonInclusionProof', () => {
       return;
     }
     expect(answer.proof.stateId).toBe(stateId);
-    const result = await verifyNonInclusion(answer.proof, new PrivateGetterContext(), { expectedPartition: 161n });
-    expect(result.status).toEqual(VerificationStatus.OK);
-    if (result.status === VerificationStatus.OK) {
-      expect(result.absence).toBeInstanceOf(VerifiedAbsence);
-      expect(result.absence.stateId).toBe(stateId);
-      expect(result.absence.absentAtRound).toBeGreaterThan(0n);
-      expect(result.absence.stateRoot).toHaveLength(32);
-    }
+    const result = await verifyNonInclusion(answer.proof, new PrivateGetterContext());
+    expect(result.verdict).toEqual('absent_at_snapshot');
+    expect(result.stateId).toBe(stateId);
+    const snapshot = result.snapshot as NonInclusionSnapshot;
+    expect(snapshot).toBeInstanceOf(NonInclusionSnapshot);
+    expect(snapshot.rootRound).toBeGreaterThan(0n);
+    expect(snapshot.partitionId).toEqual(7n);
+    expect(snapshot.stateRoot).toHaveLength(32);
   });
 
   describe('server outcomes are the same over every HTTP status', () => {
@@ -347,25 +347,38 @@ describe('AggregatorClient.getNonInclusionProof', () => {
 describe('non-inclusion API shape', () => {
   const proof = NonInclusionProof.decode(stateId, HexConverter.decode(golden.wrapper));
 
-  it('keeps decoded material, the evidence and the status hint apart at the type level', async () => {
-    const verified = await verifyNonInclusion(proof, new PrivateGetterContext(), { expectedPartition: 161n });
+  it('keeps decoded material, the snapshot and the status hint apart at the type level', async () => {
+    const verified = await verifyNonInclusion(proof, new PrivateGetterContext());
     const hint: ProofStatusHint = 'unknown';
-    // @ts-expect-error decoded wire material is not evidence
-    const asEvidence: VerifiedAbsence = proof;
-    // @ts-expect-error a status hint is not evidence
-    const hintAsEvidence: VerifiedAbsence = hint;
-    // @ts-expect-error evidence is not decoded material
-    const evidenceAsProof: NonInclusionProof = verified.absence;
+    // @ts-expect-error decoded wire material is not a snapshot
+    const asSnapshot: NonInclusionSnapshot = proof;
+    // @ts-expect-error a status hint is not a snapshot
+    const hintAsSnapshot: NonInclusionSnapshot = hint;
+    // @ts-expect-error a snapshot is not decoded material
+    const snapshotAsProof: NonInclusionProof = verified.snapshot;
     // @ts-expect-error a status hint is not decoded material
     const hintAsProof: NonInclusionProof = hint;
-    // @ts-expect-error absence only exists after narrowing on status
-    const bare: VerifiedAbsence = verified.absence;
-    expect([asEvidence, hintAsEvidence, evidenceAsProof, hintAsProof, bare]).toHaveLength(5);
-    expect(verified.status).toEqual(VerificationStatus.OK);
+    // @ts-expect-error a snapshot only exists after narrowing on the verdict (a rejection has none)
+    const bare: NonInclusionSnapshot = verified.snapshot;
+    expect([asSnapshot, hintAsSnapshot, snapshotAsProof, hintAsProof, bare]).toHaveLength(5);
+    expect(verified.verdict).toEqual('absent_at_snapshot');
   });
 
-  it('cannot be forged: the evidence has no public constructor path', () => {
-    expect(() => new VerifiedAbsence(Symbol('x'), stateId, 1n, null)).toThrow(TypeError);
+  it('cannot be forged: the snapshot has no public constructor path', () => {
+    expect(
+      () =>
+        new NonInclusionSnapshot(Symbol('x'), {
+          networkId: 1,
+          partitionId: 7n,
+          rootEpoch: 1n,
+          rootRound: 1n,
+          sealTimestampSeconds: 1n,
+          shardEpoch: 1n,
+          shardId: ShardId.ROOT,
+          shardRound: 1n,
+          stateRoot: null,
+        }),
+    ).toThrow(TypeError);
     expect(Object.isFrozen(proof.certificate)).toBe(false); // decoded data is a copy, never shared state
   });
 
@@ -383,9 +396,7 @@ describe('non-inclusion API shape', () => {
     const other = RootTrustBase.fromJSON(JSON.parse(readFileSync(join(ROOT, 'authority/other-network.json'), 'utf8')));
     const { SealVerificationSession } = await import('../../../src/api/bft/verification/SealVerificationSession.js');
     const session = new SealVerificationSession(other, verifier.quorumRule);
-    await expect(
-      verifyNonInclusion(proof, new PrivateGetterContext(), { expectedPartition: 161n, session }),
-    ).rejects.toThrow(TypeError);
+    await expect(verifyNonInclusion(proof, new PrivateGetterContext(), { session })).rejects.toThrow(TypeError);
   });
 
   it('errors are SdkErrors with a literal name that survive another copy of the SDK', () => {
@@ -401,9 +412,9 @@ describe('non-inclusion API shape', () => {
   it('shares the seal session of an operation scoped verifier: a seal is checked once, no extra knob', async () => {
     const operation = verifier.beginOperation();
     const context = { trustBase, unicityCertificateVerifier: operation };
-    const first = await verifyNonInclusion(proof, context, { expectedPartition: 161n });
-    const second = await verifyNonInclusion(proof, context, { expectedPartition: 161n });
-    expect([first.status, second.status]).toEqual([VerificationStatus.OK, VerificationStatus.OK]);
+    const first = await verifyNonInclusion(proof, context);
+    const second = await verifyNonInclusion(proof, context);
+    expect([first.verdict, second.verdict]).toEqual(['absent_at_snapshot', 'absent_at_snapshot']);
     expect((operation as OperationUnicityCertificateVerifier).stats.quorumChecks).toEqual(1);
   });
 });

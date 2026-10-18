@@ -31,6 +31,12 @@ export interface INonInclusionAggregatorClient extends IAggregatorClient {
    * served from the latest certified snapshot of the service; it proves absence **at that snapshot**, not now. The
    * signal ends the call even if the transport ignores it, and `cause` of the error is then `signal.reason`.
    *
+   * Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove
+   * absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or
+   * its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The
+   * seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response
+   * metadata for this check.
+   *
    * @param {StateId} stateId The state asked about.
    * @param {IRequestOptions} [options] Abort signal.
    * @returns {Promise<NonInclusionProofResponse>} The unverified proof, or the service's claim that the state is included.
@@ -58,6 +64,12 @@ export type MembershipEvidence =
 /**
  * Ask for absence, and for the inclusion proof if the service says the state is included. **Two independent calls, not
  * atomic**: they may be served from different snapshots, and both results are unverified evidence.
+ *
+ * Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence
+ * now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its
+ * certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal
+ * timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata
+ * for this check.
  *
  * @param {INonInclusionAggregatorClient} client Client with the non-inclusion capability.
  * @param {StateId} stateId The state.

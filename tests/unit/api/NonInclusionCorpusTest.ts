@@ -4,24 +4,50 @@ import { join } from 'node:path';
 
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
+import { ShardId } from '../../../src/api/bft/ShardId.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
+import { VerifiedSealCache } from '../../../src/api/bft/verification/VerifiedSealCache.js';
 import { NonInclusionCertificate } from '../../../src/api/NonInclusionCertificate.js';
 import { NonInclusionProof } from '../../../src/api/NonInclusionProof.js';
-import { verifyNonInclusion } from '../../../src/api/NonInclusionVerification.js';
+import {
+  NonInclusionSnapshot,
+  NonInclusionVerification,
+  verifyNonInclusion,
+} from '../../../src/api/NonInclusionVerification.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 
-/** Corpus aggregator-go `testdata/non-inclusion/v1`, vendored byte for byte, see PROVENANCE.md. */
-const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v1');
+/** Corpus aggregator-go `testdata/non-inclusion/v2`, vendored byte for byte, see PROVENANCE.md. */
+const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
+
+interface ISnapshotJson {
+  readonly networkId: number;
+  readonly partitionId: number;
+  readonly rootEpoch: string;
+  readonly rootRound: string;
+  readonly sealTimestampSeconds: string;
+  readonly shardEpoch: string;
+  readonly shardId: string;
+  readonly shardRound: string;
+  readonly stateRoot: string | null;
+}
+
+interface IExpected {
+  readonly acceptable?: string[];
+  readonly outcome: string;
+  readonly rejection?: string;
+  readonly snapshot?: ISnapshotJson;
+  readonly stateId?: string;
+}
 
 interface ICase {
   readonly block: string;
   readonly certificate: string;
   readonly context: string;
-  readonly expected: { readonly acceptable?: string[]; readonly verdict: string };
+  readonly expected: IExpected;
   readonly name: string;
   readonly query: string;
   readonly root: string;
@@ -30,9 +56,8 @@ interface ICase {
 }
 
 interface IContext {
-  readonly minRootRound: string;
   readonly nextEpochStart: string;
-  readonly partition: number;
+  readonly shard: string;
   readonly shardConfHash: string;
   readonly trustBaseJson: string;
 }
@@ -50,33 +75,81 @@ function stateIdOf(hex: string): StateId {
   return StateId.fromCBOR(CborSerializer.encodeByteString(HexConverter.decode(hex)));
 }
 
-/** The verdict of this SDK for a wrapper, in the vocabulary of the corpus. */
-async function verdictOf(c: ICase): Promise<string> {
-  const context = contexts[c.context];
+/** The snapshot of a result in the JSON vocabulary of the corpus (uint64 as decimal strings, bytes as hex). */
+function snapshotJson(snapshot: NonInclusionSnapshot): ISnapshotJson {
+  return {
+    networkId: snapshot.networkId,
+    partitionId: Number(snapshot.partitionId),
+    rootEpoch: snapshot.rootEpoch.toString(),
+    rootRound: snapshot.rootRound.toString(),
+    sealTimestampSeconds: snapshot.sealTimestampSeconds.toString(),
+    shardEpoch: snapshot.shardEpoch.toString(),
+    shardId: snapshot.shardId.toString(),
+    shardRound: snapshot.shardRound.toString(),
+    stateRoot: snapshot.stateRoot === null ? null : HexConverter.encode(snapshot.stateRoot),
+  };
+}
+
+type Outcome =
+  | { readonly outcome: 'malformed' }
+  | { readonly outcome: NonInclusionVerification['verdict']; readonly result: NonInclusionVerification };
+
+/** What this SDK does with a wrapper, on one verifier like a real application would. */
+async function run(
+  c: Pick<ICase, 'context' | 'query' | 'wrapper'>,
+  verifier: UnicityCertificateVerifier = new UnicityCertificateVerifier(
+    new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
+  ),
+  contextName: string = c.context,
+): Promise<Outcome> {
+  const context = contexts[contextName];
   let proof: NonInclusionProof;
   try {
     proof = NonInclusionProof.decode(stateIdOf(c.query), HexConverter.decode(c.wrapper));
   } catch {
-    return 'malformed';
+    return { outcome: 'malformed' };
   }
-  const trustBase = RootTrustBase.fromJSON(JSON.parse(read(context.trustBaseJson)));
-  const verifier = new UnicityCertificateVerifier(
-    new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
+  // the corpus writes uint64 values of the authority as JSON numbers: quote them before parsing, a double would round
+  const trustBase = RootTrustBase.fromJSON(
+    JSON.parse(
+      read(context.trustBaseJson).replace(/("(?:epoch|epochStartRound|stake|quorumThreshold)":\s*)(\d+)/g, '$1"$2"'),
+    ),
   );
   const result = await verifyNonInclusion(
     proof,
     { trustBase, unicityCertificateVerifier: verifier },
     {
-      expectedPartition: BigInt(context.partition),
-      minRound: BigInt(context.minRootRound),
       ...(BigInt(context.nextEpochStart) > 0n ? { nextEpochStartRound: BigInt(context.nextEpochStart) } : {}),
+      ...(context.shard !== '' ? { shard: ShardId.fromBits(context.shard) } : {}),
       ...(context.shardConfHash ? { shardConfigurationHash: HexConverter.decode(context.shardConfHash) } : {}),
     },
   );
-  return result.verdict;
+  return { outcome: result.verdict, result };
 }
 
-describe('non-inclusion corpus v1', () => {
+/** Assert one outcome against the expectation of the corpus: exact for successes, class and no metadata for a rejection. */
+function expectOutcome(actual: Outcome, expected: IExpected): void {
+  if (expected.outcome === 'absent_at_snapshot' || expected.outcome === 'included_at_snapshot') {
+    expect(actual.outcome).toEqual(expected.outcome);
+    const { result } = actual as { result: NonInclusionVerification };
+    expect(result.snapshot).not.toBeNull();
+    expect(result.stateId.data).toEqual(HexConverter.decode(expected.stateId as string));
+    expect(snapshotJson(result.snapshot as NonInclusionSnapshot)).toEqual(expected.snapshot);
+    return;
+  }
+  expect(expected.outcome).toEqual('rejected');
+  // never a success, never metadata of a snapshot
+  expect(actual.outcome).not.toEqual('absent_at_snapshot');
+  expect(actual.outcome).not.toEqual('included_at_snapshot');
+  if ('result' in actual) {
+    expect(actual.result.snapshot).toBeNull();
+  }
+  // a strict decoder legitimately stops at an earlier stage (SPEC.md "Conformance"): input that does not decode is
+  // `malformed`, which is never a later class reached by loosening the decoder
+  expect([expected.rejection, 'malformed', ...(expected.acceptable ?? [])]).toContain(actual.outcome);
+}
+
+describe('non-inclusion corpus v2', () => {
   it('is the vendored corpus, unchanged', () => {
     const manifest = json<{ sha256: Record<string, string> }>('manifest.json');
     for (const [path, sha] of Object.entries(manifest.sha256)) {
@@ -88,10 +161,10 @@ describe('non-inclusion corpus v1', () => {
     }
   });
 
-  describe('positive cases', () => {
+  describe('positive cases: every snapshot field', () => {
     it.each(files('cases'))('%s', async (path) => {
       const c = json<ICase>(path);
-      expect(await verdictOf(c)).toEqual(c.expected.verdict);
+      expectOutcome(await run(c), c.expected);
       if (c.certificate.length > 0 || c.root === '') {
         // the codec reproduces the bytes of the producers
         const bytes = HexConverter.decode(c.certificate);
@@ -99,28 +172,113 @@ describe('non-inclusion corpus v1', () => {
       }
       const wrapper = HexConverter.decode(c.wrapper);
       expect(NonInclusionProof.decode(stateIdOf(c.query), wrapper).toCBOR()).toEqual(wrapper);
-      // the building block alone agrees with the verdict on the authenticated root of the case
-      const relation = await NonInclusionCertificate.fromBytes(
-        HexConverter.decode(c.certificate),
-      ).verifyAgainstTrustedRoot(stateIdOf(c.query), c.root === '' ? null : HexConverter.decode(c.root));
-      expect(relation === 'certificate_invalid' ? 'certificate_invalid' : relation).toEqual(
-        c.expected.verdict === 'absent' || c.expected.verdict === 'state_included' ? c.expected.verdict : relation,
-      );
     });
   });
 
-  describe('negative cases never loosen a decoder to reach a later class', () => {
+  describe('negative cases never loosen a decoder to reach a later class, and carry no metadata', () => {
     it.each(files('negative'))('%s', async (path) => {
       const c = json<ICase>(path);
-      const verdict = await verdictOf(c);
-      if (c.expected.verdict === 'absent' || c.expected.verdict === 'state_included') {
-        expect(verdict).toEqual(c.expected.verdict);
-      } else {
-        expect(verdict).not.toEqual('absent');
-        expect(verdict).not.toEqual('state_included');
-        expect([c.expected.verdict, ...(c.expected.acceptable ?? [])]).toContain(verdict);
-      }
+      expectOutcome(await run(c), c.expected);
     });
+  });
+
+  describe('caller policy examples are applied after verification', () => {
+    interface IPolicyExample {
+      readonly checkpoint: { minSealTimestampSeconds?: string; networkId: number; requiredRootRound: string };
+      readonly decision: 'accept' | 'reject';
+      readonly name: string;
+      readonly snapshot: ISnapshotJson;
+      readonly vector: string;
+    }
+    const decide = (snapshot: NonInclusionSnapshot, checkpoint: IPolicyExample['checkpoint']): 'accept' | 'reject' =>
+      snapshot.networkId === checkpoint.networkId &&
+      snapshot.rootRound >= BigInt(checkpoint.requiredRootRound) &&
+      (checkpoint.minSealTimestampSeconds === undefined ||
+        snapshot.sealTimestampSeconds >= BigInt(checkpoint.minSealTimestampSeconds))
+        ? 'accept'
+        : 'reject';
+
+    it.each(json<{ examples: IPolicyExample[] }>('policy.json').examples.map((e) => [e.name, e] as const))(
+      '%s',
+      async (_name, example) => {
+        const c = json<ICase>(`${example.vector}.json`);
+        const actual = await run(c);
+        expectOutcome(actual, c.expected);
+        const { snapshot } = (actual as { result: NonInclusionVerification }).result;
+        expect(snapshotJson(snapshot as NonInclusionSnapshot)).toEqual(example.snapshot);
+        expect(decide(snapshot as NonInclusionSnapshot, example.checkpoint)).toEqual(example.decision);
+      },
+    );
+  });
+
+  describe('sequences on one verifier', () => {
+    interface ISequence {
+      readonly context: string;
+      readonly name: string;
+      readonly steps: { readonly expected: IExpected; readonly vector: string }[];
+    }
+    it.each(json<{ sequences: ISequence[] }>('sequences.json').sequences.map((q) => [q.name, q] as const))(
+      '%s',
+      async (_name, sequence) => {
+        // one operation scoped verifier: authenticated seals are shared by the steps
+        const verifier = new UnicityCertificateVerifier(
+          new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), new VerifiedSealCache(16)),
+        ).beginOperation();
+        for (const step of sequence.steps) {
+          const c = json<ICase>(`${step.vector}.json`);
+          expectOutcome(await run(c, verifier, sequence.context), step.expected);
+        }
+      },
+    );
+  });
+
+  describe('mutation resistance: one changed byte is never a different outcome or snapshot', () => {
+    it.each(['cases/golden-two-leaf.json', 'cases/sharded-absent.json', 'cases/empty-tree.json'])(
+      '%s',
+      async (path) => {
+        const c = json<ICase>(path);
+        const original = (await run(c)) as { outcome: string; result: NonInclusionVerification };
+        const wrapper = HexConverter.decode(c.wrapper);
+        const verifier = new UnicityCertificateVerifier(
+          new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), new VerifiedSealCache(64)),
+        ).beginOperation();
+        let accepted = 0;
+        for (let i = 0; i < wrapper.length; i++) {
+          const mutated = new Uint8Array(wrapper);
+          mutated[i] ^= 0x01;
+          const outcome = await run({ ...c, wrapper: HexConverter.encode(mutated) }, verifier);
+          if ('result' in outcome && outcome.result.snapshot !== null) {
+            // the byte did not matter (the unauthenticated block number): everything authenticated is the same
+            accepted++;
+            expect(outcome.outcome).toEqual(original.outcome);
+            expect(snapshotJson(outcome.result.snapshot)).toEqual(
+              snapshotJson(original.result.snapshot as NonInclusionSnapshot),
+            );
+          } else if ('result' in outcome) {
+            expect(outcome.result.snapshot).toBeNull();
+          }
+        }
+        // only the few bytes of the unauthenticated block number may change without a rejection
+        expect(accepted).toBeLessThanOrEqual(9);
+      },
+      120000,
+    );
+  });
+
+  it('keeps a result independent of the evidence it was built from', async () => {
+    const c = json<ICase>('cases/golden-two-leaf.json');
+    const outcome = (await run(c)) as { result: NonInclusionVerification };
+    const snapshot = outcome.result.snapshot as NonInclusionSnapshot;
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(outcome.result)).toBe(true);
+    const root = snapshot.stateRoot as Uint8Array;
+    root.fill(0);
+    expect(snapshot.stateRoot).not.toEqual(root);
+    const shard = snapshot.shardId;
+    expect(shard).not.toBe(snapshot.shardId);
+    expect(() => {
+      (snapshot as unknown as { rootRound: bigint }).rootRound = 0n;
+    }).toThrow(TypeError);
   });
 });
 

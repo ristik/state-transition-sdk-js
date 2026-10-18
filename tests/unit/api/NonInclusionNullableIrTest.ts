@@ -1,3 +1,4 @@
+import { AGGREGATION_PARTITION_ID } from '../../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../../src/api/bft/InputRecord.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../../src/api/bft/ShardId.js';
@@ -23,7 +24,7 @@ import { VerificationStatus } from '../../../src/verification/VerificationStatus
 // Architect ruling "Empty-tree ruling" §5: the authenticated empty tree is exactly IR hash = null. An empty byte string,
 // a zero hash and every other representation are not aliases of it, also when a quorum signed that very certificate.
 
-const PARTITION = 161n;
+const PARTITION = AGGREGATION_PARTITION_ID;
 const NODE = new SigningService(new Uint8Array(32).fill(7));
 const QUERY = StateId.fromCBOR(CborSerializer.encodeByteString(new Uint8Array(32).fill(0xac)));
 const TR_HASH = new Uint8Array(32).fill(0x33);
@@ -74,13 +75,17 @@ function inputRecord(options: {
 }
 
 /** A unicity certificate for the unsharded partition whose seal is signed over exactly this input record. */
-async function signedUc(ir: InputRecord, steps: HashStep[] = []): Promise<UnicityCertificate> {
+async function signedUc(
+  ir: InputRecord,
+  steps: HashStep[] = [],
+  partition: bigint = PARTITION,
+): Promise<UnicityCertificate> {
   const shardPath = new ShardTreeCertificate(ShardId.fromBits(''), []);
   const shardRoot = await UnicityCertificate.calculateShardTreeCertificateRootHash(ir, TR_HASH, CONF_HASH, shardPath);
   const treeHash = await new DataHasher(HashAlgorithm.SHA256)
     .update(CborSerializer.encodeByteString(shardRoot.data))
     .digest();
-  const key = new Uint8Array([0, 0, 0, Number(PARTITION)]);
+  const key = new Uint8Array([0, 0, 0, Number(partition)]);
   const sealHash = await new DataHasher(HashAlgorithm.SHA256)
     .update(CborSerializer.encodeByteString(new Uint8Array([0x01])))
     .update(CborSerializer.encodeByteString(key))
@@ -95,15 +100,16 @@ async function signedUc(ir: InputRecord, steps: HashStep[] = []): Promise<Unicit
     sealHash.data,
     new Map([['NODE', NODE]]),
   );
-  return new UnicityCertificate(ir, TR_HASH, CONF_HASH, shardPath, new UnicityTreeCertificate(PARTITION, steps), seal);
+  return new UnicityCertificate(ir, TR_HASH, CONF_HASH, shardPath, new UnicityTreeCertificate(partition, steps), seal);
 }
 
 async function outcomeFor(
   ir: InputRecord,
   certificate = EMPTY,
   steps: HashStep[] = [],
-): Promise<{ message: string; verdict: string }> {
-  const uc = await signedUc(ir, steps);
+  partition: bigint = PARTITION,
+): Promise<{ message: string; snapshot: unknown; verdict: string }> {
+  const uc = await signedUc(ir, steps, partition);
   const wrapper = CborSerializer.encodeArray(
     CborSerializer.encodeUnsignedInteger(100n),
     CborSerializer.encodeTag(
@@ -115,12 +121,11 @@ async function outcomeFor(
       ),
     ),
   );
-  const result = await verifyNonInclusion(
-    NonInclusionProof.decode(QUERY, wrapper),
-    { trustBase, unicityCertificateVerifier: verifier },
-    { expectedPartition: PARTITION },
-  );
-  return { message: result.message, verdict: result.verdict };
+  const result = await verifyNonInclusion(NonInclusionProof.decode(QUERY, wrapper), {
+    trustBase,
+    unicityCertificateVerifier: verifier,
+  });
+  return { message: result.reason, snapshot: result.snapshot, verdict: result.verdict };
 }
 
 async function verdictFor(ir: InputRecord, certificate = EMPTY): Promise<string> {
@@ -143,12 +148,12 @@ describe('nullable input record in the non-inclusion security path', () => {
   });
 
   it('accepts a signed initial empty tree (hash null, round 0, summary null)', async () => {
-    expect(await verdictFor(inputRecord({ hash: null }))).toEqual('absent');
+    expect(await verdictFor(inputRecord({ hash: null }))).toEqual('absent_at_snapshot');
   });
 
   it('accepts a signed nonzero-round empty tree with null hash and a valid summary', async () => {
     expect(await verdictFor(inputRecord({ hash: null, round: 3n, summary: EMPTY, timestamp: 1700000000n }))).toEqual(
-      'absent',
+      'absent_at_snapshot',
     );
   });
 
@@ -162,6 +167,7 @@ describe('nullable input record in the non-inclusion security path', () => {
     expect((await session.authenticate(uc.unicitySeal)).status).toEqual(VerificationStatus.OK);
     expect(await outcomeFor(inputRecord({ hash: EMPTY }))).toEqual({
       message: 'The state root must be null (the empty tree) or 32 bytes.',
+      snapshot: null,
       verdict: 'uc_invalid',
     });
   });
@@ -169,6 +175,7 @@ describe('nullable input record in the non-inclusion security path', () => {
   it('rejects an independently signed zero hash as the empty root', async () => {
     expect(await outcomeFor(inputRecord({ hash: new Uint8Array(32) }))).toEqual({
       message: 'The path is invalid.',
+      snapshot: null,
       verdict: 'certificate_invalid',
     });
   });
@@ -177,6 +184,7 @@ describe('nullable input record in the non-inclusion security path', () => {
     expect(await verdictFor(inputRecord({ hash: new Uint8Array(32).fill(9) }))).toEqual('certificate_invalid');
     expect(await outcomeFor(inputRecord({ hash: new Uint8Array(31).fill(9) }))).toEqual({
       message: 'The state root must be null (the empty tree) or 32 bytes.',
+      snapshot: null,
       verdict: 'uc_invalid',
     });
   });
@@ -186,8 +194,8 @@ describe('nullable input record in the non-inclusion security path', () => {
     const T = 1700000000n;
 
     it('accepts the legal null fields: a null summary at round 0, an empty block hash for an unchanged state', async () => {
-      expect(await verdictFor(inputRecord({ hash: null }))).toEqual('absent');
-      expect(await verdictFor(inputRecord({ blockHash: EMPTY, hash: null }))).toEqual('absent');
+      expect(await verdictFor(inputRecord({ hash: null }))).toEqual('absent_at_snapshot');
+      expect(await verdictFor(inputRecord({ blockHash: EMPTY, hash: null }))).toEqual('absent_at_snapshot');
       expect(await verdictFor(inputRecord({ blockHash: B, hash: H }))).not.toEqual('uc_invalid');
     });
 
@@ -204,12 +212,27 @@ describe('nullable input record in the non-inclusion security path', () => {
     });
   });
 
+  it('rejects a validly signed certificate of another partition, with no snapshot metadata', async () => {
+    for (const partition of [0n, 6n, 8n, 161n, 0xffffffffn]) {
+      await expect(outcomeFor(inputRecord({ hash: null }), EMPTY, [], partition)).resolves.toEqual({
+        message: 'The certificate is not of the aggregation partition.',
+        snapshot: null,
+        verdict: 'uc_invalid',
+      });
+    }
+    // control: the same record under partition 7 is a verified absence with its snapshot
+    const accepted = await outcomeFor(inputRecord({ hash: null }));
+    expect(accepted.verdict).toEqual('absent_at_snapshot');
+    expect(accepted.snapshot).not.toBeNull();
+  });
+
   it('classifies a partition path step key of 2^32 or more as uc_invalid, never a throw', async () => {
     for (const key of [2n ** 32n, 2n ** 32n + 161n, 2n ** 64n - 1n]) {
       await expect(
         outcomeFor(inputRecord({ hash: null }), EMPTY, [new HashStep(key, new Uint8Array(32))]),
       ).resolves.toEqual({
         message: 'The partition path has a nil step or a step key beyond 32 bits.',
+        snapshot: null,
         verdict: 'uc_invalid',
       });
     }
