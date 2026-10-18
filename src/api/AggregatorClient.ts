@@ -221,6 +221,9 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
   /**
    * @inheritDoc
+   * @throws {JsonRpcResponseError} If the result cannot be decoded as a proof (not hex, not CBOR, malformed proof
+   *   material): the original decoding error is kept as `cause`. Earlier releases threw that raw error (`CborError`,
+   *   `HashError` or `Error`).
    */
   public async getInclusionProof(
     stateId: StateId,
