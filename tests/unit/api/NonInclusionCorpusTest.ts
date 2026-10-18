@@ -128,7 +128,13 @@ async function run(
 }
 
 /** Assert one outcome against the expectation of the corpus: exact for successes, class and no metadata for a rejection. */
-function expectOutcome(actual: Outcome, expected: IExpected): void {
+/**
+ * Cases the vendored corpus does not yet list `acceptable: ["malformed"]` for although this SDK's strict decoder stops
+ * there; empty once the corpus is re-vendored from the final aggregator-go #252.
+ */
+const UNTIL_REVENDOR = new Set(['negative/shard-path-missing.json']);
+
+function expectOutcome(actual: Outcome, expected: IExpected, name?: string): void {
   if (expected.outcome === 'absent_at_snapshot' || expected.outcome === 'included_at_snapshot') {
     expect(actual.outcome).toEqual(expected.outcome);
     const { result } = actual as { result: NonInclusionVerification };
@@ -144,9 +150,14 @@ function expectOutcome(actual: Outcome, expected: IExpected): void {
   if ('result' in actual) {
     expect(actual.result.snapshot).toBeNull();
   }
-  // a strict decoder legitimately stops at an earlier stage (SPEC.md "Conformance"): input that does not decode is
-  // `malformed`, which is never a later class reached by loosening the decoder
-  expect([expected.rejection, 'malformed', ...(expected.acceptable ?? [])]).toContain(actual.outcome);
+  // SPEC "Conformance": the class is `expected.rejection` or one of `expected.acceptable` (a strict decoder may stop at an
+  // earlier stage, `malformed`, only where the case lists it); never loosened to reach a later class
+  const accepted = [
+    expected.rejection,
+    ...(expected.acceptable ?? []),
+    ...(name !== undefined && UNTIL_REVENDOR.has(name) ? ['malformed'] : []),
+  ];
+  expect(accepted).toContain(actual.outcome);
 }
 
 describe('non-inclusion corpus v2', () => {
@@ -178,7 +189,7 @@ describe('non-inclusion corpus v2', () => {
   describe('negative cases never loosen a decoder to reach a later class, and carry no metadata', () => {
     it.each(files('negative'))('%s', async (path) => {
       const c = json<ICase>(path);
-      expectOutcome(await run(c), c.expected);
+      expectOutcome(await run(c), c.expected, path);
     });
   });
 
