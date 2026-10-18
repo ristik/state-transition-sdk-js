@@ -22,7 +22,9 @@ import { verifyNonInclusion, VerifiedAbsence } from '../../../src/api/NonInclusi
 import { ProofStatusHint } from '../../../src/api/ProofStatusHint.js';
 import { SdkError } from '../../../src/api/SdkError.js';
 import { StateId } from '../../../src/api/StateId.js';
+import { HashError } from '../../../src/crypto/hash/HashError.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
+import { CborError } from '../../../src/serialization/cbor/CborError.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
@@ -217,6 +219,36 @@ describe('AggregatorClient.getNonInclusionProof', () => {
         kind: 'unavailable',
         retryable: true,
       });
+    });
+
+    it('classifies a malformed inclusion response as invalid_response, not retryable transport', async () => {
+      const hexFailure = (): Error => {
+        try {
+          HexConverter.decode('zz');
+        } catch (e) {
+          return e as Error;
+        }
+        throw new Error('hex decoding unexpectedly succeeded');
+      };
+      for (const failure of [new CborError('bad proof'), hexFailure(), new HashError('bad length')]) {
+        await expect(
+          fetchMembershipEvidence(
+            claiming(() => Promise.reject(failure)),
+            stateId,
+          ),
+        ).rejects.toMatchObject({
+          cause: failure,
+          kind: 'invalid_response',
+          retryable: false,
+        });
+      }
+      // a real connection failure stays a retryable transport failure
+      await expect(
+        fetchMembershipEvidence(
+          claiming(() => Promise.reject(new TypeError('fetch failed'))),
+          stateId,
+        ),
+      ).rejects.toMatchObject({ kind: 'transport', retryable: true });
     });
 
     it('types every failure of the second call like the first, and bounds it by the signal', async () => {

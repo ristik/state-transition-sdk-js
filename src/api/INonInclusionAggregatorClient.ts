@@ -5,8 +5,10 @@ import { IRequestOptions } from './IRequestOptions.js';
 import { NonInclusionProof } from './NonInclusionProof.js';
 import { NonInclusionProofError } from './NonInclusionProofError.js';
 import { StateId } from './StateId.js';
+import { HashError } from '../crypto/hash/HashError.js';
 import { abortable } from '../internal/abortable.js';
 import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
+import { CborError } from '../serialization/cbor/CborError.js';
 
 /**
  * What the service answered to a non-inclusion request.
@@ -56,6 +58,25 @@ export type MembershipEvidence =
   | { readonly kind: 'inclusion'; readonly proof: InclusionProof };
 
 /**
+ * A second (inclusion) response the SDK could not decode is an invalid response, not a retryable transport failure: the
+ * exchange worked, what came back is not a proof. Decoding failures are CBOR, hash-length and hex errors of the proof
+ * material; connection and HTTP failures keep their own classification.
+ *
+ * @param {unknown} e Failure of the inclusion proof call.
+ * @returns {NonInclusionProofError|null} `invalid_response`, or `null` if `e` is not a decoding failure.
+ */
+function malformedInclusionResponse(e: unknown): NonInclusionProofError | null {
+  const decoding =
+    e instanceof CborError ||
+    e instanceof HashError ||
+    e instanceof RangeError ||
+    (e instanceof Error && !(e instanceof TypeError) && /\bhex\b/i.test(e.message));
+  return decoding
+    ? new NonInclusionProofError('invalid_response', 'The inclusion proof response is malformed.', { cause: e })
+    : null;
+}
+
+/**
  * Ask for absence, and for the inclusion proof if the service says the state is included. **Two independent calls, not
  * atomic**: they may be served from different snapshots, and both results are unverified evidence.
  *
@@ -84,7 +105,7 @@ export async function fetchMembershipEvidence(
       ? abortable((s) => client.getInclusionProof(stateId, { ...options, signal: s }), signal)
       : client.getInclusionProof(stateId, options));
   } catch (e) {
-    throw classifyNonInclusionFailure(e, signal) ?? e;
+    throw malformedInclusionResponse(e) ?? classifyNonInclusionFailure(e, signal) ?? e;
   }
   if (!included.inclusionProof) {
     throw new NonInclusionProofError(
