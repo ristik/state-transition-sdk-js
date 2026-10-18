@@ -1,3 +1,4 @@
+import { InputRecord } from '../../../src/api/bft/InputRecord.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
@@ -159,6 +160,42 @@ describe('InclusionProof', () => {
         transaction.sourceStateHash,
       ).then((result) => result.status),
     ).resolves.toEqual(InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH);
+  });
+
+  it('verification fails, not throws, for a UC with a null input-record hash', async () => {
+    const ir = unicityCertificate.inputRecord;
+    const nullHashRecord = new InputRecord(
+      ir.roundNumber,
+      ir.epoch,
+      ir.previousHash,
+      null,
+      ir.summaryValue,
+      ir.timestamp,
+      ir.blockHash,
+      ir.sumOfEarnedFees,
+      ir.executedTransactionsHash,
+    );
+    const nullHashUc = new UnicityCertificate(
+      nullHashRecord,
+      unicityCertificate.technicalRecordHash,
+      unicityCertificate.shardConfigurationHash,
+      unicityCertificate.shardTreeCertificate,
+      unicityCertificate.unicityTreeCertificate,
+      unicityCertificate.unicitySeal,
+    );
+
+    await expect(
+      InclusionProofVerificationRule.verify(
+        trustBase,
+        predicateVerifier,
+        unicityCertificateVerifier,
+        new InclusionProof(certificationData, REFERENCE_TIME, inclusionCertificate, nullHashUc),
+        await transaction.calculateTransactionHash(),
+        transaction.expiresAt,
+        transaction.lockScript,
+        transaction.sourceStateHash,
+      ).then((result) => result.status),
+    ).resolves.toEqual(InclusionProofVerificationStatus.PATH_INVALID);
   });
 
   it('verification fails with invalid unlock script', async () => {
