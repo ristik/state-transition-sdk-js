@@ -4,7 +4,7 @@ import { ShardId } from '../../../src/api/bft/ShardId.js';
 import { ShardTreeCertificate } from '../../../src/api/bft/ShardTreeCertificate.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../src/api/bft/UnicitySeal.js';
-import { UnicityTreeCertificate } from '../../../src/api/bft/UnicityTreeCertificate.js';
+import { HashStep, UnicityTreeCertificate } from '../../../src/api/bft/UnicityTreeCertificate.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../src/api/bft/verification/SealVerificationSession.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
@@ -67,7 +67,7 @@ function inputRecord(options: {
 }
 
 /** A unicity certificate for the unsharded partition whose seal is signed over exactly this input record. */
-async function signedUc(ir: InputRecord): Promise<UnicityCertificate> {
+async function signedUc(ir: InputRecord, steps: HashStep[] = []): Promise<UnicityCertificate> {
   const shardPath = new ShardTreeCertificate(ShardId.fromBits(''), []);
   const shardRoot = await UnicityCertificate.calculateShardTreeCertificateRootHash(ir, TR_HASH, CONF_HASH, shardPath);
   const treeHash = await new DataHasher(HashAlgorithm.SHA256)
@@ -88,11 +88,15 @@ async function signedUc(ir: InputRecord): Promise<UnicityCertificate> {
     sealHash.data,
     new Map([['NODE', NODE]]),
   );
-  return new UnicityCertificate(ir, TR_HASH, CONF_HASH, shardPath, new UnicityTreeCertificate(PARTITION, []), seal);
+  return new UnicityCertificate(ir, TR_HASH, CONF_HASH, shardPath, new UnicityTreeCertificate(PARTITION, steps), seal);
 }
 
-async function outcomeFor(ir: InputRecord, certificate = EMPTY): Promise<{ message: string; verdict: string }> {
-  const uc = await signedUc(ir);
+async function outcomeFor(
+  ir: InputRecord,
+  certificate = EMPTY,
+  steps: HashStep[] = [],
+): Promise<{ message: string; verdict: string }> {
+  const uc = await signedUc(ir, steps);
   const wrapper = CborSerializer.encodeArray(
     CborSerializer.encodeUnsignedInteger(100n),
     CborSerializer.encodeTag(
@@ -168,5 +172,15 @@ describe('nullable input record in the non-inclusion security path', () => {
       message: 'The state root must be null (the empty tree) or 32 bytes.',
       verdict: 'uc_invalid',
     });
+  });
+  it('classifies a partition path step key of 2^32 or more as uc_invalid, never a throw', async () => {
+    for (const key of [2n ** 32n, 2n ** 32n + 161n, 2n ** 64n - 1n]) {
+      await expect(
+        outcomeFor(inputRecord({ hash: null }), EMPTY, [new HashStep(key, new Uint8Array(32))]),
+      ).resolves.toEqual({
+        message: 'The partition path has a nil step or a step key beyond 32 bits.',
+        verdict: 'uc_invalid',
+      });
+    }
   });
 });

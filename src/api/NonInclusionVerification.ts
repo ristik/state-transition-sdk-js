@@ -10,6 +10,7 @@ import { VerificationResult } from '../verification/VerificationResult.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
 const CAPABILITY = Symbol('VerifiedAbsence');
+const MAX_STEP_KEY = 0xffffffffn;
 
 /**
  * Absence of one state **at one certified snapshot**: the state was not in the state tree the authenticated unicity
@@ -125,7 +126,7 @@ function reject(verdict: NonInclusionRejection, message: string): NonInclusionVe
  *
  * Order: (1) the certificate for the expected partition and shard (the empty shard unless `options.shard`; exactly one
  * shard path sibling per shard id bit), 32-byte technical record hash, optional pinned configuration hash, no nil path
- * entries, and the shard and partition path to the seal hash; (2) the seal against the context's trust base with the strict authenticator (network, exact epoch, not
+ * entries or step keys beyond 32 bits, and the shard and partition path to the seal hash; (2) the seal against the context's trust base with the strict authenticator (network, exact epoch, not
  * before the epoch start, quorum), and an authenticated epoch end if given; (3) the minimum round, and for a sharded
  * certificate the membership of the state and of the terminal leaf in the shard; (4) the state tree relation: every
  * junction chosen like the terminal, the path reaching the certified root, the terminal different from the state. The
@@ -176,10 +177,17 @@ export async function verifyNonInclusion(
   if (root !== null && root.length !== 32) {
     return reject('uc_invalid', 'The state root must be null (the empty tree) or 32 bytes.');
   }
-  if (uc.unicityTreeCertificate.steps.some((step) => step == null)) {
-    return reject('uc_invalid', 'The partition path has a nil step.');
+  // a step key is a 32-bit partition id: anything else is malformed input, whatever it does to the path
+  if (uc.unicityTreeCertificate.steps.some((step) => step == null || step.key < 0n || step.key > MAX_STEP_KEY)) {
+    return reject('uc_invalid', 'The partition path has a nil step or a step key beyond 32 bits.');
   }
-  if ((await UnicitySealHashMatchesWithRootHashRule.verify(uc)).status !== VerificationStatus.OK) {
+  let pathReachesSeal = false;
+  try {
+    pathReachesSeal = (await UnicitySealHashMatchesWithRootHashRule.verify(uc)).status === VerificationStatus.OK;
+  } catch {
+    // malformed material never throws out of verification
+  }
+  if (!pathReachesSeal) {
     return reject('uc_invalid', 'The certificate path does not reach the seal hash.');
   }
 
