@@ -47,6 +47,8 @@ const verifier = new UnicityCertificateVerifier(
 );
 
 function inputRecord(options: {
+  /** Overrides the block hash derived from the state hash. */
+  blockHash?: Uint8Array | null;
   hash: Uint8Array | null;
   round?: bigint;
   summary?: Uint8Array | null;
@@ -60,7 +62,12 @@ function inputRecord(options: {
     options.hash,
     options.summary === undefined ? null : options.summary,
     options.timestamp ?? 0n,
-    null,
+    // a changed state hash needs a block hash (bft-go-base InputRecord.IsValid), an unchanged one forbids it
+    options.blockHash !== undefined
+      ? options.blockHash
+      : options.hash !== null && options.hash.length > 0
+        ? new Uint8Array(32).fill(1)
+        : null,
     0n,
     null,
   );
@@ -173,6 +180,30 @@ describe('nullable input record in the non-inclusion security path', () => {
       verdict: 'uc_invalid',
     });
   });
+  describe('input record structure, as bft-go-base InputRecord.IsValid (reject the malformed combinations, not every null field)', () => {
+    const H = new Uint8Array(32).fill(9);
+    const B = new Uint8Array(32).fill(5);
+    const T = 1700000000n;
+
+    it('accepts the legal null fields: a null summary at round 0, an empty block hash for an unchanged state', async () => {
+      expect(await verdictFor(inputRecord({ hash: null }))).toEqual('absent');
+      expect(await verdictFor(inputRecord({ blockHash: EMPTY, hash: null }))).toEqual('absent');
+      expect(await verdictFor(inputRecord({ blockHash: B, hash: H }))).not.toEqual('uc_invalid');
+    });
+
+    it.each([
+      ['a nil summary value from round 1', { blockHash: B, hash: H, round: 1n, summary: null, timestamp: T }],
+      ['an unassigned timestamp from round 1', { blockHash: B, hash: H, round: 1n, summary: EMPTY, timestamp: 0n }],
+      ['a nil block hash although the state hash changed', { blockHash: null, hash: H }],
+      ['an empty block hash although the state hash changed', { blockHash: EMPTY, hash: H }],
+      ['a block hash although the state hash did not change', { blockHash: B, hash: null }],
+    ])('rejects %s as uc_invalid', async (_name, ir) => {
+      const outcome = await outcomeFor(inputRecord(ir));
+      expect(outcome.verdict).toEqual('uc_invalid');
+      expect(outcome.message).toContain('The input record is malformed');
+    });
+  });
+
   it('classifies a partition path step key of 2^32 or more as uc_invalid, never a throw', async () => {
     for (const key of [2n ** 32n, 2n ** 32n + 161n, 2n ** 64n - 1n]) {
       await expect(

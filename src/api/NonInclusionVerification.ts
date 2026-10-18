@@ -125,8 +125,9 @@ function reject(verdict: NonInclusionRejection, message: string): NonInclusionVe
  * certificate certifies**. Absence is a fact about that one root, not about now.
  *
  * Order: (1) the certificate for the expected partition and shard (the empty shard unless `options.shard`; exactly one
- * shard path sibling per shard id bit), 32-byte technical record hash, optional pinned configuration hash, no nil path
- * entries or step keys beyond 32 bits, and the shard and partition path to the seal hash; (2) the seal against the context's trust base with the strict authenticator (network, exact epoch, not
+ * shard path sibling per shard id bit), 32-byte technical record hash, optional pinned configuration hash, a
+ * structurally valid input record, no nil path entries or step keys beyond 32 bits, and the shard and partition path to
+ * the seal hash; (2) the seal against the context's trust base with the strict authenticator (network, exact epoch, not
  * before the epoch start, quorum), and an authenticated epoch end if given; (3) the minimum round, and for a sharded
  * certificate the membership of the state and of the terminal leaf in the shard; (4) the state tree relation: every
  * junction chosen like the terminal, the path reaching the certified root, the terminal different from the state. The
@@ -176,6 +177,10 @@ export async function verifyNonInclusion(
   const root = uc.inputRecord.nullableHash;
   if (root !== null && root.length !== 32) {
     return reject('uc_invalid', 'The state root must be null (the empty tree) or 32 bytes.');
+  }
+  const irFailure = uc.inputRecord.structureFailure();
+  if (irFailure !== null) {
+    return reject('uc_invalid', `The input record is malformed: ${irFailure}`);
   }
   // a step key is a 32-bit partition id: anything else is malformed input, whatever it does to the path
   if (uc.unicityTreeCertificate.steps.some((step) => step == null || step.key < 0n || step.key > MAX_STEP_KEY)) {
