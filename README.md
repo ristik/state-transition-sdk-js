@@ -216,7 +216,7 @@ shard?, shardConfigurationHash? })` authenticates the unicity certificate (the f
 the state tree path **before** it exposes anything, and returns a discriminated result: `verdict` is
 `absent_at_snapshot` or `included_at_snapshot` (a valid path proving that exact key present), each with the queried
 `stateId` and the authenticated `snapshot`, or a rejection (`uc_invalid`, `authority_rejected`, `certificate_invalid`)
-with `snapshot: null` and a `reason`. The snapshot holds `networkId`, `partitionId`, `shardId`, `rootRound`,
+with `snapshot: null` and a `reason` (diagnostic text for logs; it may quote unverified proof values, so decide on `verdict`). The snapshot holds `networkId`, `partitionId`, `shardId`, `rootRound`,
 `sealTimestampSeconds`, `rootEpoch`, `shardRound`, `shardEpoch` (uint64 values are `bigint`) and `stateRoot` (`null` for the
 certified empty tree), all read from the authenticated certificate, never from RPC block metadata or the time of receipt.
 There is no freshness option and no `stale` verdict: freshness is your decision on the returned snapshot, with a
