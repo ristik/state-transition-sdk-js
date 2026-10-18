@@ -9,7 +9,7 @@ import { IShardEndpoint, ShardRouting } from '../../../src/consolidation/ShardRo
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { IScenario, scenario } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(60_000);
 
@@ -29,7 +29,6 @@ function routingWith(s: IScenario, wrap: (c: IBatchAggregatorClient) => IBatchAg
       client: wrap(s.world.client(b)),
       shard: shardIdFromBits(b),
     })),
-    partitionId: WORLD_PARTITION,
     scheme: s.world.scheme,
   });
 }
@@ -131,7 +130,6 @@ describe('Developer experience pins', () => {
       () =>
         new ShardRouting({
           endpoints: [{ client: plain as never, shard: endpoints[0].shard }, ...endpoints.slice(1)],
-          partitionId: WORLD_PARTITION,
           scheme: s.world.scheme,
         }),
     ).toThrow(/shard "0"/);

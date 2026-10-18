@@ -3,7 +3,7 @@ import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js
 import { snapshotPartitionViewMetrics } from '../../../src/internal/bft/PartitionViewMetrics.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { scenario } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(180_000);
 
@@ -24,7 +24,6 @@ describe('consolidation view work', () => {
       const token = await s.history(transfers);
       const routing = new ShardRouting({
         endpoints: s.world.bits.map((b) => ({ client: s.world.client(b), shard: shardIdFromBits(b) })),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       });
       const before = snapshotPartitionViewMetrics();
