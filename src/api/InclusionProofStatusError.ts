@@ -98,9 +98,11 @@ export class InclusionProofUnknownError extends InclusionProofStatusError<'unkno
  * is detected by comparing the proof's certification data with the transaction. Resubmitting the same request does not
  * help.
  *
- * The comparison happens before the proof's certificate is verified, so the proof carried here is **unverified**: verify
- * it against the trust base before relying on it (or on what it says about the other request). The message starts with
- * the legacy `Invalid inclusion proof status: <status>` text.
+ * The error is raised only for a proof that authenticates as the certified request for this state id (its path to the UC
+ * root, shard binding and seal quorum verify against the trust base); a mismatching proof that does not is an invalid
+ * response, not a conflict. The proof is still carried under the `unverified` name because the SDK verified it for the
+ * state id only, not against the awaited transaction. The message starts with the legacy
+ * `Invalid inclusion proof status: <status>` text.
  */
 export class InclusionProofConflictError extends InclusionProofWaitError<'conflict'> {
   public readonly code = 'conflict' as const;
