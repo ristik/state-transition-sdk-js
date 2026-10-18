@@ -41,6 +41,13 @@ export class NonInclusionCertificate {
   }
 
   /**
+   * @returns {Uint8Array|null} Copy of the key of the authenticated terminal leaf, `null` for the empty certificate.
+   */
+  public get terminalKeyBytes(): Uint8Array | null {
+    return this.terminalKey ? new Uint8Array(this.terminalKey) : null;
+  }
+
+  /**
    * Strictly decode the certificate bytes. The length is checked against the bitmap before any path is allocated.
    *
    * @param {Uint8Array} bytes Certificate bytes, copied.

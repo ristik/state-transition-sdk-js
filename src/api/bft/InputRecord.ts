@@ -3,6 +3,7 @@ import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../util/HexConverter.js';
 import { dedent } from '../../util/StringUtils.js';
+import { areUint8ArraysEqual } from '../../util/TypedArrayUtils.js';
 
 /**
  * Input record for UnicityCertificate.
@@ -118,6 +119,35 @@ export class InputRecord {
       CborDeserializer.decodeUnsignedInteger(data[8]),
       CborDeserializer.decodeNullable(data[9], CborDeserializer.decodeByteString),
     );
+  }
+
+  /**
+   * Native structural validity (bft-go-base `InputRecord.IsValid`), which is conditional: from round 1 the summary value
+   * must not be null and the timestamp must be assigned; if the state hash did not change the block hash must be nil
+   * (null or empty), and if it changed the block hash must not be nil. A null field alone is not malformed, only these
+   * combinations are (a null summary is legal at round 0, an empty block hash is required for an unchanged state).
+   *
+   * @returns {string|null} Failure description, or `null` if the record is structurally valid.
+   */
+  public structureFailure(): string | null {
+    if (this.roundNumber !== 0n) {
+      if (this._summaryValue === null) {
+        return 'The summary value is nil.';
+      }
+      if (this.timestamp === 0n) {
+        return 'The timestamp is unassigned.';
+      }
+    }
+    // Go compares with bytes.Equal and len(): a nil and an empty byte string are the same there
+    const sameStateHash = areUint8ArraysEqual(this._previousHash ?? new Uint8Array(0), this._hash ?? new Uint8Array(0));
+    const nilBlockHash = (this._blockHash?.length ?? 0) === 0;
+    if (sameStateHash && !nilBlockHash) {
+      return 'The state hash did not change but the block hash is not nil.';
+    }
+    if (!sameStateHash && nilBlockHash) {
+      return 'The block hash is nil but the state hash changed.';
+    }
+    return null;
   }
 
   /**

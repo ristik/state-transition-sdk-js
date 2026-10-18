@@ -1,3 +1,4 @@
+import { ShardId } from './bft/ShardId.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './bft/verification/SealVerificationSession.js';
 import { OperationUnicityCertificateVerifier } from './bft/verification/UnicityCertificateVerifier.js';
@@ -9,6 +10,7 @@ import { VerificationResult } from '../verification/VerificationResult.js';
 import { VerificationStatus } from '../verification/VerificationStatus.js';
 
 const CAPABILITY = Symbol('VerifiedAbsence');
+const MAX_STEP_KEY = 0xffffffffn;
 
 /**
  * Absence of one state **at one certified snapshot**: the state was not in the state tree the authenticated unicity
@@ -83,7 +85,14 @@ export interface INonInclusionVerificationOptions {
    * the context's trust base.
    */
   readonly session?: SealVerificationSession;
-  /** Pinned shard configuration hash of the (unsharded) partition. */
+  /**
+   * Shard of the partition the application expects, like Go `noninclusion.Context.Shard` and Rust `with_shard`: the
+   * empty shard (the default) is the unsharded form, a certificate of any shard is then `uc_invalid`. A nonempty shard
+   * needs a shard path with exactly one sibling per bit, and the queried state and the authenticated terminal leaf must
+   * belong to it. Never taken from the proof.
+   */
+  readonly shard?: ShardId;
+  /** Pinned shard configuration hash of the partition. */
   readonly shardConfigurationHash?: Uint8Array;
 }
 
@@ -115,12 +124,14 @@ function reject(verdict: NonInclusionRejection, message: string): NonInclusionVe
  * Verify that a decoded proof establishes the absence of the state it was requested for **at the snapshot its unicity
  * certificate certifies**. Absence is a fact about that one root, not about now.
  *
- * Order: (1) the certificate for the expected unsharded partition: empty shard id with an empty shard path, 32-byte
- * technical record hash, optional pinned configuration hash, no nil path entries, and the shard and partition path to
+ * Order: (1) the certificate for the expected partition and shard (the empty shard unless `options.shard`; exactly one
+ * shard path sibling per shard id bit), 32-byte technical record hash, optional pinned configuration hash, a
+ * structurally valid input record, no nil path entries or step keys beyond 32 bits, and the shard and partition path to
  * the seal hash; (2) the seal against the context's trust base with the strict authenticator (network, exact epoch, not
- * before the epoch start, quorum), and an authenticated epoch end if given; (3) the minimum round; (4) the state tree
- * relation: every junction chosen like the terminal, the path reaching the certified root, the terminal different from
- * the state. The result is a {@link VerificationResult}; the evidence is `absence`, obtainable only here.
+ * before the epoch start, quorum), and an authenticated epoch end if given; (3) the minimum round, and for a sharded
+ * certificate the membership of the state and of the terminal leaf in the shard; (4) the state tree relation: every
+ * junction chosen like the terminal, the path reaching the certified root, the terminal different from the state. The
+ * result is a {@link VerificationResult}; the evidence is `absence`, obtainable only here.
  *
  * @param {NonInclusionProof} proof Decoded proof, bound to its state id.
  * @param {Pick<IVerificationContext, 'trustBase' | 'unicityCertificateVerifier'>} context Trusted authority.
@@ -143,9 +154,13 @@ export async function verifyNonInclusion(
   const seal = uc.unicitySeal;
 
   // 1. the certificate itself
+  const expectedShard = options.shard ?? ShardId.ROOT;
   const path = uc.shardTreeCertificate;
-  if (path.shard.length !== 0 || path.siblingHashList.length !== 0) {
-    return reject('uc_invalid', 'A non-inclusion certificate needs the empty shard id with an empty shard path.');
+  if (!path.shard.equals(expectedShard)) {
+    return reject('uc_invalid', 'The certificate is of another shard than expected.');
+  }
+  if (path.siblingHashList.length !== expectedShard.length) {
+    return reject('uc_invalid', 'The shard path needs exactly one sibling per bit of the shard id.');
   }
   if (uc.unicityTreeCertificate.partitionIdentifier !== options.expectedPartition) {
     return reject('uc_invalid', 'The certificate is of another partition than expected.');
@@ -163,10 +178,21 @@ export async function verifyNonInclusion(
   if (root !== null && root.length !== 32) {
     return reject('uc_invalid', 'The state root must be null (the empty tree) or 32 bytes.');
   }
-  if (uc.unicityTreeCertificate.steps.some((step) => step == null)) {
-    return reject('uc_invalid', 'The partition path has a nil step.');
+  const irFailure = uc.inputRecord.structureFailure();
+  if (irFailure !== null) {
+    return reject('uc_invalid', `The input record is malformed: ${irFailure}`);
   }
-  if ((await UnicitySealHashMatchesWithRootHashRule.verify(uc)).status !== VerificationStatus.OK) {
+  // a step key is a 32-bit partition id: anything else is malformed input, whatever it does to the path
+  if (uc.unicityTreeCertificate.steps.some((step) => step == null || step.key < 0n || step.key > MAX_STEP_KEY)) {
+    return reject('uc_invalid', 'The partition path has a nil step or a step key beyond 32 bits.');
+  }
+  let pathReachesSeal = false;
+  try {
+    pathReachesSeal = (await UnicitySealHashMatchesWithRootHashRule.verify(uc)).status === VerificationStatus.OK;
+  } catch {
+    // malformed material never throws out of verification
+  }
+  if (!pathReachesSeal) {
     return reject('uc_invalid', 'The certificate path does not reach the seal hash.');
   }
 
@@ -189,6 +215,18 @@ export async function verifyNonInclusion(
   // 3. freshness, as the caller defines it
   if (options.minRound !== undefined && seal.rootChainRoundNumber < options.minRound) {
     return reject('stale', 'The snapshot is older than the required round.');
+  }
+
+  // 3b. a sharded certificate speaks for its own keys only: the prefix bits of the shard id are not junctions of the
+  // shard's tree, so the fold alone would accept a query (or a terminal) of another shard
+  if (expectedShard.length !== 0) {
+    const terminalKey = proof.certificate.terminalKeyBytes;
+    if (!expectedShard.isPrefixOf(proof.stateId.data)) {
+      return reject('certificate_invalid', 'The state does not belong to the shard.');
+    }
+    if (terminalKey !== null && !expectedShard.isPrefixOf(terminalKey)) {
+      return reject('certificate_invalid', 'The terminal leaf does not belong to the shard.');
+    }
   }
 
   // 4. the relation
