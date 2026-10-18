@@ -17,6 +17,7 @@ const MAX_STEP_KEY = 0xffffffffn;
  * unicity certificate and its input record, never from RPC block metadata or the time of receipt.
  *
  * ```ts
+ * // checkpoint: obtained independently of the proof and of the server response
  * const r = await verifyNonInclusion(proof, trustedContext);
  * if (r.verdict !== 'absent_at_snapshot') throw new Error('No verified absence');
  * if (r.snapshot.networkId !== checkpoint.networkId ||
@@ -149,12 +150,17 @@ export interface INonInclusionVerificationOptions {
  */
 export type NonInclusionVerification =
   | {
+      /** Empty for a snapshot outcome. */
       readonly reason: '';
       readonly snapshot: NonInclusionSnapshot;
       readonly stateId: StateId;
       readonly verdict: 'absent_at_snapshot' | 'included_at_snapshot';
     }
   | {
+      /**
+       * Diagnostic text for logs only: do not parse it and do not base a decision on it. It may quote values of the
+       * unverified proof (for example the epoch of a seal that was not authenticated); the decision is `verdict`.
+       */
       readonly reason: string;
       readonly snapshot: null;
       readonly stateId: StateId;
@@ -176,6 +182,7 @@ function reject(stateId: StateId, verdict: NonInclusionRejection, reason: string
  * a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
  *
  * ```ts
+ * // checkpoint: obtained independently of the proof and of the server response
  * const r = await verifyNonInclusion(proof, trustedContext);
  * if (r.verdict !== 'absent_at_snapshot') throw new Error('No verified absence');
  * if (r.snapshot.networkId !== checkpoint.networkId ||
