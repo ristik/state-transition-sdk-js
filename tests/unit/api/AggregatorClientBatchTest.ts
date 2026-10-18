@@ -134,6 +134,27 @@ describe('AggregatorClient.getInclusionProofs', () => {
     expect(error.code).toEqual(code);
   });
 
+  it('sends the configured API key like submitCertificationRequest does', async () => {
+    const keyed = new AggregatorClient('https://example.com', 'secret-key');
+    const fetchMock = respond({ result: { proofs: [] } });
+    await failure(keyed.getInclusionProofs([stateId(1)]));
+    const init = (fetchMock.mock.calls as [string, { headers: Headers | Record<string, string> }][])[0][1];
+    expect(new Headers(init.headers).get('X-API-Key')).toEqual('secret-key');
+
+    fetchMock.mockClear();
+    await failure(client.getInclusionProofs([stateId(1)]));
+    const plain = (fetchMock.mock.calls as [string, { headers: Headers | Record<string, string> }][])[0][1];
+    expect(new Headers(plain.headers).get('X-API-Key')).toBeNull();
+  });
+
+  it.each([401, 403])('classifies HTTP %i as a transport failure that is not retryable', async (status) => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(new Response('denied', { status }));
+    const error = await failure(client.getInclusionProofs([stateId(1)]));
+    expect(error.kind).toEqual('transport');
+    expect(error.detail).toEqual(`http_${status}`);
+    expect(error.retryable).toBe(false);
+  });
+
   it('types transport failures and keeps cancellation as the platform error', async () => {
     jest.spyOn(global, 'fetch').mockResolvedValue(new Response('down', { status: 503 }));
     const transport = await failure(client.getInclusionProofs([stateId(1)]));
