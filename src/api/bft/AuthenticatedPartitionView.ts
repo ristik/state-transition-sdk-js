@@ -1,3 +1,4 @@
+import { AGGREGATION_PARTITION_ID } from './AggregationPartition.js';
 import { PartitionView, IPartitionViewPolicy, PartitionViewLeaf } from './PartitionView.js';
 import { PartitionViewError } from './PartitionViewError.js';
 import { ShardId } from './ShardId.js';
@@ -214,16 +215,16 @@ export class PartitionViewAuthenticator {
 
   private readonly completed = new Map<string, AuthenticatedPartitionView>();
   private readonly inFlight = new Map<string, Promise<AuthenticatedPartitionView>>();
+  /** The partition every view is authenticated for: fixed, never chosen by the caller or the response. */
+  private readonly partition = AGGREGATION_PARTITION_ID;
   private readonly pins: IPartitionViewPolicy;
   private readonly policyId: string;
 
   /**
-   * @param {bigint} partition Partition the caller expects.
    * @param {ISealAuthenticator} sealAuthenticator Authenticates the master seal under the anchored authority.
    * @param {IPartitionViewPolicy} [policy] Optional stricter pins, copied.
    */
   public constructor(
-    private readonly partition: bigint,
     private readonly sealAuthenticator: ISealAuthenticator,
     policy: IPartitionViewPolicy = {},
   ) {

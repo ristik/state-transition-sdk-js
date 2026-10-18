@@ -8,7 +8,39 @@
   `CertificationStatus` no longer compiles until it has a case for each (a compile-time break only; the wire format is
   unchanged).
 
+- `ShardRouting` no longer takes `partitionId` (and `ShardRouting.single(client)` no longer takes a partition), and
+  `PartitionViewAuthenticator` no longer takes a partition as its first constructor argument: the partition is the
+  fixed `AGGREGATION_PARTITION_ID`. Delete the argument.
+
+### Added
+
+- `AGGREGATION_PARTITION_ID` (`7n`, `lib/api/bft/AggregationPartition.js`): the aggregation partition of every network
+  (mainnet network 1, testnet2 network 4, local network 3). It cannot be configured.
+
+### Breaking: non-inclusion verification (`verifyNonInclusion`)
+
+- Returns a discriminated result: `verdict` `absent_at_snapshot` or `included_at_snapshot` with the queried `stateId` and
+  the authenticated `snapshot` (`NonInclusionSnapshot`: `networkId`, `partitionId`, `shardId`, `rootRound`,
+  `sealTimestampSeconds`, `rootEpoch`, `shardRound`, `shardEpoch` as `bigint`, `stateRoot` or `null` for the empty tree),
+  or a rejection (`uc_invalid`, `authority_rejected`, `certificate_invalid`) with `snapshot: null` and a `reason`. It is
+  no longer a `VerificationResult` (no `status`, no `absence`); `VerifiedAbsence` and `absentAtRound` are removed.
+- Removed: the options `expectedPartition` (the partition is `AGGREGATION_PARTITION_ID`; a validly signed certificate of
+  another partition is `uc_invalid`) and `minRound`, and the `stale` verdict. Freshness is the caller's decision on the
+  snapshot. A state present at the snapshot is `included_at_snapshot`, no longer the rejection `state_included`.
+- Every non-inclusion entry point and the README carry the warning that absence holds only at the authenticated
+  snapshot. The shared corpus is `non-inclusion/v2` of aggregator-go (the locally generated sharded vectors are gone: the
+  shared corpus covers them).
+
 ### Behaviour
+
+- Application verification requires the authenticated unicity certificate to be of partition 7: genesis, transfers and
+  nested tokens (also when the certificate verification is served from the operation's memo), consolidation evidence and
+  partition views. A certificate of another partition, however validly signed, no longer verifies.
+- Tokens whose certificates violate the native structural rules no longer verify (bft-go-base `IsValid`, with its
+  conditional semantics): input record (from round 1 a summary value and a timestamp; an unchanged state hash needs a nil
+  block hash, a changed one a non-nil block hash), a 32 byte technical record hash, and the seal (hash, root round at
+  least 1, timestamp not before the genesis time, signatures with a signer id and bytes). A null field alone is not
+  malformed. All 48 certificates fetched from the public mainnet and testnet2 gateways satisfy the rules.
 
 - `waitInclusionProof` can reject earlier with `InclusionProofExpiredError` / `InclusionProofUnknownError` (opt out with
   `statusHints: false`). `InclusionProofConflictError` is raised only for a proof that authenticates against the trust

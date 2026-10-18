@@ -1,3 +1,4 @@
+import { UnicityCertificateStructureRule } from './rule/UnicityCertificateStructureRule.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from './SealVerificationSession.js';
@@ -16,7 +17,7 @@ const OPERATION_CAPABILITY = Symbol('beginOperation');
 /**
  * Result of a {@link UnicityCertificateVerifier} run.
  */
-class UnicityCertificateVerificationResult extends VerificationResult<VerificationStatus> {
+export class UnicityCertificateVerificationResult extends VerificationResult<VerificationStatus> {
   private constructor(status: VerificationStatus, results: VerificationResult<unknown>[]) {
     super('UnicityCertificateVerification', status, '', results);
   }
@@ -120,7 +121,15 @@ export class UnicityCertificateVerifier {
     }
     results.push(new VerificationResult('UnicitySealNetworkMatchesTrustBaseRule', VerificationStatus.OK));
 
-    let result = await UnicitySealHashMatchesWithRootHashRule.verify(inclusionProof.unicityCertificate);
+    let result: VerificationResult<VerificationStatus> = UnicityCertificateStructureRule.verify(
+      inclusionProof.unicityCertificate,
+    );
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await UnicitySealHashMatchesWithRootHashRule.verify(inclusionProof.unicityCertificate);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
       return UnicityCertificateVerificationResult.fail(results);
@@ -235,7 +244,14 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
     }
     results.push(new VerificationResult('UnicitySealNetworkMatchesTrustBaseRule', VerificationStatus.OK));
 
-    let result = await this.body(certificate);
+    // before the memo: a certificate of another partition, or a malformed one, is never served from it
+    let result: VerificationResult<VerificationStatus> = UnicityCertificateStructureRule.verify(certificate);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await this.body(certificate);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
       return UnicityCertificateVerificationResult.fail(results);

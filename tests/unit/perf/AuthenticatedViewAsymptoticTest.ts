@@ -4,7 +4,7 @@ import { SealVerificationSession } from '../../../src/api/bft/verification/SealV
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { snapshotPartitionViewMetrics } from '../../../src/internal/bft/PartitionViewMetrics.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
-import { schemeOf, ShardedWorld, shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { schemeOf, ShardedWorld, shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(120_000);
 
@@ -23,7 +23,7 @@ async function authenticated(shardBits: number): Promise<{
     world.trustBase,
     new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
   );
-  const view = await new PartitionViewAuthenticator(WORLD_PARTITION, session).authenticate(round.view.toCBOR(), master);
+  const view = await new PartitionViewAuthenticator(session).authenticate(round.view.toCBOR(), master);
   return { view, world };
 }
 
