@@ -12,3 +12,10 @@ Source of truth: `unicitynetwork/bft-go-base`, branch `uc-consolidation`, merge 
 F1 fixture corpus (aggregator-go `testdata/uc-consolidation/v1`), which replaces it once frozen.
 
 `assembly-4-initial.json` is the four shard case where leaf 1 is an initial-state native IR (`&InputRecord{Version: 1}`: null hash and null summary value, mixed with active leaves), added after review.
+
+Owner decision C (fixed aggregation partition 7): `assembly-{1,4,8}.json` and `assembly-4-initial.json` were regenerated
+with `generate-assembly-vectors.go.txt` from the same bft-go-base commit with the generator test's `pvTestPartition` set
+to `7` (a local, uncommitted edit of `types/partition_view_test.go`); `assembly-4-partition-8.json` is the four shard case
+with `pvTestPartition = 8`: every signature and hash is genuine, only the partition differs, for the negative that the
+authenticator accepts partition 7 only. `shards-*.cbor` and `manifest.json` are generic codec vectors and keep their
+arbitrary partition id.
