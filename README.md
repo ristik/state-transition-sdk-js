@@ -187,6 +187,12 @@ for the empty shard with an empty shard path under the same pins, path and stric
 without its view stays `unavailable` (`partition_view_unavailable`), and there is no option to relax it.
 See the [consolidation example](./tests/examples/consolidation/ExampleTest.ts).
 
+The Unicity aggregation layer is partition `AGGREGATION_PARTITION_ID` (`7n`) on every network (mainnet network 1,
+testnet2 network 4, local network 3). It is a constant: `ShardRouting` takes no partition id, and verification of
+tokens, consolidation evidence and partition views accepts certificates of that partition only, whatever a proof or a
+response claims. Certificates must also satisfy the native structural rules (input record, technical record hash, seal),
+a token whose certificates do not no longer verifies.
+
 ### Non-inclusion (absence at a certified snapshot)
 
 > Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
