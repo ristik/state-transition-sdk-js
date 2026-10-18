@@ -39,8 +39,6 @@ export interface IShardRoutingOptions {
  * capability or outside the scheme, duplicates, malformed pins) are rejected at construction.
  */
 export class ShardRouting {
-  /** The aggregation partition, {@link AGGREGATION_PARTITION_ID}: not configurable. */
-  public readonly partitionId: bigint = AGGREGATION_PARTITION_ID;
   private readonly _order: readonly ShardId[];
   private readonly _pins: readonly IShardConfigurationPin[] | undefined;
   private readonly _scheme: readonly ShardId[];
@@ -113,6 +111,13 @@ export class ShardRouting {
    */
   public get order(): ShardId[] {
     return this._order.slice();
+  }
+
+  /**
+   * @returns {bigint} The aggregation partition, {@link AGGREGATION_PARTITION_ID}: read-only and not configurable.
+   */
+  public get partitionId(): bigint {
+    return AGGREGATION_PARTITION_ID;
   }
 
   /**

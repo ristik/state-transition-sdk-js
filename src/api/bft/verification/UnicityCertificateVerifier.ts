@@ -17,7 +17,7 @@ const OPERATION_CAPABILITY = Symbol('beginOperation');
 /**
  * Result of a {@link UnicityCertificateVerifier} run.
  */
-class UnicityCertificateVerificationResult extends VerificationResult<VerificationStatus> {
+export class UnicityCertificateVerificationResult extends VerificationResult<VerificationStatus> {
   private constructor(status: VerificationStatus, results: VerificationResult<unknown>[]) {
     super('UnicityCertificateVerification', status, '', results);
   }
