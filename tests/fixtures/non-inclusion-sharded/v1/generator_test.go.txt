@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -17,14 +18,19 @@ import (
 	"github.com/unicitynetwork/aggregator-go/pkg/noninclusion"
 )
 
-type dumpCase struct {
-	Name     string `json:"name"`
-	Bits     int    `json:"authorityBits"`
-	Shard    string `json:"contextShard"`
-	UCShard  string `json:"ucShard"`
-	Query    string `json:"query"`
-	Wrapper  string `json:"wrapper"`
+type verdict struct {
+	Shard    string `json:"shard"`
 	Expected string `json:"expected"`
+}
+
+// dumpCase is one wrapper with the Go verdict under the three contexts: the committed sharded-vectors.json schema.
+type dumpCase struct {
+	Name     string             `json:"name"`
+	Bits     int                `json:"authorityBits"`
+	UCShard  string             `json:"ucShard"`
+	Query    string             `json:"query"`
+	Wrapper  string             `json:"wrapper"`
+	Verdicts map[string]verdict `json:"verdicts"`
 }
 
 func keyIn(bits, idx int, tag string) []byte {
@@ -49,6 +55,9 @@ func TestDumpSharded(t *testing.T) {
 		tbs[fmt.Sprint(bits)] = tbj
 		n := 1 << bits
 		for i := 0; i < n; i++ {
+			if bits == 3 && i != 0 && i != 5 {
+				continue // the committed vectors keep 3-bit shards 0 and 5 only
+			}
 			shard := auth.ShardID(i)
 			sets := map[string][]int{"one": {i}, "two": {i, i}, "three": {i, i, i}, "foreign": {(i + 1) % n, (i + 1) % n}}
 			for _, setName := range []string{"one", "two", "three", "foreign"} {
@@ -81,23 +90,27 @@ func TestDumpSharded(t *testing.T) {
 				ctxs := map[string]types.ShardID{"own": shard, "other": auth.ShardID((i + 1) % n), "unsharded": {}}
 				for qn, q := range queries {
 					wrapper := nifixture.EncodeWrapper(100, tree.Certificate([32]byte(q)), ucb)
+					c := dumpCase{
+						Name: fmt.Sprintf("b%d-s%d-%s-%s", bits, i, setName, qn), Bits: bits, UCShard: shard.String(),
+						Query: hex.EncodeToString(q), Wrapper: hex.EncodeToString(wrapper), Verdicts: map[string]verdict{},
+					}
 					for cn, cshard := range ctxs {
 						tb := auth.TrustBase()
 						v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition, Shard: cshard,
 							Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
 						require.NoError(t, err)
-						var c api.NonInclusionCert
-						require.NoError(t, c.UnmarshalBinary(tree.Certificate([32]byte(q))))
-						p := &api.NonInclusionProofV1{Certificate: &c, UnicityCertificate: types.RawCBOR(ucb)}
+						var cert api.NonInclusionCert
+						require.NoError(t, cert.UnmarshalBinary(tree.Certificate([32]byte(q))))
+						p := &api.NonInclusionProofV1{Certificate: &cert, UnicityCertificate: types.RawCBOR(ucb)}
 						_, verr := v.VerifyFor(q, p)
-						cases = append(cases, dumpCase{
-							Name: fmt.Sprintf("b%d-s%d-%s-%s-%s", bits, i, setName, qn, cn), Bits: bits, Shard: cshard.String(), UCShard: shard.String(),
-							Query: hex.EncodeToString(q), Wrapper: hex.EncodeToString(wrapper), Expected: noninclusion.VerdictOf(verr)})
+						c.Verdicts[cn] = verdict{Shard: cshard.String(), Expected: noninclusion.VerdictOf(verr)}
 					}
+					cases = append(cases, c)
 				}
 			}
 		}
 	}
+	sort.Slice(cases, func(a, b int) bool { return cases[a].Name < cases[b].Name }) // deterministic output
 	out["trustBases"] = tbs
 	out["cases"] = cases
 	b, err := json.Marshal(out)

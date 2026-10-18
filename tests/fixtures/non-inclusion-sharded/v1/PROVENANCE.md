@@ -7,5 +7,8 @@ the corpus) and judged by Go's `noninclusion.Verifier.VerifyFor`, the reference 
   contexts: `own` (the certified shard), `other` (another shard) and `unsharded` (the empty shard).
 - Tree shapes per shard: one, two or three leaves of the shard, and a tree of foreign leaves (belonging to the next shard).
 - Queries per tree: absent keys of the shard, each leaf key (inclusion), and a key of every other shard.
-- `generator_test.go.txt`: the throwaway Go test that dumped it (`DUMP_OUT=file go test ./internal/nifixture -run
-  TestDumpSharded`), kept for regeneration; it is not part of the aggregator-go tree.
+- `generator_test.go.txt`: the throwaway Go test that dumped it, kept for regeneration; it is not part of the
+  aggregator-go tree. Regenerate: copy it to `internal/nifixture/zz_dump_sharded_test.go` in aggregator-go @ be24edb, run
+  `DUMP_OUT=<file> go test ./internal/nifixture -run TestDumpSharded -count=1` and replace `sharded-vectors.json` with
+  `<file>`. It writes exactly the committed schema (`partition`, `trustBases`, `cases[].verdicts.{own,other,unsharded}`),
+  sorted by case name, and its output is deterministic (byte-identical across runs).
