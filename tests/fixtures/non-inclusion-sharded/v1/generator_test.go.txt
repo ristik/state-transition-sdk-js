@@ -1,0 +1,106 @@
+package nifixture_test
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/aggregator-go/internal/nifixture"
+	"github.com/unicitynetwork/aggregator-go/pkg/api"
+	"github.com/unicitynetwork/aggregator-go/pkg/noninclusion"
+)
+
+type dumpCase struct {
+	Name     string `json:"name"`
+	Bits     int    `json:"authorityBits"`
+	Shard    string `json:"contextShard"`
+	UCShard  string `json:"ucShard"`
+	Query    string `json:"query"`
+	Wrapper  string `json:"wrapper"`
+	Expected string `json:"expected"`
+}
+
+func keyIn(bits, idx int, tag string) []byte {
+	h := sha256.Sum256([]byte(tag))
+	k := h[:]
+	for b := 0; b < bits; b++ {
+		want := (idx >> (bits - 1 - b)) & 1
+		k[b/8] = k[b/8]&^(0x80>>(b%8)) | byte(want)<<(7-b%8)
+	}
+	return k
+}
+
+func TestDumpSharded(t *testing.T) {
+	out := map[string]any{"partition": uint64(nifixture.Partition)}
+	tbs := map[string]json.RawMessage{}
+	var cases []dumpCase
+	for _, bits := range []int{2, 3} {
+		auth, err := nifixture.NewShardedAuthority(bits)
+		require.NoError(t, err)
+		tbj, err := json.MarshalIndent(auth.TrustBase(), "", "  ")
+		require.NoError(t, err)
+		tbs[fmt.Sprint(bits)] = tbj
+		n := 1 << bits
+		for i := 0; i < n; i++ {
+			shard := auth.ShardID(i)
+			sets := map[string][]int{"one": {i}, "two": {i, i}, "three": {i, i, i}, "foreign": {(i + 1) % n, (i + 1) % n}}
+			for _, setName := range []string{"one", "two", "three", "foreign"} {
+				var leaves []nifixture.Leaf
+				for j, owner := range sets[setName] {
+					var l nifixture.Leaf
+					copy(l.Key[:], keyIn(bits, owner, fmt.Sprintf("leaf-%d-%d-%s-%d", bits, i, setName, j)))
+					copy(l.Value[:], bytes.Repeat([]byte{byte(j + 1)}, 32))
+					leaves = append(leaves, l)
+				}
+				tree, err := nifixture.Build(leaves)
+				require.NoError(t, err)
+				root, _ := tree.Root()
+				uc, _, err := auth.CertifyShardRoot(i, root[:])
+				require.NoError(t, err)
+				ucb, err := uc.MarshalCBOR()
+				require.NoError(t, err)
+				queries := map[string][]byte{}
+				for q := 0; q < 2; q++ {
+					queries[fmt.Sprintf("absent%d", q)] = keyIn(bits, i, fmt.Sprintf("q-%d-%d-%s-%d", bits, i, setName, q))
+				}
+				for j, l := range leaves {
+					queries[fmt.Sprintf("leaf%d", j)] = l.Key[:]
+				}
+				for o := 0; o < n; o++ {
+					if o != i {
+						queries[fmt.Sprintf("outside%d", o)] = keyIn(bits, o, fmt.Sprintf("o-%d-%d-%s-%d", bits, i, setName, o))
+					}
+				}
+				ctxs := map[string]types.ShardID{"own": shard, "other": auth.ShardID((i + 1) % n), "unsharded": {}}
+				for qn, q := range queries {
+					wrapper := nifixture.EncodeWrapper(100, tree.Certificate([32]byte(q)), ucb)
+					for cn, cshard := range ctxs {
+						tb := auth.TrustBase()
+						v, err := noninclusion.NewVerifier(noninclusion.Context{Partition: nifixture.Partition, Shard: cshard,
+							Resolver: func(*types.UnicitySeal) (types.RootTrustBase, error) { return tb, nil }})
+						require.NoError(t, err)
+						var c api.NonInclusionCert
+						require.NoError(t, c.UnmarshalBinary(tree.Certificate([32]byte(q))))
+						p := &api.NonInclusionProofV1{Certificate: &c, UnicityCertificate: types.RawCBOR(ucb)}
+						_, verr := v.VerifyFor(q, p)
+						cases = append(cases, dumpCase{
+							Name: fmt.Sprintf("b%d-s%d-%s-%s-%s", bits, i, setName, qn, cn), Bits: bits, Shard: cshard.String(), UCShard: shard.String(),
+							Query: hex.EncodeToString(q), Wrapper: hex.EncodeToString(wrapper), Expected: noninclusion.VerdictOf(verr)})
+					}
+				}
+			}
+		}
+	}
+	out["trustBases"] = tbs
+	out["cases"] = cases
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(os.Getenv("DUMP_OUT"), b, 0o644))
+}
