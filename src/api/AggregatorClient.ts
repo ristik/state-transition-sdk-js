@@ -121,6 +121,21 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
   }
 
+  /**
+   * Decode the proof of a received result. Any failure here, whatever its type or text, is the phase "the service sent
+   * material that is not a proof": a malformed response, never a transport or RPC condition.
+   */
+  private static decodeInclusionProofResponse(hex: string): InclusionProofResponse {
+    try {
+      return InclusionProofResponse.fromCBOR(HexConverter.decode(hex));
+    } catch (e) {
+      throw new JsonRpcResponseError(
+        `Malformed result of get_inclusion_proof.v2: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
+    }
+  }
+
   private static isDuplicateSubmission(e: unknown): boolean {
     if (!(e instanceof JsonRpcDataError) || e.code !== -32603) {
       return false;
@@ -219,14 +234,14 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
     // a plain string is the legacy result (and the answer of a server that ignores the flag): no status
     if (typeof result === 'string') {
-      return InclusionProofResponse.fromCBOR(HexConverter.decode(result));
+      return AggregatorClient.decodeInclusionProofResponse(result);
     }
     if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
       throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
     }
     const { proof, status } = result as { proof: string; status?: unknown };
     // an unrecognized status value is treated like no status at all
-    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatusHint(parseProofStatusHint(status));
+    return AggregatorClient.decodeInclusionProofResponse(proof).withStatusHint(parseProofStatusHint(status));
   }
 
   /**
