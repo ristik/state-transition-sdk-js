@@ -74,7 +74,8 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       return new BatchProofError('transport', `HTTP ${e.status}`, {
         cause: e,
         detail: `http_${e.status}`,
-        retryable: true,
+        // the credential is missing or wrong: a new attempt with the same key cannot succeed
+        retryable: e.status !== 401 && e.status !== 403,
       });
     }
     return new BatchProofError('transport', e instanceof Error ? e.message : String(e), { cause: e, retryable: true });
@@ -87,11 +88,8 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       throw invalid('Batch result must be an object.');
     }
     const body = result as Record<string, unknown>;
-    for (const key of Object.keys(body)) {
-      if (key !== 'proofs' && key !== 'partitionView') {
-        throw invalid(`Unexpected batch result field "${key}".`);
-      }
-    }
+    // Unknown result fields are ignored (the service may add fields), never copied into trusted material: only the
+    // known fields below are read, and they stay strictly validated.
     if (!Array.isArray(body.proofs) || body.proofs.length !== count) {
       throw invalid(`Expected ${count} proofs.`);
     }
@@ -250,12 +248,17 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       });
     }
 
+    const headers = new Headers();
+    if (this.#key) {
+      headers.set('X-API-Key', this.#key);
+    }
+
     let result: unknown;
     try {
       result = await this.transport.request(
         'get_inclusion_proofs.v1',
         { stateIds: ids, stateRoot: exact ? HexConverter.encode(options.stateRoot?.data) : 'latest' },
-        new Headers(),
+        headers,
         options,
       );
     } catch (e) {

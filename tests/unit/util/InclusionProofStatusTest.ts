@@ -228,6 +228,31 @@ describe('proof status hints in waitInclusionProof', () => {
     ).toBeGreaterThan(0n);
   });
 
+  it('does not report a conflict from a mismatching proof whose certificate is not authenticated', async () => {
+    const world = await ShardedWorld.create(0);
+    const salt = TokenSalt.generate();
+    const tokenType = TokenType.generate();
+    const mint = (recipient: SigningService): Promise<MintTransaction> =>
+      MintTransaction.create(world.network, SignaturePredicate.create(recipient.publicKey), { salt, tokenType });
+    const first = await mint(owner);
+    const second = await mint(SigningService.generate());
+    await world.router.submitCertificationRequest(await CertificationData.fromMintTransaction(first));
+
+    // the same served proof, checked against a trust base that did not sign it: another request, nobody's certificate
+    const other = await ShardedWorld.create(0);
+    const error = await waitInclusionProof(
+      new StateTransitionClient(new Scripted(world.client(''), hint('included'))),
+      other.trustBase,
+      predicateVerifier,
+      verifier,
+      second,
+      { intervalMs: 5, signal: AbortSignal.timeout(5000) },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(InclusionProofConflictError);
+    expect((error as Error).message).toContain('Invalid inclusion proof status: TRANSACTION_HASH_MISMATCH');
+  });
+
   it('keeps the generic error for other verification failures', async () => {
     const { certify, transaction, world } = await setup();
     await certify();

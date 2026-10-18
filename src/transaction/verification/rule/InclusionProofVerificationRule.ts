@@ -91,6 +91,11 @@ export class InclusionProofVerificationRule {
       );
     }
 
+    // a UC may carry a null (or malformed) input-record hash: it certifies no state tree root, so the path cannot hold
+    if (inclusionProof.unicityCertificate.inputRecord.hash.length !== HashAlgorithm.SHA256.length) {
+      return new VerificationResult('InclusionProofVerificationRule', InclusionProofVerificationStatus.PATH_INVALID);
+    }
+
     const stateId = await StateId.fromCertificationData(certificationData);
     const leafValue = await calculateLeafValue(certificationData.transactionHash, referenceTime);
     const result = await inclusionProof.inclusionCertificate.verify(
