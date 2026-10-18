@@ -128,13 +128,7 @@ async function run(
 }
 
 /** Assert one outcome against the expectation of the corpus: exact for successes, class and no metadata for a rejection. */
-/**
- * Cases the vendored corpus does not yet list `acceptable: ["malformed"]` for although this SDK's strict decoder stops
- * there; empty once the corpus is re-vendored from the final aggregator-go #252.
- */
-const UNTIL_REVENDOR = new Set(['negative/shard-path-missing.json']);
-
-function expectOutcome(actual: Outcome, expected: IExpected, name?: string): void {
+function expectOutcome(actual: Outcome, expected: IExpected): void {
   if (expected.outcome === 'absent_at_snapshot' || expected.outcome === 'included_at_snapshot') {
     expect(actual.outcome).toEqual(expected.outcome);
     const { result } = actual as { result: NonInclusionVerification };
@@ -152,16 +146,16 @@ function expectOutcome(actual: Outcome, expected: IExpected, name?: string): voi
   }
   // SPEC "Conformance": the class is `expected.rejection` or one of `expected.acceptable` (a strict decoder may stop at an
   // earlier stage, `malformed`, only where the case lists it); never loosened to reach a later class
-  const accepted = [
-    expected.rejection,
-    ...(expected.acceptable ?? []),
-    ...(name !== undefined && UNTIL_REVENDOR.has(name) ? ['malformed'] : []),
-  ];
-  expect(accepted).toContain(actual.outcome);
+  expect([expected.rejection, ...(expected.acceptable ?? [])]).toContain(actual.outcome);
 }
 
 describe('non-inclusion corpus v2', () => {
-  it('is the vendored corpus, unchanged', () => {
+  it('is the vendored corpus, unchanged (the manifest itself is pinned too, see PROVENANCE.md)', () => {
+    expect(
+      createHash('sha256')
+        .update(readFileSync(join(ROOT, 'manifest.json')))
+        .digest('hex'),
+    ).toEqual('996b14db7519e1a7619923d58214a3993e269bf613177e45bf3f656e578ee598');
     const manifest = json<{ sha256: Record<string, string> }>('manifest.json');
     for (const [path, sha] of Object.entries(manifest.sha256)) {
       expect(
@@ -189,7 +183,7 @@ describe('non-inclusion corpus v2', () => {
   describe('negative cases never loosen a decoder to reach a later class, and carry no metadata', () => {
     it.each(files('negative'))('%s', async (path) => {
       const c = json<ICase>(path);
-      expectOutcome(await run(c), c.expected, path);
+      expectOutcome(await run(c), c.expected);
     });
   });
 
