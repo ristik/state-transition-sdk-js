@@ -65,7 +65,11 @@ export class ShardRouting {
     }
     const label = (shard: ShardId): string => (shard.length === 0 ? '(root)' : shard.toString());
     const seen = new Set<string>();
-    for (const endpoint of options.endpoints) {
+    // snapshot the records (and their shards) once: what is validated is what routes, whatever the caller mutates later
+    const endpoints: IShardEndpoint[] = options.endpoints.map((endpoint) =>
+      Object.freeze({ client: endpoint.client, shard: ShardId.decode(endpoint.shard.encode()) }),
+    );
+    for (const endpoint of endpoints) {
       const key = endpoint.shard.toString();
       if (!order.some((id) => id.equals(endpoint.shard))) {
         throw input(`Endpoint shard "${label(endpoint.shard)}" is not in the scheme.`);
@@ -80,7 +84,7 @@ export class ShardRouting {
       }
       seen.add(key);
     }
-    if (options.endpoints.length === 0) {
+    if (endpoints.length === 0) {
       throw input('At least one endpoint is required.');
     }
     const pinned = new Set<string>();
@@ -101,7 +105,7 @@ export class ShardRouting {
     this.partitionId = options.partitionId;
     this._order = order;
     this._scheme = options.scheme.map((id) => ShardId.decode(id.encode()));
-    this.endpoints = options.endpoints.slice();
+    this.endpoints = endpoints;
     this._pins = options.shardConfigurationPins?.map((pin) => ({
       hash: new Uint8Array(pin.hash),
       shard: ShardId.decode(pin.shard.encode()),
