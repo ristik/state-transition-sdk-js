@@ -1,4 +1,5 @@
 import { ConsolidationError } from './ConsolidationError.js';
+import { AGGREGATION_PARTITION_ID } from '../api/bft/AggregationPartition.js';
 import { IShardConfigurationPin, PartitionView } from '../api/bft/PartitionView.js';
 import { ShardId } from '../api/bft/ShardId.js';
 import { IBatchAggregatorClient, isBatchAggregatorClient } from '../api/IBatchAggregatorClient.js';
@@ -23,8 +24,6 @@ export interface IShardEndpoint {
 export interface IShardRoutingOptions {
   /** Endpoints of the shards that may take part. Their ids must be shards of the scheme. */
   readonly endpoints: readonly IShardEndpoint[];
-  /** Partition id the application expects (nonzero 32-bit). The caller's intent, never inferred from a response. */
-  readonly partitionId: bigint;
   /** Complete sharding scheme of the partition: empty for a single shard partition. */
   readonly scheme: readonly ShardId[];
   /**
@@ -40,7 +39,6 @@ export interface IShardRoutingOptions {
  * capability or outside the scheme, duplicates, malformed pins) are rejected at construction.
  */
 export class ShardRouting {
-  public readonly partitionId: bigint;
   private readonly _order: readonly ShardId[];
   private readonly _pins: readonly IShardConfigurationPin[] | undefined;
   private readonly _scheme: readonly ShardId[];
@@ -54,9 +52,6 @@ export class ShardRouting {
     const input = (message: string, cause?: unknown): ConsolidationError =>
       new ConsolidationError('input', message, { cause, outcome: 'invalid_input' });
 
-    if (options.partitionId <= 0n || options.partitionId > 0xffffffffn) {
-      throw input('Partition id must be a nonzero 32-bit unsigned integer.');
-    }
     let order: ShardId[];
     try {
       order = PartitionView.canonicalShardOrder(options.scheme);
@@ -102,7 +97,6 @@ export class ShardRouting {
       pinned.add(key);
     }
 
-    this.partitionId = options.partitionId;
     this._order = order;
     this._scheme = options.scheme.map((id) => ShardId.decode(id.encode()));
     this.endpoints = endpoints;
@@ -117,6 +111,13 @@ export class ShardRouting {
    */
   public get order(): ShardId[] {
     return this._order.slice();
+  }
+
+  /**
+   * @returns {bigint} The aggregation partition, {@link AGGREGATION_PARTITION_ID}: read-only and not configurable.
+   */
+  public get partitionId(): bigint {
+    return AGGREGATION_PARTITION_ID;
   }
 
   /**
@@ -137,11 +138,10 @@ export class ShardRouting {
    * Routing of a single shard partition served by one endpoint.
    *
    * @param {IBatchAggregatorClient} client Client of the shard aggregator.
-   * @param {bigint} partitionId Partition id.
    * @returns {ShardRouting} Routing.
    */
-  public static single(client: IBatchAggregatorClient, partitionId: bigint): ShardRouting {
-    return new ShardRouting({ endpoints: [{ client, shard: ShardId.ROOT }], partitionId, scheme: [] });
+  public static single(client: IBatchAggregatorClient): ShardRouting {
+    return new ShardRouting({ endpoints: [{ client, shard: ShardId.ROOT }], scheme: [] });
   }
 
   /**

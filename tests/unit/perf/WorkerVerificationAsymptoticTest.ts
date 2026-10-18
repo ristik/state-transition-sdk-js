@@ -15,7 +15,7 @@ import {
 } from '../../../src/transaction/verification/worker/WorkerTokenVerifier.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
 import { scenario } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(180_000);
 
@@ -80,7 +80,6 @@ describe('worker token verification work', () => {
       const s = await scenario(0);
       const routing = new ShardRouting({
         endpoints: [{ client: s.world.client(''), shard: shardIdFromBits('') }],
-        partitionId: WORLD_PARTITION,
         scheme: [],
       });
       const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(
