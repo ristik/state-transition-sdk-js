@@ -6,7 +6,6 @@ import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js
 import { Token } from '../../../src/transaction/Token.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { scenario } from '../../utils/ConsolidationScenario.js';
-import { WORLD_PARTITION } from '../../utils/ShardedWorld.js';
 
 /*
  * Explicit proof consolidation, in the two places it is meant for: before an EVM verification (including the
@@ -28,7 +27,6 @@ function configureRouting(): ShardRouting {
       { client: new AggregatorClient('https://shard-0.example.org', 'api-key-0'), shard: shardOf('0') },
       { client: new AggregatorClient('https://shard-1.example.org', 'api-key-1'), shard: shardOf('1') },
     ],
-    partitionId: 168496141n,
     // the complete shard prefix topology of the partition
     scheme: [shardOf('0'), shardOf('1')],
   });
@@ -120,7 +118,6 @@ describe('Consolidation examples', () => {
     const proofs = new TokenProofClient({
       routing: new ShardRouting({
         endpoints: s.world.bits.map((b) => ({ client: s.world.client(b), shard: shardOf(b) })),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       }),
       verificationContext: s.context,
@@ -146,7 +143,6 @@ describe('Consolidation examples', () => {
     const proofs = new TokenProofClient({
       routing: new ShardRouting({
         endpoints: s.world.bits.map((b) => ({ client: s.world.client(b), shard: shardOf(b) })),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       }),
       verificationContext: s.context,

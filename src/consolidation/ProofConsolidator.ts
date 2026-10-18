@@ -474,7 +474,7 @@ export class ProofConsolidator {
     enclosing: UnicityCertificate,
     masterShard: ShardId,
   ): Promise<IConsolidationTarget> {
-    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
+    const authenticator = new PartitionViewAuthenticator(this.session, {
       scheme: this.routing.scheme,
       shardConfigurationPins: this.routing.shardConfigurationPins,
     });
@@ -513,6 +513,10 @@ export class ProofConsolidator {
     }
     if (uc.technicalRecordHash?.length !== 32) {
       throw fail('technical record hash must be 32 bytes.');
+    }
+    const inputRecordFailure = uc.inputRecord.structureFailure();
+    if (inputRecordFailure !== null) {
+      throw fail(`invalid input record: ${inputRecordFailure}`);
     }
     const pinned = this.pins.get(shard.toString());
     if (pinned && !areUint8ArraysEqual(pinned, uc.shardConfigurationHash)) {

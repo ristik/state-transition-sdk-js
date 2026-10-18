@@ -2,6 +2,7 @@ import { numberToBytesBE } from '@noble/curves/utils.js';
 
 import { createRootTrustBase } from './RootTrustBaseFixture.js';
 import { BatchProofError } from '../../src/api/BatchProofError.js';
+import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
 import { PartitionView, PartitionViewLeaf } from '../../src/api/bft/PartitionView.js';
 import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
@@ -34,7 +35,7 @@ import { SparseMerkleTree } from '../../src/smt/radix/SparseMerkleTree.js';
 import { SparseMerkleTreeRootNode } from '../../src/smt/radix/SparseMerkleTreeRootNode.js';
 import { compareUint8Arrays } from '../../src/util/TypedArrayUtils.js';
 
-export const WORLD_PARTITION = 0x0a0b0c0dn;
+export const WORLD_PARTITION = AGGREGATION_PARTITION_ID;
 const BASE_TIME = 1_700_000_000n;
 
 export function shardIdFromBits(bits: string): ShardId {
