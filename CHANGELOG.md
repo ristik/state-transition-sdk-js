@@ -20,5 +20,9 @@
 - The shared JSON-RPC transport throws `JsonRpcResponseError` (instead of `JsonRpcDataError`) for an error envelope whose
   id does not match the request. The behaviour is kept; callers of other methods that match on the old class should
   catch both.
+- An undecodable `get_inclusion_proof.v2` result makes `AggregatorClient.getInclusionProof` throw `JsonRpcResponseError`
+  instead of the raw `CborError`, `HashError` or `Error`; the original error is its `cause`. Retry and wait behaviour is
+  unchanged (`waitInclusionProof` already ended on any such error); only code that matches the old error class or text
+  needs to change.
 - `get_inclusion_proofs.v1` has to be sent to the shard aggregators directly; the aggregator-subscription proxy cannot
   route it yet (see the README).
