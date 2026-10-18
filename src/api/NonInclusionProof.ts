@@ -9,11 +9,17 @@ import { areUint8ArraysEqual } from '../util/TypedArrayUtils.js';
 /**
  * Decoded `get_non_inclusion_proof.v1` material. **This is not evidence.** It claims that the state was absent at the
  * snapshot the embedded unicity certificate certifies; only `verifyNonInclusion`, against a trusted authority, turns it
- * into a `VerifiedAbsence`.
+ * into a verified snapshot outcome (`absent_at_snapshot` or `included_at_snapshot`).
  *
  * Wire: `[blockNumber: uint64, 39034([1, certificate: bstr, unicityCertificate: native tagged CBOR value])]`. The state
  * id is never read from the wire: it is the one the caller asked for, bound here when the proof is decoded, and a proof
  * can only be verified for that state.
+ *
+ * Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence
+ * now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its
+ * certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal
+ * timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata
+ * for this check.
  */
 export class NonInclusionProof {
   /** CBOR tag of the proof. */

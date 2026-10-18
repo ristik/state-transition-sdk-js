@@ -4,7 +4,7 @@ import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { IScenario, scenario } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(120_000);
 
@@ -31,7 +31,6 @@ function recording(s: IScenario, seen: ISeen[], retried = false): ShardRouting {
       };
       return { client, shard: shardIdFromBits(bits) };
     }),
-    partitionId: WORLD_PARTITION,
     scheme: s.world.scheme,
   });
 }

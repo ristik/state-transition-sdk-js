@@ -21,14 +21,13 @@ import { HexConverter } from '../../../src/util/HexConverter.js';
 import { VerificationResult } from '../../../src/verification/VerificationResult.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
 import { IScenario, scenario, NestedTokenJustification } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(120_000);
 
 function routingOf(s: IScenario): ShardRouting {
   return new ShardRouting({
     endpoints: s.world.bits.map((b) => ({ client: s.world.client(b), shard: shardIdFromBits(b) })),
-    partitionId: WORLD_PARTITION,
     scheme: s.world.scheme,
   });
 }
@@ -297,7 +296,6 @@ describe('TokenProofClient', () => {
               : call(ids, options);
           return { client, shard: shardIdFromBits(b) };
         }),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       });
       const result = unavailable(
@@ -326,7 +324,6 @@ describe('TokenProofClient', () => {
                 .filter((b) => b !== bits)
                 .map((b) => ({ client: s.world.client(b), shard: shardIdFromBits(b) })),
             ],
-            partitionId: WORLD_PARTITION,
             scheme: s.world.scheme,
           });
         } catch (e) {
@@ -336,7 +333,7 @@ describe('TokenProofClient', () => {
         expect(error).toMatchObject({ kind: 'input' });
         expect((error as ConsolidationError).message).toContain(`shard "${bits}"`);
       }
-      expect(() => ShardRouting.single({} as never, WORLD_PARTITION)).toThrow(ConsolidationError);
+      expect(() => ShardRouting.single({} as never)).toThrow(ConsolidationError);
     });
 
     it('reports what the service says when a shard has no such method: unsupported_capability', async () => {
@@ -598,7 +595,6 @@ describe('TokenProofClient', () => {
           };
           return { client, shard: shardIdFromBits(b) };
         }),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       });
       await expectError(
@@ -625,7 +621,6 @@ describe('TokenProofClient', () => {
           };
           return { client, shard: shardIdFromBits(b) };
         }),
-        partitionId: WORLD_PARTITION,
         scheme: s.world.scheme,
       });
       const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token);
@@ -792,7 +787,6 @@ describe('TokenProofClient', () => {
             shard: shardIdFromBits(''),
           },
         ],
-        partitionId: WORLD_PARTITION,
         scheme: [],
       });
       await expectError(

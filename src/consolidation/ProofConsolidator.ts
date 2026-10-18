@@ -2,12 +2,14 @@ import { ConsolidationError, ConsolidationOutcome } from './ConsolidationError.j
 import { ProofUnavailableReason } from './ConsolidationResult.js';
 import { IShardEndpoint, ShardRouting } from './ShardRouting.js';
 import { BatchProofError, isBatchStateDetail } from '../api/BatchProofError.js';
+import { AGGREGATION_PARTITION_ID } from '../api/bft/AggregationPartition.js';
 import { PartitionViewAuthenticator } from '../api/bft/AuthenticatedPartitionView.js';
 import { PartitionViewLeaf } from '../api/bft/PartitionView.js';
 import { PartitionViewError } from '../api/bft/PartitionViewError.js';
 import { ShardId } from '../api/bft/ShardId.js';
 import { UnicityCertificate } from '../api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../api/bft/UnicitySeal.js';
+import { UnicityCertificateStructureRule } from '../api/bft/verification/rule/UnicityCertificateStructureRule.js';
 import { UnicitySealHashMatchesWithRootHashRule } from '../api/bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from '../api/bft/verification/SealVerificationSession.js';
 import { CertificationData } from '../api/CertificationData.js';
@@ -507,7 +509,7 @@ export class ProofConsolidator {
     enclosing: UnicityCertificate,
     masterShard: ShardId,
   ): Promise<IConsolidationTarget> {
-    const authenticator = new PartitionViewAuthenticator(this.routing.partitionId, this.session, {
+    const authenticator = new PartitionViewAuthenticator(this.session, {
       scheme: this.routing.scheme,
       shardConfigurationPins: this.routing.shardConfigurationPins,
     });
@@ -528,7 +530,7 @@ export class ProofConsolidator {
     }
     if (
       !local.shardTreeCertificate.shard.equals(shard) ||
-      local.unicityTreeCertificate.partitionIdentifier !== this.routing.partitionId
+      local.unicityTreeCertificate.partitionIdentifier !== AGGREGATION_PARTITION_ID
     ) {
       throw integrity('binding_mismatch', 'The source certificate identity differs from the shard.', shard);
     }
@@ -538,7 +540,7 @@ export class ProofConsolidator {
   private checkUcShape(index: number, uc: UnicityCertificate, shard: ShardId): void {
     const fail = (message: string): ConsolidationError =>
       integrity('incompatible_lineage', `Certificate ${index}: ${message}`, shard);
-    if (uc.unicityTreeCertificate.partitionIdentifier !== this.routing.partitionId) {
+    if (uc.unicityTreeCertificate.partitionIdentifier !== AGGREGATION_PARTITION_ID) {
       throw fail('partition differs from the configured partition.');
     }
     if (uc.shardTreeCertificate.siblingHashList.length !== shard.length) {
@@ -546,6 +548,10 @@ export class ProofConsolidator {
     }
     if (uc.technicalRecordHash?.length !== 32) {
       throw fail('technical record hash must be 32 bytes.');
+    }
+    const inputRecordFailure = uc.inputRecord.structureFailure();
+    if (inputRecordFailure !== null) {
+      throw fail(`invalid input record: ${inputRecordFailure}`);
     }
     const pinned = this.pins.get(shard.toString());
     if (pinned && !areUint8ArraysEqual(pinned, uc.shardConfigurationHash)) {
@@ -878,6 +884,12 @@ export class ProofConsolidator {
     for (const shardBatch of batches) {
       const shard = shardBatch.group.endpoint.shard;
       const target = authenticated.certificateOf(shard);
+      // the certificates handed on are held to the same rules as any verified one: the view authenticates the
+      // commitment, not the structure of each leaf's record
+      const targetFailure = UnicityCertificateStructureRule.failure(target);
+      if (targetFailure !== null) {
+        throw integrity('incompatible_lineage', `Target certificate: ${targetFailure}`, shard);
+      }
       this.checkExactRoot(shardBatch, target, shard);
       bodyChecks++;
       if ((await UnicitySealHashMatchesWithRootHashRule.verify(target)).status !== VerificationStatus.OK) {

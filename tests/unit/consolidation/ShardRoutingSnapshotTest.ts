@@ -30,7 +30,6 @@ describe('ShardRouting snapshots its endpoint records', () => {
     ];
     const routing = new ShardRouting({
       endpoints,
-      partitionId: 1n,
       scheme: [shardIdFromBits('0'), shardIdFromBits('1')],
     });
 
@@ -48,7 +47,6 @@ describe('ShardRouting snapshots its endpoint records', () => {
     const zero = client();
     const routing = new ShardRouting({
       endpoints: [{ client: zero, shard: shardIdFromBits('') }],
-      partitionId: 1n,
       scheme: [],
     });
     const record = routing.route(stateId(0x80));

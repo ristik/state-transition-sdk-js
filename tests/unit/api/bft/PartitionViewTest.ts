@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { AGGREGATION_PARTITION_ID } from '../../../../src/api/bft/AggregationPartition.js';
 import { PartitionViewAuthenticator } from '../../../../src/api/bft/AuthenticatedPartitionView.js';
 import { InputRecord } from '../../../../src/api/bft/InputRecord.js';
 import { IPartitionViewPolicy, PartitionView, PartitionViewLeaf } from '../../../../src/api/bft/PartitionView.js';
@@ -105,9 +106,7 @@ async function assembleVia(
   authority: SealVerificationSession,
   policy: IPartitionViewPolicy = {},
 ): Promise<UnicityCertificate[]> {
-  return (
-    await new PartitionViewAuthenticator(PARTITION, authority, policy).authenticate(view, uc)
-  ).assembleCertificates();
+  return (await new PartitionViewAuthenticator(authority, policy).authenticate(view, uc)).assembleCertificates();
 }
 
 function newSession(trustBase: RootTrustBase): SealVerificationSession {
@@ -489,7 +488,7 @@ describe.each([
   const enclosing = PartitionView.decodeEnclosingCertificate(HexConverter.decode(v.enclosingUc));
 
   it('rebuilds the same shard tree as Go', async () => {
-    const tree = await view.checkCommitmentUnauthenticated(enclosing, PARTITION, topology);
+    const tree = await view.checkCommitmentUnauthenticated(enclosing, AGGREGATION_PARTITION_ID, topology);
     expect(HexConverter.encode(tree.rootHash)).toEqual(v.shardTreeRoot);
   });
 
@@ -529,13 +528,13 @@ describe.each([
   });
 
   it('needs no pinned topology: the committed scheme and hashes come from the authenticated seal', async () => {
-    const authenticated = await new PartitionViewAuthenticator(PARTITION, newSession(trustBaseOf(v))).authenticate(
+    const authenticated = await new PartitionViewAuthenticator(newSession(trustBaseOf(v))).authenticate(
       view,
       enclosing,
     );
     expect(authenticated.scheme.map(String)).toEqual(scheme(bits).map(String));
     expect(authenticated.leaves).toHaveLength(1 << bits);
-    expect(authenticated.partitionId).toEqual(PARTITION);
+    expect(authenticated.partitionId).toEqual(AGGREGATION_PARTITION_ID);
     expect(authenticated.networkId.id).toEqual(v.networkId);
     expect(HexConverter.encode(authenticated.seal.toCBOR())).toEqual(
       HexConverter.encode(enclosing.unicitySeal.toCBOR()),
@@ -580,7 +579,7 @@ describe('PartitionView seal structure', () => {
         replaceItem(enclosing.unicitySeal.toCBOR(), 4, CborSerializer.encodeUnsignedInteger(1), true),
       ),
     );
-    await expectReason(view.checkCommitmentUnauthenticated(old, PARTITION), 'seal_invalid');
+    await expectReason(view.checkCommitmentUnauthenticated(old, AGGREGATION_PARTITION_ID), 'seal_invalid');
   });
 
   it('rejects a leaf with a null summary value on a non-initial record', () => {

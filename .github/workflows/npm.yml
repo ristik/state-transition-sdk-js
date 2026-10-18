@@ -44,6 +44,10 @@ jobs:
       - name: Run tests
         run: npm run test:ci
 
+      # the mint, transfer and split examples need a live aggregator; these run offline against fixtures
+      - name: Run offline example tests
+        run: npm run test:examples:offline
+
   integration:
     name: Integration against a real aggregator
     runs-on: ubuntu-latest

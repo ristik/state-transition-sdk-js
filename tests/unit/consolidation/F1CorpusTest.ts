@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
+import { AGGREGATION_PARTITION_ID } from '../../../src/api/bft/AggregationPartition.js';
 import { PartitionView } from '../../../src/api/bft/PartitionView.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../src/api/bft/verification/SealVerificationSession.js';
@@ -54,13 +55,19 @@ function build(c: IF1Case): {
   routing: ShardRouting;
   session: SealVerificationSession;
 } {
+  // the corpus context's partition is an equality assertion against the fixed aggregation partition (the SDK takes no
+  // partition option): any other value is rejected as invalid input before anything is sent
+  if (BigInt(c.context.partitionId) !== AGGREGATION_PARTITION_ID) {
+    throw new ConsolidationError('input', 'The context asserts another partition than the aggregation partition.', {
+      outcome: 'invalid_input',
+    });
+  }
   const scheme = c.context.shards.length === 1 && c.context.shards[0] === '' ? [] : c.context.shards.map(shardIdOf);
   const routing = new ShardRouting({
     endpoints: c.context.participants.map((bits) => ({
       client: new AggregatorClient(shardUrl(bits)),
       shard: shardIdOf(bits),
     })),
-    partitionId: BigInt(c.context.partitionId),
     scheme,
     shardConfigurationPins: c.context.shardConfigs.map((s) => ({
       hash: HexConverter.decode(s.hash),

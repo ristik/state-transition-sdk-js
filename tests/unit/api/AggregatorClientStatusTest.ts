@@ -11,7 +11,7 @@ import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { scenario } from '../../utils/ConsolidationScenario.js';
-import { shardIdFromBits, ShardedWorld, WORLD_PARTITION } from '../../utils/ShardedWorld.js';
+import { shardIdFromBits, ShardedWorld } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(120_000);
 
@@ -223,7 +223,6 @@ describe('consolidation of the state details', () => {
       s.world.faults.set('', { failBatch: [stateFailure(detail, [1, 3])] });
       const routing = new ShardRouting({
         endpoints: [{ client: s.world.client(''), shard: shardIdFromBits('') }],
-        partitionId: WORLD_PARTITION,
         scheme: [],
       });
       const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token);
@@ -266,7 +265,6 @@ describe('consolidation of the state details', () => {
             : call(ids, options);
         return { client, shard: shardIdFromBits(b) };
       }),
-      partitionId: WORLD_PARTITION,
       scheme: s.world.scheme,
     });
     const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token);
@@ -285,7 +283,6 @@ describe('consolidation of the state details', () => {
     s.world.faults.set('', { failBatch: [stateFailure('state_unknown')] });
     const routing = new ShardRouting({
       endpoints: [{ client: s.world.client(''), shard: shardIdFromBits('') }],
-      partitionId: WORLD_PARTITION,
       scheme: [],
     });
     const result = await new TokenProofClient({ routing, verificationContext: s.context }).consolidate(token);

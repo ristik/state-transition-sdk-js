@@ -16,13 +16,14 @@ import { SparseMerkleTree } from '../../src/smt/radix/SparseMerkleTree.js';
 import { BitString } from '../../src/util/BitString.js';
 import { VerificationStatus } from '../../src/verification/VerificationStatus.js';
 import { createRootTrustBase } from '../utils/RootTrustBaseFixture.js';
-import { createUnicityCertificate } from '../utils/UnicityCertificateFixture.js';
+import { createUnicityCertificate, IUnicityCertificateOptions } from '../utils/UnicityCertificateFixture.js';
 
 /**
  * Test aggregator client implementation that stores all submitted certification requests in memory.
  */
 export class TestAggregatorClient implements IAggregatorClient {
   public readonly rootTrustBase: RootTrustBase;
+  private certificateOptions: IUnicityCertificateOptions = {};
   private readonly predicateVerifier: PredicateVerifierService;
   /**
    * Reference time of the current round. Every accepted request is its own
@@ -64,7 +65,12 @@ export class TestAggregatorClient implements IAggregatorClient {
     const path = BitString.fromBytesBigEndian(stateId.data).toBigInt();
     const root = await this.smt.calculateRoot();
 
-    const unicityCertificate = await createUnicityCertificate(root.hash, this.signingService, this.referenceTime);
+    const unicityCertificate = await createUnicityCertificate(
+      root.hash,
+      this.signingService,
+      this.referenceTime,
+      this.certificateOptions,
+    );
     const record = this.requests.get(path);
 
     if (!record) {
@@ -82,6 +88,16 @@ export class TestAggregatorClient implements IAggregatorClient {
         ),
       ),
     );
+  }
+
+  /**
+   * Make the certificates this fake serves deviate from the native rules (validly signed all the same), to test that
+   * verification rejects them. Applies to proofs served from now on.
+   *
+   * @param {IUnicityCertificateOptions} options Deviations.
+   */
+  public setCertificateOptions(options: IUnicityCertificateOptions): void {
+    this.certificateOptions = options;
   }
 
   /**
