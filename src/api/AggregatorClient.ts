@@ -88,7 +88,8 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         cause: e,
         detail: `http_${e.status}`,
         requests,
-        retryable: true,
+        // the credential is missing or wrong: a new attempt with the same key cannot succeed
+        retryable: e.status !== 401 && e.status !== 403,
       });
     }
     return new BatchProofError('transport', e instanceof Error ? e.message : String(e), {
@@ -127,11 +128,11 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       throw invalid('Batch result must be an object.');
     }
     const body = result as Record<string, unknown>;
-    for (const key of Object.keys(body)) {
-      // the echo is admitted only as the answer to a request that asked for a wait
-      if (key !== 'proofs' && key !== 'partitionView' && !(key === 'waitedMs' && sent.waitMs !== undefined)) {
-        throw invalid(`Unexpected batch result field "${key}".`);
-      }
+    // Unknown result fields are ignored (the service may add fields), never copied into trusted material: only the
+    // known fields below are read, and they stay strictly validated.
+    // the echo is a known field: admitted only as the answer to a request that asked for a wait
+    if (body.waitedMs !== undefined && sent.waitMs === undefined) {
+      throw invalid('Unexpected batch result field "waitedMs".');
     }
     if (body.waitedMs !== undefined && !isWireMilliseconds(body.waitedMs)) {
       throw invalid('Malformed waitedMs: it must be an integer in [0, Number.MAX_SAFE_INTEGER].');
@@ -157,6 +158,21 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       return new InclusionProofBatch(proofs, view, { requests: sent.requests, waitedMs: body.waitedMs ?? null });
     } catch (e) {
       throw invalid(`Malformed batch result: ${e instanceof Error ? e.message : String(e)}`, e);
+    }
+  }
+
+  /**
+   * Decode the proof of a received result. Any failure here, whatever its type or text, is the phase "the service sent
+   * material that is not a proof": a malformed response, never a transport or RPC condition.
+   */
+  private static decodeInclusionProofResponse(hex: string): InclusionProofResponse {
+    try {
+      return InclusionProofResponse.fromCBOR(HexConverter.decode(hex));
+    } catch (e) {
+      throw new JsonRpcResponseError(
+        `Malformed result of get_inclusion_proof.v2: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
     }
   }
 
@@ -255,6 +271,9 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
   /**
    * @inheritDoc
+   * @throws {JsonRpcResponseError} If the result cannot be decoded as a proof (not hex, not CBOR, malformed proof
+   *   material): the original decoding error is kept as `cause`. Earlier releases threw that raw error (`CborError`,
+   *   `HashError` or `Error`).
    */
   public async getInclusionProof(
     stateId: StateId,
@@ -274,7 +293,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
     // a plain string is the legacy result (and the answer of a server that ignores the flags): no status, no echo
     if (typeof result === 'string') {
-      return InclusionProofResponse.fromCBOR(HexConverter.decode(result));
+      return AggregatorClient.decodeInclusionProofResponse(result);
     }
     if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
       throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
@@ -285,7 +304,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       throw new JsonRpcResponseError('Unexpected or malformed waitedMs in the result of get_inclusion_proof.v2.');
     }
     // an unrecognized status value is treated like no status at all
-    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof))
+    return AggregatorClient.decodeInclusionProofResponse(proof)
       .withStatusHint(parseProofStatusHint(status))
       .withWaitedMs(waitedMs ?? null);
   }
@@ -317,13 +336,17 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     }
 
     const waitMs = AggregatorClient.batchWait(options, exact);
+    const headers = new Headers();
+    if (this.#key) {
+      headers.set('X-API-Key', this.#key);
+    }
     const request = (wait: number | undefined): Promise<unknown> =>
       this.transport.request(
         'get_inclusion_proofs.v1',
         wait === undefined
           ? { stateIds: ids, stateRoot: exact ? HexConverter.encode(options.stateRoot?.data) : 'latest' }
           : { stateIds: ids, stateRoot: 'latest', waitMs: wait },
-        new Headers(),
+        headers,
         options,
       );
 

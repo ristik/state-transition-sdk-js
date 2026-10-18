@@ -8,6 +8,7 @@ import {
   OperationUnicityCertificateVerifier,
   UnicityCertificateVerifier,
 } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
+import { CertificationData } from '../../../src/api/CertificationData.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
 import {
   fetchMembershipEvidence,
@@ -23,10 +24,16 @@ import { ProofStatusHint } from '../../../src/api/ProofStatusHint.js';
 import { SdkError } from '../../../src/api/SdkError.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
+import { SigningService } from '../../../src/crypto/secp256k1/SigningService.js';
+import { SignaturePredicate } from '../../../src/predicate/builtin/SignaturePredicate.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
+import { MintTransaction } from '../../../src/transaction/MintTransaction.js';
+import { TokenSalt } from '../../../src/transaction/TokenSalt.js';
+import { TokenType } from '../../../src/transaction/TokenType.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
+import { ShardedWorld } from '../../utils/ShardedWorld.js';
 
 const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v1');
 const golden = JSON.parse(readFileSync(join(ROOT, 'cases/golden-two-leaf.json'), 'utf8')) as {
@@ -216,6 +223,93 @@ describe('AggregatorClient.getNonInclusionProof', () => {
       await expect(fetchMembershipEvidence(client, stateId)).rejects.toMatchObject({
         kind: 'unavailable',
         retryable: true,
+      });
+    });
+
+    describe('second call through the real client (classified by phase, never by message)', () => {
+      afterEach(() => jest.restoreAllMocks());
+
+      /** First call claims inclusion (-32022), the second answers `second`. */
+      function claimThenAnswer(second: (id: string) => unknown, status = 200): void {
+        jest.spyOn(global, 'fetch').mockImplementation((_url, init) => {
+          const request = JSON.parse(init?.body as string) as { id: string; method: string };
+          if (request.method === 'get_non_inclusion_proof.v1') {
+            return Promise.resolve(
+              new Response(
+                JSON.stringify({ error: { code: -32022, message: 'included' }, id: request.id, jsonrpc: '2.0' }),
+              ),
+            );
+          }
+          return Promise.resolve(new Response(JSON.stringify(second(request.id)), { status }));
+        });
+      }
+      const rpcError =
+        (code: number, message: string) =>
+        (id: string): unknown => ({
+          error: { code, message },
+          id,
+          jsonrpc: '2.0',
+        });
+      const aggregator = new AggregatorClient('https://example.com');
+
+      it.each([
+        [-32602, 'invalid hex string: odd length', 200, 'rejected', false],
+        [-32023, 'busy: hex decoder queue full', 200, 'busy', true],
+        [-32020, 'no snapshot (hex)', 503, 'unavailable', true],
+      ])(
+        'keeps the RPC classification of error %i whatever its text says',
+        async (code, message, status, kind, retry) => {
+          claimThenAnswer(rpcError(code, message), status);
+          await expect(fetchMembershipEvidence(aggregator, stateId)).rejects.toMatchObject({ kind, retryable: retry });
+        },
+      );
+
+      it('classifies every undecodable result of the second call as invalid_response', async () => {
+        const world = await ShardedWorld.create(0);
+        const salt = TokenSalt.generate();
+        const mint = await MintTransaction.create(
+          world.network,
+          SignaturePredicate.create(SigningService.generate().publicKey),
+          {
+            salt,
+            tokenType: TokenType.generate(),
+          },
+        );
+        await world.router.submitCertificationRequest(await CertificationData.fromMintTransaction(mint));
+        const response = await world.client('').getInclusionProof(await StateId.fromTransaction(mint));
+        const proof = response.toCBOR();
+        const certificate = response.inclusionProof!.inclusionCertificate.encode();
+        const hex = HexConverter.encode(proof);
+        const flip = (bytes: Uint8Array, index: number): Uint8Array => {
+          const copy = new Uint8Array(bytes);
+          copy[index] ^= 0x01;
+          return copy;
+        };
+        const replaced = (bytes: Uint8Array): string =>
+          hex.replace(HexConverter.encode(certificate), HexConverter.encode(bytes));
+        expect(replaced(certificate)).toEqual(hex);
+
+        const malformed = [
+          'zz', // not hex
+          '0', // odd length
+          '', // empty
+          '00', // not CBOR of a proof
+          hex.slice(0, hex.length - 8), // truncated
+          // InclusionCertificate.decode throws a plain Error for each of these
+          replaced(flip(certificate, 0)), // sibling count does not match the bitmap
+          replaced(certificate.slice(0, 5)), // bitmap too short
+          replaced(certificate.slice(0, certificate.length - 3)), // misaligned siblings
+        ];
+        for (const result of malformed) {
+          for (const shape of [(r: string): unknown => r, (r: string): unknown => ({ proof: r })]) {
+            claimThenAnswer((id) => ({ id, jsonrpc: '2.0', result: shape(result) }));
+            await expect(fetchMembershipEvidence(aggregator, stateId)).rejects.toMatchObject({
+              kind: 'invalid_response',
+              retryable: false,
+            });
+            jest.restoreAllMocks();
+          }
+        }
       });
     });
 
