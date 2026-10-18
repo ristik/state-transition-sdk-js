@@ -135,6 +135,30 @@ export async function waitInclusionProof(
   const unknownGraceMs = options.unknownGraceMs ?? 2 * interval;
   const started = Date.now();
 
+  // A conflict is definitive only for a proof that is itself valid for the awaited state id: the served request's own
+  // path to the UC root, shard binding and seal quorum verify, and its state id is the awaited one.
+  const authenticatesAnotherRequest = async (inclusionProof: InclusionProof): Promise<boolean> => {
+    const { certificationData } = inclusionProof;
+    try {
+      if (!(await StateId.fromCertificationData(certificationData)).equals(stateId)) {
+        return false;
+      }
+      const own = await InclusionProofVerificationRule.verify(
+        trustBase,
+        predicateVerifier,
+        unicityCertificateVerifier,
+        inclusionProof,
+        certificationData.transactionHash,
+        certificationData.expiresAt,
+        certificationData.lockScript,
+        certificationData.sourceStateHash,
+      );
+      return own.status === InclusionProofVerificationStatus.OK;
+    } catch {
+      return false;
+    }
+  };
+
   const poll = async (requestSignal: AbortSignal): Promise<InclusionProof | null> => {
     const response = await client.getInclusionProof(
       stateId,
@@ -172,11 +196,13 @@ export async function waitInclusionProof(
       // another request was certified for this state id: typed, so that a conflicting submission is not reported as a
       // generic verification failure
       if (
-        verificationStatus.status === InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH ||
-        verificationStatus.status === InclusionProofVerificationStatus.CERTIFICATION_DATA_MISMATCH
+        (verificationStatus.status === InclusionProofVerificationStatus.TRANSACTION_HASH_MISMATCH ||
+          verificationStatus.status === InclusionProofVerificationStatus.CERTIFICATION_DATA_MISMATCH) &&
+        (await authenticatesAnotherRequest(inclusionProof))
       ) {
         throw new InclusionProofConflictError(verificationStatus.status, stateId, inclusionProof);
       }
+      // anything else, including a mismatching proof nobody authenticated, is an invalid response, not a conflict
       throw new Error(`Invalid inclusion proof status: ${verificationStatus.status}`);
     }
 
