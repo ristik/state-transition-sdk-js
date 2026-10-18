@@ -8,6 +8,20 @@
   `CertificationStatus` no longer compiles until it has a case for each (a compile-time break only; the wire format is
   unchanged).
 
+### Breaking: non-inclusion verification (`verifyNonInclusion`)
+
+- Returns a discriminated result: `verdict` `absent_at_snapshot` or `included_at_snapshot` with the queried `stateId` and
+  the authenticated `snapshot` (`NonInclusionSnapshot`: `networkId`, `partitionId`, `shardId`, `rootRound`,
+  `sealTimestampSeconds`, `rootEpoch`, `shardRound`, `shardEpoch` as `bigint`, `stateRoot` or `null` for the empty tree),
+  or a rejection (`uc_invalid`, `authority_rejected`, `certificate_invalid`) with `snapshot: null` and a `reason`. It is
+  no longer a `VerificationResult` (no `status`, no `absence`); `VerifiedAbsence` and `absentAtRound` are removed.
+- Removed: the options `expectedPartition` (the partition is `AGGREGATION_PARTITION_ID`; a validly signed certificate of
+  another partition is `uc_invalid`) and `minRound`, and the `stale` verdict. Freshness is the caller's decision on the
+  snapshot. A state present at the snapshot is `included_at_snapshot`, no longer the rejection `state_included`.
+- Every non-inclusion entry point and the README carry the warning that absence holds only at the authenticated
+  snapshot. The shared corpus is `non-inclusion/v2` of aggregator-go (the locally generated sharded vectors are gone: the
+  shared corpus covers them).
+
 ### Behaviour
 
 - `waitInclusionProof` can reject earlier with `InclusionProofExpiredError` / `InclusionProofUnknownError` (opt out with
