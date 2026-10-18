@@ -175,6 +175,10 @@ the original proofs already exist.
 (`STATE_ID_QUEUED`, `ALREADY_SUBMITTED`: exhaustive `switch` statements over it need a case) and `submitCertificationRequest`
 returns `STATE_ID_QUEUED` where it used to throw on that duplicate key error.
 
+**Batch endpoints:** `get_inclusion_proofs.v1` (and so consolidation) has to target the shard aggregators directly. The
+aggregator-subscription proxy routes only by `stateId`, `shardId` or `X-State-ID`, so it answers a batch request (which
+carries `stateIds`) with HTTP 400 and cannot route it yet.
+
 ### Prepare a token for EVM or zkVM verification
 
 `TokenProofClient.consolidate(token, { timeoutMs, signal })` rebuilds the replaceable outer-history proofs of a token so
