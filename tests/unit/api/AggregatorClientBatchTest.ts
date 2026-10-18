@@ -85,7 +85,6 @@ describe('AggregatorClient.getInclusionProofs', () => {
     ['not an object', { result: 'zz' }],
     ['missing proofs', { result: {} }],
     ['wrong count', { result: { proofs: ['00', '00'] } }],
-    ['unknown field', { result: { extra: 1, proofs: [] } }],
     ['proof not hex', { result: { proofs: ['zz'] } }],
     ['proof not a string', { result: { proofs: [1] } }],
     ['view for an exact root', { result: { partitionView: '00', proofs: [] } }],
@@ -132,6 +131,24 @@ describe('AggregatorClient.getInclusionProofs', () => {
     expect(error.detail).toEqual(detail);
     expect(error.retryable).toEqual(retryable);
     expect(error.code).toEqual(code);
+  });
+
+  it('ignores unknown result fields (additive server fields) but keeps validating the known ones', async () => {
+    const world = await ShardedWorld.create(0);
+    const proof = Buffer.from((await world.client('').getInclusionProof(stateId(1))).toCBOR()).toString('hex');
+    respond({ result: { extension: { nested: [1, 2] }, proofs: [proof], x: 'y' } });
+    const batch = await client.getInclusionProofs([stateId(1)]);
+    expect(batch.proofs).toHaveLength(1);
+    expect(batch.partitionViewBytes).toBeNull();
+    expect(Object.keys(batch)).not.toContain('extension');
+
+    // known fields stay strict next to an unknown one
+    jest.restoreAllMocks();
+    respond({ result: { extra: 1, proofs: [proof, proof] } });
+    expect((await failure(client.getInclusionProofs([stateId(1)]))).kind).toEqual('invalid_response');
+    jest.restoreAllMocks();
+    respond({ result: { extra: 1, partitionView: 5, proofs: [proof] } });
+    expect((await failure(client.getInclusionProofs([stateId(1)]))).kind).toEqual('invalid_response');
   });
 
   it('sends the configured API key like submitCertificationRequest does', async () => {

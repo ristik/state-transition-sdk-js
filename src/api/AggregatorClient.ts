@@ -88,11 +88,8 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       throw invalid('Batch result must be an object.');
     }
     const body = result as Record<string, unknown>;
-    for (const key of Object.keys(body)) {
-      if (key !== 'proofs' && key !== 'partitionView') {
-        throw invalid(`Unexpected batch result field "${key}".`);
-      }
-    }
+    // Unknown result fields are ignored (the service may add fields), never copied into trusted material: only the
+    // known fields below are read, and they stay strictly validated.
     if (!Array.isArray(body.proofs) || body.proofs.length !== count) {
       throw invalid(`Expected ${count} proofs.`);
     }
