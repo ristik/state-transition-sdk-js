@@ -1,6 +1,9 @@
 import config from './config.json' with { type: 'json' };
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
+import { RootTrustBaseV2 } from '../../../src/api/bft/trustbase/RootTrustBaseV2.js';
+import { ITrustBaseAuthority } from '../../../src/api/bft/trustbase/TrustBaseAuthority.js';
+import { TrustBaseHistory } from '../../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { CertificationData } from '../../../src/api/CertificationData.js';
 import { CertificationStatus } from '../../../src/api/CertificationResponse.js';
 import { NetworkId } from '../../../src/api/NetworkId.js';
@@ -25,7 +28,7 @@ import { VerificationStatus } from '../../../src/verification/VerificationStatus
 import { createUnicityCertificateVerifier } from '../../utils/UnicityCertificateVerifierFixture.js';
 import trustBaseJson from '../trust-base.json' with { type: 'json' };
 
-async function receiveToken(client: StateTransitionClient, trustBase: RootTrustBase): Promise<string> {
+async function receiveToken(client: StateTransitionClient, trustBase: ITrustBaseAuthority): Promise<string> {
   const predicateVerifier = PredicateVerifierService.create();
   const unicityCertificateVerifier = createUnicityCertificateVerifier();
   const verificationContext = new VerificationContext(
@@ -63,7 +66,12 @@ async function receiveToken(client: StateTransitionClient, trustBase: RootTrustB
 
 it('Token transfer', async () => {
   const aggregatorClient = new AggregatorClient(config.aggregatorUrl);
-  const trustBase = RootTrustBase.fromJSON(trustBaseJson);
+  // the pin is the EntryID of the deployment's version-2 genesis entry, from its authenticated configuration; this local example derives it
+  const legacy = RootTrustBase.fromJSON(trustBaseJson);
+  const trustBase = await TrustBaseHistory.fromLegacyGenesis(
+    legacy,
+    await RootTrustBaseV2.genesisFromLegacy(legacy).entryId(),
+  );
   const client = new StateTransitionClient(aggregatorClient);
   const predicateVerifier = PredicateVerifierService.create();
   const unicityCertificateVerifier = createUnicityCertificateVerifier();

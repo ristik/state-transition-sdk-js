@@ -10,6 +10,7 @@ import { CertificationData } from '../../../src/api/CertificationData.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { CborDeserializer } from '../../../src/serialization/cbor/CborDeserializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
+import { createLegacyTrustBaseJson } from '../../utils/RootTrustBaseFixture.js';
 import { ShardedWorld } from '../../utils/ShardedWorld.js';
 
 /**
@@ -97,7 +98,7 @@ async function runAgainst(
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const dir = mkdtempSync(join(tmpdir(), 'lp-interop-'));
-  writeFileSync(join(dir, 'trust-base.json'), JSON.stringify(world.trustBase.toJSON()));
+  writeFileSync(join(dir, 'trust-base.json'), JSON.stringify(createLegacyTrustBaseJson(world.signer.publicKey)));
   try {
     const code = await new Promise<number | null>((resolve) => {
       const child = spawn(

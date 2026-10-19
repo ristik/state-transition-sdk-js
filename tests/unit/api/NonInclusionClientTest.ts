@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../../src/api/bft/ShardId.js';
+import { ITrustBaseAuthority } from '../../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import {
   OperationUnicityCertificateVerifier,
@@ -33,6 +34,7 @@ import { TokenSalt } from '../../../src/transaction/TokenSalt.js';
 import { TokenType } from '../../../src/transaction/TokenType.js';
 import { IVerificationContext } from '../../../src/transaction/verification/IVerificationContext.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
+import { legacyAuthority } from '../../utils/EpochListAuthority.js';
 import { ShardedWorld } from '../../utils/ShardedWorld.js';
 
 const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
@@ -41,14 +43,16 @@ const golden = JSON.parse(readFileSync(join(ROOT, 'cases/golden-two-leaf.json'),
   wrapper: string;
 };
 const stateId = StateId.fromCBOR(CborSerializer.encodeByteString(HexConverter.decode(golden.query)));
-const trustBase = RootTrustBase.fromJSON(JSON.parse(readFileSync(join(ROOT, 'authority/trust-base.json'), 'utf8')));
+const trustBase = legacyAuthority(
+  RootTrustBase.fromJSON(JSON.parse(readFileSync(join(ROOT, 'authority/trust-base.json'), 'utf8'))),
+);
 const verifier = new UnicityCertificateVerifier(
   new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
 );
 
 /** The context as a class: its members are #private getters, reading them with a wrong receiver throws. */
 class PrivateGetterContext {
-  readonly #trustBase: RootTrustBase;
+  readonly #trustBase: ITrustBaseAuthority;
   readonly #verifier: UnicityCertificateVerifier;
 
   public constructor() {
@@ -56,7 +60,7 @@ class PrivateGetterContext {
     this.#verifier = verifier;
   }
 
-  public get trustBase(): RootTrustBase {
+  public get trustBase(): ITrustBaseAuthority {
     return this.#trustBase;
   }
 
@@ -393,7 +397,9 @@ describe('non-inclusion API shape', () => {
   });
 
   it('rejects a context that is not what the verification session was anchored to', async () => {
-    const other = RootTrustBase.fromJSON(JSON.parse(readFileSync(join(ROOT, 'authority/other-network.json'), 'utf8')));
+    const other = legacyAuthority(
+      RootTrustBase.fromJSON(JSON.parse(readFileSync(join(ROOT, 'authority/other-network.json'), 'utf8'))),
+    );
     const { SealVerificationSession } = await import('../../../src/api/bft/verification/SealVerificationSession.js');
     const session = new SealVerificationSession(other, verifier.quorumRule);
     await expect(verifyNonInclusion(proof, new PrivateGetterContext(), { session })).rejects.toThrow(TypeError);

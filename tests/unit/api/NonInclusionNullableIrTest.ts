@@ -20,6 +20,7 @@ import { SigningService } from '../../../src/crypto/secp256k1/SigningService.js'
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
+import { legacyAuthority } from '../../utils/EpochListAuthority.js';
 
 // Architect ruling "Empty-tree ruling" §5: the authenticated empty tree is exactly IR hash = null. An empty byte string,
 // a zero hash and every other representation are not aliases of it, also when a quorum signed that very certificate.
@@ -31,18 +32,20 @@ const TR_HASH = new Uint8Array(32).fill(0x33);
 const CONF_HASH = new Uint8Array(32).fill(0x44);
 const EMPTY = new Uint8Array(0);
 
-const trustBase = RootTrustBase.fromJSON({
-  changeRecordHash: null,
-  epoch: '0',
-  epochStartRound: '0',
-  networkId: NetworkId.LOCAL.id,
-  previousEntryHash: null,
-  quorumThreshold: '1',
-  rootNodes: [{ nodeId: 'NODE', sigKey: HexConverter.encode(NODE.publicKey), stake: '1' }],
-  signatures: {},
-  stateHash: '00',
-  version: '1',
-});
+const trustBase = legacyAuthority(
+  RootTrustBase.fromJSON({
+    changeRecordHash: null,
+    epoch: '0',
+    epochStartRound: '0',
+    networkId: NetworkId.LOCAL.id,
+    previousEntryHash: null,
+    quorumThreshold: '1',
+    rootNodes: [{ nodeId: 'NODE', sigKey: HexConverter.encode(NODE.publicKey), stake: '1' }],
+    signatures: {},
+    stateHash: '00',
+    version: '1',
+  }),
+);
 const verifier = new UnicityCertificateVerifier(
   new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
 );

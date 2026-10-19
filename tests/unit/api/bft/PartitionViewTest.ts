@@ -9,6 +9,7 @@ import { IPartitionViewPolicy, PartitionView, PartitionViewLeaf } from '../../..
 import { PartitionViewError } from '../../../../src/api/bft/PartitionViewError.js';
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../../../src/api/bft/ShardId.js';
+import { ITrustBaseAuthority } from '../../../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicityCertificate } from '../../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../../src/api/bft/UnicitySeal.js';
 import { UnicityTreeCertificate } from '../../../../src/api/bft/UnicityTreeCertificate.js';
@@ -22,6 +23,7 @@ import { CborMapEntry } from '../../../../src/serialization/cbor/CborMapEntry.js
 import { CborSerializer } from '../../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../../src/verification/VerificationStatus.js';
+import { legacyAuthority } from '../../../utils/EpochListAuthority.js';
 
 const DIR = join(process.cwd(), 'tests/fixtures/uc-consolidation/partition-view/v1');
 const PARTITION = 0x0a0b0c0dn;
@@ -72,19 +74,21 @@ function scheme(bits: number): ShardId[] {
 function trustBaseOf(
   v: IAssemblyVector,
   overrides: { epoch?: number; networkId?: number; sigKey?: string } = {},
-): RootTrustBase {
-  return RootTrustBase.fromJSON({
-    changeRecordHash: null,
-    epoch: String(overrides.epoch ?? v.epoch),
-    epochStartRound: String(v.epochStartRound),
-    networkId: overrides.networkId ?? v.networkId,
-    previousEntryHash: null,
-    quorumThreshold: '1',
-    rootNodes: [{ nodeId: v.nodeId, sigKey: overrides.sigKey ?? v.sigKey, stake: '1' }],
-    signatures: {},
-    stateHash: '00',
-    version: '1',
-  });
+): ITrustBaseAuthority {
+  return legacyAuthority(
+    RootTrustBase.fromJSON({
+      changeRecordHash: null,
+      epoch: String(overrides.epoch ?? v.epoch),
+      epochStartRound: String(v.epochStartRound),
+      networkId: overrides.networkId ?? v.networkId,
+      previousEntryHash: null,
+      quorumThreshold: '1',
+      rootNodes: [{ nodeId: v.nodeId, sigKey: overrides.sigKey ?? v.sigKey, stake: '1' }],
+      signatures: {},
+      stateHash: '00',
+      version: '1',
+    }),
+  );
 }
 
 function topologyOf(
@@ -109,7 +113,7 @@ async function assembleVia(
   return (await new PartitionViewAuthenticator(authority, policy).authenticate(view, uc)).assembleCertificates();
 }
 
-function newSession(trustBase: RootTrustBase): SealVerificationSession {
+function newSession(trustBase: ITrustBaseAuthority): SealVerificationSession {
   return new SealVerificationSession(
     trustBase,
     new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
@@ -747,8 +751,8 @@ describe('PartitionView adversarial assembly', () => {
         enclosing.unicityTreeCertificate,
         UnicitySeal.fromCBOR(replaceItem(sealBytes, 7, map, true)),
       );
-    // the native decoder does not accept a seal without a signature map at all
-    expect(() => resealed(CborSerializer.encodeNull())).toThrow();
+    // a null signature map decodes, as natively (B1 corpus `seal.sigs-null`: shaped but false), and is never authenticated
+    await expectReason(assemble(view, resealed(CborSerializer.encodeNull())), 'seal_invalid');
     const [signer, signature] = Array.from(enclosing.unicitySeal.signatures?.entries() ?? [])[0];
     const altered = signature.toCBOR();
     altered[altered.length - 10] ^= 1;

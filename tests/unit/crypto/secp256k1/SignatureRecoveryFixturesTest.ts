@@ -12,6 +12,7 @@ import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Sec
 import { Signature } from '../../../../src/crypto/secp256k1/Signature.js';
 import { HexConverter } from '../../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../../src/verification/VerificationStatus.js';
+import { legacyAuthority } from '../../../utils/EpochListAuthority.js';
 
 interface IFixture {
   primitive: {
@@ -68,23 +69,37 @@ describe('shared O3 signature recovery fixtures', () => {
   });
 
   describe('seal quorum cases', () => {
-    const trustBase = RootTrustBase.fromJSON({
-      changeRecordHash: null,
-      epoch: String(fixture.seal.epoch),
-      epochStartRound: '0',
-      networkId: fixture.seal.networkId,
-      previousEntryHash: null,
-      quorumThreshold: String(fixture.seal.quorumThreshold),
-      rootNodes: fixture.seal.nodes.map((n) => ({
-        nodeId: n.id,
-        sigKey: n.publicKeyCompressed,
-        stake: String(n.stake),
-      })),
-      signatures: {},
-      stateHash: '00',
-      version: '1',
-    });
+    const trustBase = legacyAuthority(
+      RootTrustBase.fromJSON({
+        changeRecordHash: null,
+        epoch: String(fixture.seal.epoch),
+        epochStartRound: '0',
+        networkId: fixture.seal.networkId,
+        previousEntryHash: null,
+        quorumThreshold: String(fixture.seal.quorumThreshold),
+        rootNodes: fixture.seal.nodes.map((n) => ({
+          nodeId: n.id,
+          sigKey: n.publicKeyCompressed,
+          stake: String(n.stake),
+        })),
+        signatures: {},
+        stateHash: '00',
+        version: '1',
+      }),
+    );
     const rule = new UnicitySealQuorumSignaturesVerificationRule(verifier);
+
+    /**
+     * Seal acceptance follows the native B1 rule (bft-core b1ref any-age corpus, tests/fixtures/b1-seals/v1), not O3: a swapped 0/1 recovery byte
+     * is ignored (`quorum.sig.v-ignored`), a 64-byte signature is accepted (`quorum.sig.v-present`/compact), a recovery byte above 1 makes the seal
+     * malformed (`quorum.sig.v2`). These O3 cases are overridden with B1's verdict; the other cases agree.
+     */
+    const B1_OVERRIDES: Record<string, boolean> = {
+      'one-dropped-one-v-flipped-quorum-lost': true,
+      'one-v-out-of-range-quorum-met': false,
+      'two-compact-quorum-lost': true,
+      'two-v-flipped-quorum-lost': true,
+    };
 
     it('uses the network of the corpus', () => {
       expect(trustBase.networkId.equals(NetworkId.fromId(fixture.seal.networkId))).toBe(true);
@@ -99,7 +114,7 @@ describe('shared O3 signature recovery fixtures', () => {
         // only malformed CBOR may fail here: a malformed witness is zero votes, not a decode failure
         throw new Error(`seal case ${testCase.name} must decode`);
       }
-      expect(accepted).toBe(testCase.accept);
+      expect(accepted).toBe(B1_OVERRIDES[testCase.name] ?? testCase.accept);
     });
 
     it('preserves every carried witness byte and keys the memo on them', async () => {
@@ -120,7 +135,8 @@ describe('shared O3 signature recovery fixtures', () => {
       const validSeal = UnicitySeal.fromCBOR(HexConverter.decode(valid?.sealCbor ?? ''));
       expect((await cached.verify(trustBase, validSeal)).status).toBe(VerificationStatus.OK);
       expect(HexConverter.encode(validSeal.toCBOR())).not.toBe(HexConverter.encode(seal.toCBOR()));
-      expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.OK);
+      // under the B1 rule the out-of-range recovery byte makes this seal malformed, whatever the cache holds
+      expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.FAIL);
     });
   });
 });

@@ -12,10 +12,17 @@ export class ShardTreeCertificate {
   public static readonly CBOR_TAG = 39003n;
   private static readonly VERSION = 1n;
 
+  /**
+   * @param {ShardId} _shard Shard.
+   * @param {Uint8Array[]} _siblingHashList Sibling hashes, one per shard bit.
+   * @param {boolean} [nullList] The (empty) list was encoded as CBOR null, as Go encodes a nil slice; kept so the bytes round-trip.
+   */
   public constructor(
     private readonly _shard: ShardId,
     private readonly _siblingHashList: Uint8Array[],
+    private readonly nullList: boolean = false,
   ) {
+    this.nullList = nullList && _siblingHashList.length === 0;
     this._siblingHashList = _siblingHashList.map((hash) => new Uint8Array(hash));
   }
 
@@ -60,7 +67,10 @@ export class ShardTreeCertificate {
 
     return new ShardTreeCertificate(
       ShardId.decode(CborDeserializer.decodeByteString(data[1])),
-      CborDeserializer.decodeArray(data[2]).map((hash) => CborDeserializer.decodeByteString(hash)),
+      (CborDeserializer.decodeNullable(data[2], (list) => CborDeserializer.decodeArray(list)) ?? []).map((hash) =>
+        CborDeserializer.decodeByteString(hash),
+      ),
+      CborDeserializer.decodeNullable(data[2], () => false) === null,
     );
   }
 
@@ -75,7 +85,9 @@ export class ShardTreeCertificate {
       CborSerializer.encodeArray(
         CborSerializer.encodeUnsignedInteger(this.version),
         CborSerializer.encodeByteString(this._shard.encode()),
-        CborSerializer.encodeArray(...this._siblingHashList.map((hash) => CborSerializer.encodeByteString(hash))),
+        this.nullList
+          ? CborSerializer.encodeNull()
+          : CborSerializer.encodeArray(...this._siblingHashList.map((hash) => CborSerializer.encodeByteString(hash))),
       ),
     );
   }

@@ -98,7 +98,7 @@ describe('worker token verification work', () => {
       const verifier = new InlineWorkerTokenVerifier(poolSize, new CountingWorkerBody(certificateVerifier));
       // the main thread checks the genesis with its own (here the same) verifier
       const context = new VerificationContext(
-        s.context.trustBase,
+        await s.world.trustBaseHistory(),
         s.context.predicateVerifier,
         certificateVerifier,
         s.context.mintJustificationVerifier,

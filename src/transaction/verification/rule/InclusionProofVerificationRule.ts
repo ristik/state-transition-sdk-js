@@ -1,5 +1,5 @@
 import { ShardIdMatchesStateIdRule } from './ShardIdMatchesStateIdRule.js';
-import { RootTrustBase } from '../../../api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../../../api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicityCertificateVerifier } from '../../../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../../../api/InclusionProof.js';
 import { calculateLeafValue } from '../../../api/LeafValue.js';
@@ -15,7 +15,15 @@ import { VerificationStatus } from '../../../verification/VerificationStatus.js'
  * Status codes for verifying an InclusionProof.
  */
 export enum InclusionProofVerificationStatus {
+  /** The certificate does not verify under the held trust-base history (B1 `valid = false`). Final. */
   INVALID_TRUSTBASE = 'INVALID_TRUSTBASE',
+  /** The certificate is outside the accepted encoding or bounds (B1 `status = error`). Final. */
+  MALFORMED_CERTIFICATE = 'MALFORMED_CERTIFICATE',
+  /**
+   * The seal is of an epoch newer than the latest held trust-base entry. Retryable: append the missing entries (fetched from the latest held epoch
+   * + 1) and verify again. The failing child is a `CertificateVerificationResult` naming the epoch.
+   */
+  NO_ENTRY_FOR_EPOCH = 'NO_ENTRY_FOR_EPOCH',
   CERTIFICATION_DATA_MISMATCH = 'CERTIFICATION_DATA_MISMATCH',
   TRANSACTION_HASH_MISMATCH = 'TRANSACTION_HASH_MISMATCH',
   REFERENCE_TIME_AFTER_ROUND = 'REFERENCE_TIME_AFTER_ROUND',
@@ -35,7 +43,7 @@ export class InclusionProofVerificationRule {
    * attests to: its canonical hash, the lock script being unlocked, and the source state
    * being spent.
    *
-   * @param {RootTrustBase} trustBase Root trust base.
+   * @param {ITrustBaseAuthority} trustBase Held trust-base history.
    * @param {PredicateVerifierService} predicateVerifierFactory Predicate verifier service.
    * @param {InclusionProof} inclusionProof Inclusion proof to verify.
    * @param {DataHash} transactionHash Canonical hash of the transaction.
@@ -45,7 +53,7 @@ export class InclusionProofVerificationRule {
    * @returns {Promise<VerificationResult<InclusionProofVerificationStatus>>} Verification outcome.
    */
   public static async verify(
-    trustBase: RootTrustBase,
+    trustBase: ITrustBaseAuthority,
     predicateVerifierFactory: PredicateVerifierService,
     unicityCertificateVerifier: UnicityCertificateVerifier,
     inclusionProof: InclusionProof,
@@ -124,12 +132,15 @@ export class InclusionProofVerificationRule {
     const unicityCertificateVerificationResult = await unicityCertificateVerifier.verify(trustBase, inclusionProof);
 
     if (unicityCertificateVerificationResult.status !== VerificationStatus.OK) {
-      return new VerificationResult(
-        'InclusionProofVerificationRule',
-        InclusionProofVerificationStatus.INVALID_TRUSTBASE,
-        '',
-        [unicityCertificateVerificationResult],
-      );
+      const status = {
+        invalid: InclusionProofVerificationStatus.INVALID_TRUSTBASE,
+        malformed: InclusionProofVerificationStatus.MALFORMED_CERTIFICATE,
+        no_entry_for_epoch: InclusionProofVerificationStatus.NO_ENTRY_FOR_EPOCH,
+        ok: InclusionProofVerificationStatus.INVALID_TRUSTBASE,
+      }[unicityCertificateVerificationResult.verdict];
+      return new VerificationResult('InclusionProofVerificationRule', status, '', [
+        unicityCertificateVerificationResult,
+      ]);
     }
 
     const predicateVerificationResult = await predicateVerifierFactory.verify(

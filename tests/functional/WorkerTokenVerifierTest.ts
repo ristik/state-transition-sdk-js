@@ -4,6 +4,7 @@ import { Worker } from 'node:worker_threads';
 
 import { ExampleTransferTransactionVerifierWorker } from './ExampleTransferTransactionVerifierWorker.js';
 import { TestAggregatorClient } from './TestAggregatorClient.js';
+import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { UnicityCertificateVerifier } from '../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { SigningService } from '../../src/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '../../src/predicate/builtin/SignaturePredicate.js';
@@ -94,7 +95,11 @@ class TestWorkerTokenVerifier extends WorkerTokenVerifier {
 describe('WorkerTokenVerifier', () => {
   const aggregatorClient = TestAggregatorClient.create();
   const client = new StateTransitionClient(aggregatorClient);
-  const trustBase = aggregatorClient.rootTrustBase;
+  // workers receive the held history as a bundle, so these tests verify against a real TrustBaseHistory
+  let trustBase: TrustBaseHistory;
+  beforeAll(async () => {
+    trustBase = await aggregatorClient.trustBaseHistory();
+  });
 
   const createContext = (): IVerificationContext =>
     new VerificationContext(
@@ -381,7 +386,7 @@ describe('WorkerTokenVerifier', () => {
 
     const response = await new Promise((resolve) => {
       worker.onmessage = (event): void => resolve(event.data);
-      worker.postMessage({ transfers: [], trustBase: null });
+      worker.postMessage({ transfers: [], trustBase: { bundle: new Uint8Array(0), pin: new Uint8Array(0) } });
     });
     expect(response).toEqual([]);
 

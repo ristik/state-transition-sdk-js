@@ -2,8 +2,10 @@ import { readFileSync } from 'node:fs';
 
 import { AggregatorClient } from '../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { IAggregatorClient } from '../../src/api/IAggregatorClient.js';
 import { StateTransitionClient } from '../../src/StateTransitionClient.js';
+import { legacyAuthority } from '../utils/EpochListAuthority.js';
 
 /**
  * Read a value the stack published, or say why it is missing.
@@ -39,13 +41,17 @@ function fromStack(name: string): string {
 export function createIntegrationContext(): {
   aggregatorClient: IAggregatorClient;
   client: StateTransitionClient;
-  trustBase: RootTrustBase;
+  trustBase: ITrustBaseAuthority;
 } {
   const aggregatorClient = new AggregatorClient(fromStack('AGGREGATOR_URL'), null);
 
   return {
     aggregatorClient,
     client: new StateTransitionClient(aggregatorClient),
-    trustBase: RootTrustBase.fromJSON(JSON.parse(readFileSync(fromStack('TRUST_BASE_PATH'), 'utf-8'))),
+    trustBase: legacyAuthorityOf(JSON.parse(readFileSync(fromStack('TRUST_BASE_PATH'), 'utf-8'))),
   };
+}
+
+function legacyAuthorityOf(json: unknown): ITrustBaseAuthority {
+  return legacyAuthority(RootTrustBase.fromJSON(json));
 }

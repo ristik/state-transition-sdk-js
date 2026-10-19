@@ -22,7 +22,7 @@ import { TokenSalt } from '../../../src/transaction/TokenSalt.js';
 import { TokenType } from '../../../src/transaction/TokenType.js';
 import { SleepError, waitInclusionProof } from '../../../src/util/InclusionProofUtils.js';
 import { expiresAt } from '../../utils/ExpiresAt.js';
-import { createRootTrustBase } from '../../utils/RootTrustBaseFixture.js';
+import { createTrustBase } from '../../utils/RootTrustBaseFixture.js';
 import { createUnicityCertificate } from '../../utils/UnicityCertificateFixture.js';
 import { createUnicityCertificateVerifier } from '../../utils/UnicityCertificateVerifierFixture.js';
 
@@ -67,7 +67,7 @@ class StubAggregatorClient implements IAggregatorClient {
 
 describe('waitInclusionProof', () => {
   const signingService = SigningService.generate();
-  const trustBase = createRootTrustBase(signingService.publicKey);
+  const trustBase = createTrustBase(signingService.publicKey);
   const predicateVerifier = PredicateVerifierService.create();
   const unicityCertificateVerifier = createUnicityCertificateVerifier();
 

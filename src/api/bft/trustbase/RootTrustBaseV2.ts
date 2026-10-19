@@ -123,7 +123,7 @@ export class RootTrustBaseV2 {
    * @param {Uint8Array|null} fields.stateHash State hash (null or 32 bytes).
    * @param {Uint8Array|null} fields.changeRecordHash Change-record hash (null or 32 bytes).
    * @param {Uint8Array} fields.previousEntryId Predecessor EntryID (32 zero bytes for a genesis entry).
-   * @returns {RootTrustBaseV2} The unsigned entry, validated.
+   * @returns {RootTrustBaseV2} The unsigned entry, shape-checked (sign it with {@link withSignatures} unless it is a genesis entry).
    * @throws {TrustBaseError} `invalid` for a structure rule.
    */
   public static create(fields: {
@@ -150,7 +150,7 @@ export class RootTrustBaseV2 {
       new Uint8Array(fields.previousEntryId),
       null,
     );
-    entry.validate();
+    entry.validateShape();
     return entry;
   }
 
@@ -268,13 +268,29 @@ export class RootTrustBaseV2 {
   }
 
   /**
-   * Check the entry's structure, not its signatures: version, epoch ≥ 1, members (sorted by raw node-identifier bytes, unique, valid compressed
-   * keys, unique keys, positive bounded weights, bounded count), the exact threshold floor(2W/3)+1, hash lengths, and genesis (zero predecessor, null
-   * signatures) versus non-genesis (32-byte predecessor, non-empty signature map).
+   * {@link validateShape} plus the witness rule: the genesis carries null signatures, every other entry a non-empty signature map.
    *
    * @throws {TrustBaseError} `invalid` for the first violated rule.
    */
   public validate(): void {
+    this.validateShape();
+    if (this.isGenesis) {
+      if (this._signatures !== null) {
+        throw new TrustBaseError('invalid', 'Invalid trust base v2 entry: the genesis entry carries signatures.');
+      }
+    } else if (this._signatures === null || this._signatures.size === 0) {
+      throw new TrustBaseError('invalid', 'Invalid trust base v2 entry: a non-genesis entry has no signatures.');
+    }
+  }
+
+  /**
+   * Check the entry's shape, without the witness rule (an unsigned entry passes, as bft-core `utbentry.ValidateShape`): epoch ≥ 1, members (sorted by
+   * raw node-identifier bytes, unique, valid compressed keys, unique keys, positive bounded weights, bounded count), the exact threshold
+   * floor(2W/3)+1, hash lengths and a 32-byte predecessor id.
+   *
+   * @throws {TrustBaseError} `invalid` for the first violated rule.
+   */
+  public validateShape(): void {
     const bad = (text: string): TrustBaseError =>
       new TrustBaseError('invalid', `Invalid trust base v2 entry: ${text}.`);
     if (this.epoch === 0n) {
@@ -324,13 +340,6 @@ export class RootTrustBaseV2 {
     }
     if (this._previousEntryId === null || this._previousEntryId.length !== RootTrustBaseV2.ID_LENGTH) {
       throw bad('previous entry id is not 32 bytes');
-    }
-    if (this.isGenesis) {
-      if (this._signatures !== null) {
-        throw bad('the genesis entry carries signatures');
-      }
-    } else if (this._signatures === null || this._signatures.size === 0) {
-      throw bad('a non-genesis entry has no signatures');
     }
   }
 

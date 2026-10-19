@@ -1,6 +1,6 @@
 import { TestPaymentData } from './payment/TestPaymentData.js';
 import { TestAggregatorClient } from './TestAggregatorClient.js';
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicityCertificateStructureRule } from '../../src/api/bft/verification/rule/UnicityCertificateStructureRule.js';
 import { UnicitySealHashMatchesWithRootHashRule } from '../../src/api/bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import {
@@ -41,7 +41,7 @@ import { createUnicityCertificateVerifier } from '../utils/UnicityCertificateVer
  */
 class PermissiveVerifier extends UnicityCertificateVerifier {
   public override async verify(
-    trustBase: RootTrustBase,
+    trustBase: ITrustBaseAuthority,
     inclusionProof: InclusionProof,
   ): Promise<UnicityCertificateVerificationResult> {
     const certificate = inclusionProof.unicityCertificate;

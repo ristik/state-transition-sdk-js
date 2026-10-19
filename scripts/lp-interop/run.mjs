@@ -117,6 +117,8 @@ const [
   { AggregatorClient },
   { StateTransitionClient },
   { RootTrustBase },
+  { RootTrustBaseV2 },
+  { TrustBaseHistory },
   { UnicityCertificateVerifier },
   { UnicitySealQuorumSignaturesVerificationRule },
   { VerifiedSealCache },
@@ -135,6 +137,8 @@ const [
   lib('api/AggregatorClient.js'),
   lib('StateTransitionClient.js'),
   lib('api/bft/RootTrustBase.js'),
+  lib('api/bft/trustbase/RootTrustBaseV2.js'),
+  lib('api/bft/trustbase/TrustBaseHistory.js'),
   lib('api/bft/verification/UnicityCertificateVerifier.js'),
   lib('api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js'),
   lib('api/bft/verification/VerifiedSealCache.js'),
@@ -151,7 +155,9 @@ const [
   lib('api/NetworkId.js'),
 ]);
 
-const trustBase = RootTrustBase.fromJSON(JSON.parse(readFileSync(values['trust-base'], 'utf8')));
+// the JSON genesis of the interop stack becomes the held version-2 history; the stack's own file is the pin here (a test harness, not a wallet)
+const legacy = RootTrustBase.fromJSON(JSON.parse(readFileSync(values['trust-base'], 'utf8')));
+const trustBase = await TrustBaseHistory.fromLegacyGenesis(legacy, await RootTrustBaseV2.genesisFromLegacy(legacy).entryId());
 const predicateVerifier = PredicateVerifierService.create();
 const certificateVerifier = new UnicityCertificateVerifier(
   new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), new VerifiedSealCache(256)),

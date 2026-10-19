@@ -10,6 +10,7 @@ import { StateId } from '../../../src/api/StateId.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
+import { legacyAuthority } from '../../utils/EpochListAuthority.js';
 
 const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8');
@@ -21,7 +22,7 @@ const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8');
 describe('non-inclusion example (API reference)', () => {
   const golden = JSON.parse(read('cases/historical-snapshot-absent.json')) as { query: string; wrapper: string };
   const trustedContext = {
-    trustBase: RootTrustBase.fromJSON(JSON.parse(read('authority/trust-base.json'))),
+    trustBase: legacyAuthority(RootTrustBase.fromJSON(JSON.parse(read('authority/trust-base.json')))),
     unicityCertificateVerifier: new UnicityCertificateVerifier(
       new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
     ),

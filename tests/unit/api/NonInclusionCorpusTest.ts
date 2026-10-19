@@ -19,6 +19,7 @@ import { StateId } from '../../../src/api/StateId.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
+import { legacyAuthority } from '../../utils/EpochListAuthority.js';
 
 /** Corpus aggregator-go `testdata/non-inclusion/v2`, vendored byte for byte, see PROVENANCE.md. */
 const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
@@ -110,9 +111,11 @@ async function run(
     return { outcome: 'malformed' };
   }
   // the corpus writes uint64 values of the authority as JSON numbers: quote them before parsing, a double would round
-  const trustBase = RootTrustBase.fromJSON(
-    JSON.parse(
-      read(context.trustBaseJson).replace(/("(?:epoch|epochStartRound|stake|quorumThreshold)":\s*)(\d+)/g, '$1"$2"'),
+  const trustBase = legacyAuthority(
+    RootTrustBase.fromJSON(
+      JSON.parse(
+        read(context.trustBaseJson).replace(/("(?:epoch|epochStartRound|stake|quorumThreshold)":\s*)(\d+)/g, '$1"$2"'),
+      ),
     ),
   );
   const result = await verifyNonInclusion(
