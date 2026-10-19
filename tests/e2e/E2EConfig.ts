@@ -13,6 +13,25 @@ import { StateTransitionClient } from '../../src/StateTransitionClient.js';
  */
 export const AGGREGATOR_URL = process.env.AGGREGATOR_URL ?? 'http://localhost:3000';
 
+const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal']);
+
+/**
+ * Whether the client may send an API key over plaintext `http://`: only to a local stack or gateway
+ * (`localhost`, `127.0.0.1`, `::1`, `host.docker.internal`), or to a remote host when `E2E_ALLOW_INSECURE=1`
+ * says so explicitly. `https://` never needs it.
+ *
+ * @param {string} url Aggregator URL.
+ * @param {NodeJS.ProcessEnv} env Environment to read `E2E_ALLOW_INSECURE` from.
+ * @returns {boolean} The value for the client's `allowInsecureTransport` argument.
+ */
+export function allowInsecureTransportFor(url: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'http:') {
+    return false;
+  }
+  return LOCAL_HOSTNAMES.has(parsed.hostname) || env.E2E_ALLOW_INSECURE === '1';
+}
+
 /**
  * Build the client and trust base the e2e suite runs against.
  *
@@ -27,7 +46,7 @@ export function createE2EContext(): {
     AGGREGATOR_URL,
     process.env.AGGREGATOR_API_KEY ?? null,
     // a local stack or gateway on http://: the client refuses to send an API key over plaintext otherwise
-    new URL(AGGREGATOR_URL).protocol !== 'https:',
+    allowInsecureTransportFor(AGGREGATOR_URL),
   );
   const trustBasePath = process.env.TRUST_BASE_PATH ?? null;
 
