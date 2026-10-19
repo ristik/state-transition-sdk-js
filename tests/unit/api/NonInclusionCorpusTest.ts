@@ -155,7 +155,7 @@ describe('non-inclusion corpus v2', () => {
       createHash('sha256')
         .update(readFileSync(join(ROOT, 'manifest.json')))
         .digest('hex'),
-    ).toEqual('996b14db7519e1a7619923d58214a3993e269bf613177e45bf3f656e578ee598');
+    ).toEqual('7bfb40a209b137acdcfa3deea0834a54924ce32e7d9d41c0d9d583ae3dc5dd8b');
     const manifest = json<{ sha256: Record<string, string> }>('manifest.json');
     for (const [path, sha] of Object.entries(manifest.sha256)) {
       expect(
