@@ -22,6 +22,8 @@ export interface IUnicityCertificateOptions {
   readonly blockHash?: Uint8Array | null;
   /** Partition of the certificate. Default: the aggregation partition. */
   readonly partition?: bigint;
+  /** Epoch of the seal. Default {@link TEST_EPOCH}. */
+  readonly sealEpoch?: bigint;
   /** Round of the seal. Default 1. */
   readonly sealRound?: bigint;
   /** Timestamp of the seal. Default: the timestamp of the input record. */
@@ -77,7 +79,7 @@ export async function createUnicityCertificate(
   const seal = await UnicitySeal.create(
     NetworkId.LOCAL,
     options.sealRound ?? 1n,
-    BigInt(TEST_EPOCH),
+    options.sealEpoch ?? BigInt(TEST_EPOCH),
     options.sealTimestamp ?? timestamp,
     null,
     unicitySealHash.data,
