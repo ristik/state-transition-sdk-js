@@ -5,7 +5,8 @@
 export class NetworkId {
   public static readonly LOCAL = new NetworkId(3, 'LOCAL');
   public static readonly MAINNET = new NetworkId(1, 'MAINNET');
-  public static readonly TESTNET = new NetworkId(2, 'TESTNET');
+  /** testnet2: network 4, as its published genesis trust base (unicity-ids `bft-trustbase.testnet2.json`). */
+  public static readonly TESTNET = new NetworkId(4, 'TESTNET');
 
   private constructor(
     public readonly id: number,
