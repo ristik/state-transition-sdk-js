@@ -145,8 +145,8 @@ export class RootTrustBaseV2 {
       fields.epochStartRound,
       nodes,
       fields.quorumThreshold,
-      fields.stateHash ? new Uint8Array(fields.stateHash) : null,
-      fields.changeRecordHash ? new Uint8Array(fields.changeRecordHash) : null,
+      absentAsNull(fields.stateHash),
+      absentAsNull(fields.changeRecordHash),
       new Uint8Array(fields.previousEntryId),
       null,
     );
@@ -204,8 +204,8 @@ export class RootTrustBaseV2 {
           };
         }),
         CborDeserializer.decodeUnsignedInteger(data[5]),
-        CborDeserializer.decodeNullable(data[6], CborDeserializer.decodeByteString),
-        CborDeserializer.decodeNullable(data[7], CborDeserializer.decodeByteString),
+        CborDeserializer.decodeNullable(data[6], decodePresentHash),
+        CborDeserializer.decodeNullable(data[7], decodePresentHash),
         CborDeserializer.decodeNullable(data[8], CborDeserializer.decodeByteString),
         signatures,
       );
@@ -222,17 +222,16 @@ export class RootTrustBaseV2 {
   /**
    * The version-2 genesis entry of an on-disk (JSON, version 1) genesis trust base, as bft-core derives it (`utb.BuildUnsigned(nil,
    * utb.FromProjection(v1))`): the same network, epoch, start, members, weights and threshold, a zero predecessor and no signatures. The V1 signatures
-   * are ignored: the genesis is authenticated by the pin on the returned entry's EntryID. Empty state and change-record hashes become CBOR null (the
-   * JSON form cannot tell null from an empty byte string; null is the convention).
+   * are ignored: the genesis is authenticated by the pin on the returned entry's EntryID. Empty state and change-record hashes become CBOR null, the
+   * one byte form of an absent hash.
    *
    * @param {RootTrustBase} legacy The JSON genesis trust base.
    * @returns {RootTrustBaseV2} The unsigned genesis entry.
    * @throws {TrustBaseError} `invalid` when the result breaks a version-2 rule (for example a threshold other than floor(2W/3)+1).
    */
   public static genesisFromLegacy(legacy: RootTrustBase): RootTrustBaseV2 {
-    const hash = (h: Uint8Array | null): Uint8Array | null => (h && h.length > 0 ? h : null);
     return RootTrustBaseV2.create({
-      changeRecordHash: hash(legacy.changeRecordHash),
+      changeRecordHash: legacy.changeRecordHash,
       epoch: legacy.epoch,
       epochStartRound: legacy.epochStartRound,
       networkId: legacy.networkId.id,
@@ -243,7 +242,7 @@ export class RootTrustBaseV2 {
         signingKey: n.signingKey,
         weight: n.stakedAmount,
       })),
-      stateHash: hash(legacy.stateHash),
+      stateHash: legacy.stateHash,
     });
   }
 
@@ -320,7 +319,7 @@ export class RootTrustBaseV2 {
       ['change record hash', this._changeRecordHash],
     ] as const) {
       if (hash !== null && hash.length !== 0 && hash.length !== RootTrustBaseV2.ID_LENGTH) {
-        throw bad(`${name} is ${hash.length} bytes (0 or ${RootTrustBaseV2.ID_LENGTH})`);
+        throw bad(`${name} is ${hash.length} bytes (null or ${RootTrustBaseV2.ID_LENGTH})`);
       }
     }
     if (this._previousEntryId === null || this._previousEntryId.length !== RootTrustBaseV2.ID_LENGTH) {
@@ -459,8 +458,8 @@ export class RootTrustBaseV2 {
           ),
         ),
         CborSerializer.encodeUnsignedInteger(this.quorumThreshold),
-        CborSerializer.encodeNullable(this._stateHash, CborSerializer.encodeByteString),
-        CborSerializer.encodeNullable(this._changeRecordHash, CborSerializer.encodeByteString),
+        CborSerializer.encodeNullable(absentAsNull(this._stateHash), CborSerializer.encodeByteString),
+        CborSerializer.encodeNullable(absentAsNull(this._changeRecordHash), CborSerializer.encodeByteString),
         CborSerializer.encodeNullable(this._previousEntryId, CborSerializer.encodeByteString),
         CborSerializer.encodeNullable(signatures, (map) =>
           CborSerializer.encodeMap(
@@ -490,6 +489,20 @@ function decodeText(data: Uint8Array): string {
   const text = TEXT_DECODER.decode(reader.read(Number(length)));
   reader.assertExhausted();
   return text;
+}
+
+/** An absent hash has one byte form, CBOR null: a present hash must not be an empty byte string (bft-go-base#3). */
+function decodePresentHash(data: Uint8Array): Uint8Array {
+  const hash = CborDeserializer.decodeByteString(data);
+  if (hash.length === 0) {
+    throw new Error('an absent hash is null, not an empty byte string');
+  }
+  return hash;
+}
+
+/** The canonical absent hash is null: an empty value is held (and encoded) as null, so both give the same bytes and EntryID. */
+function absentAsNull(hash: Uint8Array | null): Uint8Array | null {
+  return hash && hash.length > 0 ? new Uint8Array(hash) : null;
 }
 
 function isCompressedKey(key: Uint8Array): boolean {

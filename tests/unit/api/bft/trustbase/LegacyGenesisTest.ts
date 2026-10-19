@@ -38,3 +38,26 @@ describe('NetworkId', () => {
     expect(legacy.networkId.id).toBe(NetworkId.TESTNET.id);
   });
 });
+
+describe('absent state and change-record hashes', () => {
+  it('have one byte form: an in-memory empty value is held and encoded as null, with the same EntryID', async () => {
+    const genesis = RootTrustBaseV2.genesisFromLegacy(legacy);
+    const fields = {
+      epoch: genesis.epoch,
+      epochStartRound: genesis.epochStartRound,
+      networkId: genesis.networkId,
+      previousEntryId: genesis.previousEntryId,
+      quorumThreshold: genesis.quorumThreshold,
+      rootNodes: genesis.rootNodes,
+    };
+    const empty = RootTrustBaseV2.create({
+      ...fields,
+      changeRecordHash: new Uint8Array(0),
+      stateHash: new Uint8Array(0),
+    });
+    const absent = RootTrustBaseV2.create({ ...fields, changeRecordHash: null, stateHash: null });
+    expect(empty.stateHash).toBeNull();
+    expect(HexConverter.encode(empty.toCBOR())).toBe(HexConverter.encode(absent.toCBOR()));
+    expect(HexConverter.encode(await empty.entryId())).toBe(goEntryId);
+  });
+});
