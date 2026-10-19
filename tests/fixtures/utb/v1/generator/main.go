@@ -366,6 +366,14 @@ func main() {
 	gs := clone(g)
 	must(gs.Sign(keys[0].id, keys[0].signer))
 	addGenesis("genesis.with-signatures", "a genesis carrying a signature map", enc(gs), gid)
+	// The hash fields have two valid byte forms, CBOR null (nil) and an empty byte string, with different EntryIDs; a JSON genesis cannot tell them
+	// apart (the SDK loaders use null). Both decode, and each is authenticated only by its own pin.
+	ge := clone(g)
+	ge.StateHash, ge.ChangeRecordHash = []byte{}, []byte{}
+	geID, err := ge.EntryID()
+	must(err)
+	addGenesis("genesis.empty-hash-form", "the genesis with empty byte strings (0x40) instead of null state and change-record hashes, under its own pin", enc(ge), geID)
+	addGenesis("genesis.empty-hash-form-null-pin", "the empty-byte-string form under the pin of the null form: a different EntryID", enc(ge), gid)
 	gnz := clone(g)
 	gnz.PreviousEntryID = label("not zero")
 	addGenesis("genesis.nonzero-predecessor", "an epoch-1 entry with a non-zero predecessor and no signatures", enc(gnz), gid)
