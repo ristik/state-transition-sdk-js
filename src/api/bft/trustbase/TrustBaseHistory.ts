@@ -28,6 +28,8 @@ export class TrustBaseHistory {
   private readonly entries: RootTrustBaseV2[];
   private readonly ids: Uint8Array[];
   private readonly raw: Uint8Array[];
+  /** Serialises every mutation: each append runs its check, verification and push without another one interleaving at an `await`. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   private constructor(genesis: RootTrustBaseV2, genesisRaw: Uint8Array, genesisId: Uint8Array) {
     this.entries = [genesis];
@@ -95,13 +97,64 @@ export class TrustBaseHistory {
   }
 
   /**
-   * Append one entry given as its canonical bytes.
+   * Append one entry given as its canonical bytes. Appends are serialised: concurrent calls (a piggybacked entry and a fetch, or two
+   * verifications that both miss an epoch) take effect one after another, so an epoch is never stored twice.
    *
    * @param {Uint8Array} bytes Tagged entry.
    * @returns {Promise<boolean>} True when the entry was new; false for a no-op replay of a held entry.
    * @throws {TrustBaseError} `malformed` or `invalid` (refused), `gap`, or `conflict`.
    */
-  public async append(bytes: Uint8Array): Promise<boolean> {
+  public append(bytes: Uint8Array): Promise<boolean> {
+    return this.exclusive(() => this.appendExclusive(bytes));
+  }
+
+  /**
+   * @param {bigint} epoch Epoch.
+   * @returns {Uint8Array|null} The held canonical bytes of the epoch (a replay with another witness never replaces them), or null.
+   */
+  public bytes(epoch: bigint): Uint8Array | null {
+    const index = epoch - this.genesisEpoch;
+    return index >= 0n && index < BigInt(this.raw.length) ? new Uint8Array(this.raw[Number(index)]) : null;
+  }
+
+  /**
+   * @param {bigint} epoch Epoch.
+   * @returns {RootTrustBaseV2|null} The held entry of the epoch, or null when it is not held.
+   */
+  public entry(epoch: bigint): RootTrustBaseV2 | null {
+    const index = epoch - this.genesisEpoch;
+    return index >= 0n && index < BigInt(this.entries.length) ? this.entries[Number(index)] : null;
+  }
+
+  /**
+   * @returns {Promise<Uint8Array>} The whole held history as one bundle (tag 39015), to persist or ship.
+   */
+  public exportBundle(): Promise<Uint8Array> {
+    return TrustBaseResponse.encodeBundle(this.raw);
+  }
+
+  /**
+   * Append the entries of a decoded bundle (or page) in order, as one serialised mutation (no other append interleaves); a refusal leaves the
+   * history at the last good entry. An older bundle neither truncates nor rolls back the history.
+   *
+   * @param {TrustBaseResponse} bundle Decoded bundle or OK page.
+   * @returns {Promise<number>} The number of new entries.
+   * @throws {TrustBaseError} The first refusal.
+   */
+  public installBundle(bundle: TrustBaseResponse): Promise<number> {
+    return this.exclusive(async () => {
+      let added = 0;
+      for (const raw of bundle.rawEntries) {
+        if (await this.appendExclusive(raw)) {
+          added++;
+        }
+      }
+      return added;
+    });
+  }
+
+  /** {@link append} while holding the write chain. */
+  private async appendExclusive(bytes: Uint8Array): Promise<boolean> {
     const entry = RootTrustBaseV2.fromCBOR(bytes);
     const first = this.genesisEpoch;
     const tip = this.entries[this.entries.length - 1];
@@ -134,52 +187,23 @@ export class TrustBaseHistory {
       throw new TrustBaseError('invalid', `Epoch ${entry.epoch} has ${entry.rootNodes.length} members.`);
     }
     await entry.verifySuccessor(tip);
+    // everything awaited before the first mutation: the three lists change together or not at all
+    const id = await entry.entryId();
     this.entries.push(entry);
     this.raw.push(new Uint8Array(bytes));
-    this.ids.push(await entry.entryId());
+    this.ids.push(id);
     return true;
   }
 
   /**
-   * @param {bigint} epoch Epoch.
-   * @returns {Uint8Array|null} The held canonical bytes of the epoch (a replay with another witness never replaces them), or null.
-   */
-  public bytes(epoch: bigint): Uint8Array | null {
-    const index = epoch - this.genesisEpoch;
-    return index >= 0n && index < BigInt(this.raw.length) ? new Uint8Array(this.raw[Number(index)]) : null;
-  }
-
-  /**
-   * @param {bigint} epoch Epoch.
-   * @returns {RootTrustBaseV2|null} The held entry of the epoch, or null when it is not held.
-   */
-  public entry(epoch: bigint): RootTrustBaseV2 | null {
-    const index = epoch - this.genesisEpoch;
-    return index >= 0n && index < BigInt(this.entries.length) ? this.entries[Number(index)] : null;
-  }
-
-  /**
-   * @returns {Promise<Uint8Array>} The whole held history as one bundle (tag 39015), to persist or ship.
-   */
-  public exportBundle(): Promise<Uint8Array> {
-    return TrustBaseResponse.encodeBundle(this.raw);
-  }
-
-  /**
-   * Append the entries of a decoded bundle (or page) in order; a refusal leaves the history at the last good entry. An older bundle neither
-   * truncates nor rolls back the history.
+   * Run a mutation after every earlier one has settled, whatever its outcome.
    *
-   * @param {TrustBaseResponse} bundle Decoded bundle or OK page.
-   * @returns {Promise<number>} The number of new entries.
-   * @throws {TrustBaseError} The first refusal.
+   * @param {Function} task The mutation.
+   * @returns {Promise<T>} Its result.
    */
-  public async installBundle(bundle: TrustBaseResponse): Promise<number> {
-    let added = 0;
-    for (const raw of bundle.rawEntries) {
-      if (await this.append(raw)) {
-        added++;
-      }
-    }
-    return added;
+  private exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(task, task);
+    this.writes = run.catch(() => undefined);
+    return run;
   }
 }
