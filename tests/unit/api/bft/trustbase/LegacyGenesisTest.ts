@@ -27,7 +27,7 @@ describe('version-2 genesis from an on-disk JSON genesis trust base', () => {
     const genesis = RootTrustBaseV2.genesisFromLegacy(legacy);
     const history = await TrustBaseHistory.fromGenesis(genesis.toCBOR(), HexConverter.decode(goEntryId));
     expect(history.tip.epoch).toBe(1n);
-    expect(history.networkId).toBe(NetworkId.TESTNET.id);
+    expect(history.networkId).toBe(NetworkId.TESTNET);
   });
 });
 

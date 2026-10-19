@@ -10,6 +10,7 @@ import { CborMapEntry } from '../../serialization/cbor/CborMapEntry.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../util/HexConverter.js';
 import { dedent } from '../../util/StringUtils.js';
+import { areUint8ArraysEqual } from '../../util/TypedArrayUtils.js';
 import { NetworkId } from '../NetworkId.js';
 
 /**
@@ -153,13 +154,34 @@ export class UnicitySeal {
       CborDeserializer.decodeUnsignedInteger(data[4]),
       CborDeserializer.decodeNullable(data[5], CborDeserializer.decodeByteString),
       CborDeserializer.decodeByteString(data[6]),
-      new Map(
-        CborDeserializer.decodeMap(data[7]).map((entry) => [
-          CborDeserializer.decodeTextString(entry.key),
-          CborDeserializer.decodeByteString(entry.value),
-        ]),
+      // a null signature map decodes (and round-trips): such a seal is shaped but never authenticated
+      CborDeserializer.decodeNullable(
+        data[7],
+        (map) =>
+          new Map(
+            CborDeserializer.decodeMap(map).map((entry) => [
+              UnicitySeal.decodeSignerId(entry.key),
+              CborDeserializer.decodeByteString(entry.value),
+            ]),
+          ),
       ),
     );
+  }
+
+  /**
+   * A signer identifier is UTF-8 text: anything else is malformed, as natively (CBOR text with invalid UTF-8 is refused).
+   *
+   * @param {Uint8Array} data CBOR text string.
+   * @returns {string} The identifier.
+   * @throws {CborError} If the text is not valid UTF-8.
+   */
+  private static decodeSignerId(data: Uint8Array): string {
+    const text = CborDeserializer.decodeTextString(data);
+    // a lenient decode replaces invalid sequences, so only valid UTF-8 re-encodes to the same bytes
+    if (!areUint8ArraysEqual(CborSerializer.encodeTextString(text), data)) {
+      throw new CborError('Signer identifier is not valid UTF-8.');
+    }
+    return text;
   }
 
   /**

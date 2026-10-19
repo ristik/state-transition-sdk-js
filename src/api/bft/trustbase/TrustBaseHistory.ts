@@ -1,7 +1,11 @@
+import { RootTrustBase } from '../RootTrustBase.js';
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
+import { IEpochCommittee, IEpochCommitteeMember, ITrustBaseAuthority } from './TrustBaseAuthority.js';
 import { TrustBaseError } from './TrustBaseError.js';
 import { ITrustBaseResponseLimits, TrustBaseResponse } from './TrustBaseResponse.js';
+import { HexConverter } from '../../../util/HexConverter.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
+import { NetworkId } from '../../NetworkId.js';
 
 /** The latest held entry. */
 export interface ITrustBaseTip {
@@ -24,15 +28,16 @@ export const DEFAULT_BUNDLE_LIMITS: ITrustBaseResponseLimits = { maxBytes: 64 <<
  * - an entry of a held epoch with different unsigned bytes is a `conflict`; held entries are never replaced;
  * - an entry that does not directly follow the tip is a `gap`; nothing is skipped.
  */
-export class TrustBaseHistory {
+export class TrustBaseHistory implements ITrustBaseAuthority {
+  private readonly committees: (IEpochCommittee | undefined)[] = [];
   private readonly entries: RootTrustBaseV2[];
   private readonly ids: Uint8Array[];
   private readonly raw: Uint8Array[];
 
-  private constructor(genesis: RootTrustBaseV2, genesisRaw: Uint8Array, genesisId: Uint8Array) {
-    this.entries = [genesis];
-    this.raw = [genesisRaw];
-    this.ids = [genesisId];
+  private constructor(entries: RootTrustBaseV2[], raw: Uint8Array[], ids: Uint8Array[]) {
+    this.entries = entries;
+    this.raw = raw;
+    this.ids = ids;
   }
 
   /** @returns {bigint} The genesis epoch. */
@@ -40,15 +45,29 @@ export class TrustBaseHistory {
     return this.entries[0].epoch;
   }
 
-  /** @returns {number} The network identifier. */
-  public get networkId(): number {
-    return this.entries[0].networkId;
+  /** @returns {string} Network, genesis EntryID and latest EntryID: the held history in a cache or session key. */
+  public get identity(): string {
+    return JSON.stringify([
+      this.entries[0].networkId,
+      HexConverter.encode(this.ids[0]),
+      HexConverter.encode(this.ids[this.ids.length - 1]),
+    ]);
+  }
+
+  /** @returns {NetworkId} The network. */
+  public get networkId(): NetworkId {
+    return NetworkId.fromId(this.entries[0].networkId);
   }
 
   /** @returns {ITrustBaseTip} The latest held entry. */
   public get tip(): ITrustBaseTip {
     const last = this.entries.length - 1;
     return { entryId: new Uint8Array(this.ids[last]), epoch: this.entries[last].epoch };
+  }
+
+  /** @returns {bigint} The latest held epoch. */
+  public get tipEpoch(): bigint {
+    return this.entries[this.entries.length - 1].epoch;
   }
 
   /**
@@ -91,7 +110,20 @@ export class TrustBaseHistory {
     if (!areUint8ArraysEqual(id, pin)) {
       throw new TrustBaseError('genesis', 'The genesis entry does not match the pin.');
     }
-    return new TrustBaseHistory(entry, new Uint8Array(genesis), id);
+    return new TrustBaseHistory([entry], [new Uint8Array(genesis)], [id]);
+  }
+
+  /**
+   * A history holding the version-2 genesis of an on-disk JSON (version 1) genesis trust base (owner D6), see
+   * {@link RootTrustBaseV2.genesisFromLegacy}. The pin must come from the deployment's authenticated configuration, never from the file itself.
+   *
+   * @param {RootTrustBase} legacy The JSON genesis trust base.
+   * @param {Uint8Array} pin EntryID of its version-2 genesis entry.
+   * @returns {Promise<TrustBaseHistory>} The history.
+   * @throws {TrustBaseError} `invalid` or `genesis`.
+   */
+  public static fromLegacyGenesis(legacy: RootTrustBase, pin: Uint8Array): Promise<TrustBaseHistory> {
+    return TrustBaseHistory.fromGenesis(RootTrustBaseV2.genesisFromLegacy(legacy).toCBOR(), pin);
   }
 
   /**
@@ -151,6 +183,37 @@ export class TrustBaseHistory {
 
   /**
    * @param {bigint} epoch Epoch.
+   * @returns {IEpochCommittee|null} The committee of a held epoch, with its round interval, or null.
+   */
+  public committee(epoch: bigint): IEpochCommittee | null {
+    const index = epoch - this.genesisEpoch;
+    if (index < 0n || index >= BigInt(this.entries.length)) {
+      return null;
+    }
+    const i = Number(index);
+    const end = i + 1 < this.entries.length ? this.entries[i + 1].epochStartRound : null;
+    const cached = this.committees[i];
+    if (cached && cached.end === end) {
+      return cached;
+    }
+    const entry = this.entries[i];
+    const committee: IEpochCommittee = {
+      end,
+      epoch: entry.epoch,
+      id: HexConverter.encode(this.ids[i]),
+      members: new Map<string, IEpochCommitteeMember>(
+        entry.rootNodes.map((m) => [m.nodeId, { signingKey: m.signingKey, weight: m.weight }]),
+      ),
+      networkId: NetworkId.fromId(entry.networkId),
+      start: entry.epochStartRound,
+      threshold: entry.quorumThreshold,
+    };
+    this.committees[i] = committee;
+    return committee;
+  }
+
+  /**
+   * @param {bigint} epoch Epoch.
    * @returns {RootTrustBaseV2|null} The held entry of the epoch, or null when it is not held.
    */
   public entry(epoch: bigint): RootTrustBaseV2 | null {
@@ -181,5 +244,12 @@ export class TrustBaseHistory {
       }
     }
     return added;
+  }
+
+  /**
+   * @returns {TrustBaseHistory} An immutable view of the held history: later appends to this history do not change it.
+   */
+  public snapshot(): TrustBaseHistory {
+    return new TrustBaseHistory([...this.entries], [...this.raw], [...this.ids]);
   }
 }

@@ -1,4 +1,5 @@
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
+import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { CertificationData } from '../../src/api/CertificationData.js';
 import { CertificationResponse, CertificationStatus } from '../../src/api/CertificationResponse.js';
 import { IAggregatorClient } from '../../src/api/IAggregatorClient.js';
@@ -15,14 +16,14 @@ import { PredicateVerifierService } from '../../src/predicate/verification/Predi
 import { SparseMerkleTree } from '../../src/smt/radix/SparseMerkleTree.js';
 import { BitString } from '../../src/util/BitString.js';
 import { VerificationStatus } from '../../src/verification/VerificationStatus.js';
-import { createRootTrustBase } from '../utils/RootTrustBaseFixture.js';
+import { createTrustBase, createTrustBaseHistory } from '../utils/RootTrustBaseFixture.js';
 import { createUnicityCertificate, IUnicityCertificateOptions } from '../utils/UnicityCertificateFixture.js';
 
 /**
  * Test aggregator client implementation that stores all submitted certification requests in memory.
  */
 export class TestAggregatorClient implements IAggregatorClient {
-  public readonly rootTrustBase: RootTrustBase;
+  public readonly rootTrustBase: ITrustBaseAuthority;
   private certificateOptions: IUnicityCertificateOptions = {};
   private readonly predicateVerifier: PredicateVerifierService;
   /**
@@ -43,7 +44,7 @@ export class TestAggregatorClient implements IAggregatorClient {
     private readonly smt: SparseMerkleTree,
     private readonly signingService: SigningService,
   ) {
-    this.rootTrustBase = createRootTrustBase(this.signingService.publicKey);
+    this.rootTrustBase = createTrustBase(this.signingService.publicKey);
     this.predicateVerifier = PredicateVerifierService.create();
   }
 
@@ -166,5 +167,11 @@ export class TestAggregatorClient implements IAggregatorClient {
     }
 
     return CertificationResponse.create(CertificationStatus.SUCCESS);
+  }
+  /**
+   * @returns {Promise<TrustBaseHistory>} The same authority as a held history (what crosses a worker boundary).
+   */
+  public trustBaseHistory(): Promise<TrustBaseHistory> {
+    return createTrustBaseHistory(this.signingService.publicKey);
   }
 }

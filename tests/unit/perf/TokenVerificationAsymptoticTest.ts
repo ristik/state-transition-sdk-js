@@ -10,7 +10,6 @@ import { InclusionProof } from '../../../src/api/InclusionProof.js';
 import { ShardRouting } from '../../../src/consolidation/ShardRouting.js';
 import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js';
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
-import { authorityIdentityBuildCount } from '../../../src/internal/bft/authorityIdentity.js';
 import { CborDeserializer } from '../../../src/serialization/cbor/CborDeserializer.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 import { Token } from '../../../src/transaction/Token.js';
@@ -178,10 +177,11 @@ describe('token verification work', () => {
     for (const transfers of lengths) {
       const s = await scenario(0);
       const token = await consolidated(s, await s.history(transfers));
-      const before = authorityIdentityBuildCount();
-      const operation = plainVerifier(new Secp256k1SignatureVerifier()).beginOperation();
+      const operation = plainVerifier(
+        new Secp256k1SignatureVerifier(),
+      ).beginOperation() as OperationUnicityCertificateVerifier;
       expect((await token.verify(withVerifier(s.context, operation))).status).toEqual(VerificationStatus.OK);
-      builds.push(authorityIdentityBuildCount() - before);
+      builds.push(operation.stats.authorityBuilds);
     }
     // constant in the number of proofs
     expect(new Set(builds).size).toEqual(1);

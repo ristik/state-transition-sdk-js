@@ -1,5 +1,6 @@
 import { AGGREGATION_PARTITION_ID } from './bft/AggregationPartition.js';
 import { ShardId } from './bft/ShardId.js';
+import { CertificateVerificationResult } from './bft/verification/CertificateVerdict.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './bft/verification/rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { SealVerificationSession } from './bft/verification/SealVerificationSession.js';
 import { OperationUnicityCertificateVerifier } from './bft/verification/UnicityCertificateVerifier.js';
@@ -105,11 +106,13 @@ export interface INonInclusionSnapshotParts {
 
 /**
  * Why a proof was rejected, from the first check that failed, in this order: the certificate is not valid for the fixed
- * aggregation partition and the expected shard (`uc_invalid`), its seal is not from the trusted authority
- * (`authority_rejected`), or the path does not reach the root (`certificate_invalid`). A proof that does not decode is
- * not a rejection but an error of {@link NonInclusionProof.decode}.
+ * aggregation partition and the expected shard (`uc_invalid`), its seal is of an epoch newer than the latest held trust-base entry
+ * (`authority_unknown_epoch`, retryable: append the missing entries and verify again), its seal is not from the trusted authority
+ * (`authority_rejected`), or the path does not reach the root (`certificate_invalid`). A proof that does not decode is not a rejection but an
+ * error of {@link NonInclusionProof.decode}.
  */
-export type NonInclusionRejection = 'authority_rejected' | 'certificate_invalid' | 'uc_invalid';
+export type NonInclusionRejection =
+  'authority_rejected' | 'authority_unknown_epoch' | 'certificate_invalid' | 'uc_invalid';
 
 /**
  * Explicit context of {@link verifyNonInclusion}: what the application expects, never taken from the proof. The
@@ -274,7 +277,12 @@ export async function verifyNonInclusion(
       : new SealVerificationSession(trustBase, verifier.quorumRule));
   const authenticated = await session.authenticate(seal);
   if (authenticated.status !== VerificationStatus.OK) {
-    return reject(proof.stateId, 'authority_rejected', authenticated.message || 'The seal is not authenticated.');
+    const unknownEpoch = CertificateVerificationResult.verdictOf(authenticated) === 'no_entry_for_epoch';
+    return reject(
+      proof.stateId,
+      unknownEpoch ? 'authority_unknown_epoch' : 'authority_rejected',
+      authenticated.message || 'The seal is not authenticated.',
+    );
   }
   if (options.nextEpochStartRound !== undefined && seal.rootChainRoundNumber >= options.nextEpochStartRound) {
     return reject(proof.stateId, 'authority_rejected', 'The seal is at or after the end of its epoch.');

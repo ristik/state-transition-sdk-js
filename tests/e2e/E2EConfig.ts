@@ -3,8 +3,10 @@ import { readFileSync } from 'node:fs';
 import defaultTrustBaseJson from './trust-base.json' with { type: 'json' };
 import { AggregatorClient } from '../../src/api/AggregatorClient.js';
 import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { IAggregatorClient } from '../../src/api/IAggregatorClient.js';
 import { StateTransitionClient } from '../../src/StateTransitionClient.js';
+import { legacyAuthority } from '../utils/EpochListAuthority.js';
 
 /**
  * Aggregator endpoint under test. Defaults to a local aggregator; point
@@ -21,7 +23,7 @@ export const AGGREGATOR_URL = process.env.AGGREGATOR_URL ?? 'http://localhost:30
 export function createE2EContext(): {
   aggregatorClient: IAggregatorClient;
   client: StateTransitionClient;
-  trustBase: RootTrustBase;
+  trustBase: ITrustBaseAuthority;
 } {
   const aggregatorClient = new AggregatorClient(AGGREGATOR_URL, process.env.AGGREGATOR_API_KEY ?? null);
   const trustBasePath = process.env.TRUST_BASE_PATH ?? null;
@@ -29,8 +31,12 @@ export function createE2EContext(): {
   return {
     aggregatorClient,
     client: new StateTransitionClient(aggregatorClient),
-    trustBase: RootTrustBase.fromJSON(
+    trustBase: legacyAuthorityOf(
       trustBasePath ? JSON.parse(readFileSync(trustBasePath, 'utf-8')) : defaultTrustBaseJson,
     ),
   };
+}
+
+function legacyAuthorityOf(json: unknown): ITrustBaseAuthority {
+  return legacyAuthority(RootTrustBase.fromJSON(json));
 }

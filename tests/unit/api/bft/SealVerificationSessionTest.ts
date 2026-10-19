@@ -1,13 +1,20 @@
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
+import { RootTrustBaseV2 } from '../../../../src/api/bft/trustbase/RootTrustBaseV2.js';
+import { ITrustBaseAuthority } from '../../../../src/api/bft/trustbase/TrustBaseAuthority.js';
+import { TrustBaseHistory } from '../../../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { UnicitySeal } from '../../../../src/api/bft/UnicitySeal.js';
+import { CertificateVerificationResult } from '../../../../src/api/bft/verification/CertificateVerdict.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../../src/api/bft/verification/SealVerificationSession.js';
 import { VerifiedSealCache } from '../../../../src/api/bft/verification/VerifiedSealCache.js';
 import { NetworkId } from '../../../../src/api/NetworkId.js';
+import { DataHasher } from '../../../../src/crypto/hash/DataHasher.js';
+import { HashAlgorithm } from '../../../../src/crypto/hash/HashAlgorithm.js';
 import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { SigningService } from '../../../../src/crypto/secp256k1/SigningService.js';
 import { HexConverter } from '../../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../../src/verification/VerificationStatus.js';
+import { legacyAuthority } from '../../../utils/EpochListAuthority.js';
 
 const HASH = new Uint8Array(32).fill(0x11);
 
@@ -18,19 +25,21 @@ function signer(fill: number): SigningService {
 function trustBase(
   key: Uint8Array,
   options: { epoch?: string; epochStartRound?: string; networkId?: number } = {},
-): RootTrustBase {
-  return RootTrustBase.fromJSON({
-    changeRecordHash: null,
-    epoch: options.epoch ?? '0',
-    epochStartRound: options.epochStartRound ?? '0',
-    networkId: options.networkId ?? NetworkId.LOCAL.id,
-    previousEntryHash: null,
-    quorumThreshold: '1',
-    rootNodes: [{ nodeId: 'NODE', sigKey: HexConverter.encode(key), stake: '1' }],
-    signatures: {},
-    stateHash: '00',
-    version: '1',
-  });
+): ITrustBaseAuthority {
+  return legacyAuthority(
+    RootTrustBase.fromJSON({
+      changeRecordHash: null,
+      epoch: options.epoch ?? '0',
+      epochStartRound: options.epochStartRound ?? '0',
+      networkId: options.networkId ?? NetworkId.LOCAL.id,
+      previousEntryHash: null,
+      quorumThreshold: '1',
+      rootNodes: [{ nodeId: 'NODE', sigKey: HexConverter.encode(key), stake: '1' }],
+      signatures: {},
+      stateHash: '00',
+      version: '1',
+    }),
+  );
 }
 
 function seal(
@@ -176,37 +185,53 @@ describe('SealVerificationSession', () => {
   });
 
   it('verifies an operation against the authority as it was when the operation began', async () => {
-    const tb = trustBase(node.publicKey);
-    const operation = new SealVerificationSession(tb, rule);
+    const genesis = RootTrustBaseV2.create({
+      changeRecordHash: null,
+      epoch: 1n,
+      epochStartRound: 0n,
+      networkId: NetworkId.LOCAL.id,
+      previousEntryId: new Uint8Array(32),
+      quorumThreshold: 1n,
+      rootNodes: [{ nodeId: 'NODE', signingKey: node.publicKey, weight: 1n }],
+      stateHash: null,
+    });
+    const history = await TrustBaseHistory.fromGenesis(genesis.toCBOR(), await genesis.entryId());
+    const operation = new SealVerificationSession(history, rule);
     const identity = operation.identity;
-    const s = await seal(node);
+    const s = await seal(node, { epoch: 1n, round: 5n });
     expect((await operation.authenticate(s)).status).toEqual(VerificationStatus.OK);
 
-    // the caller's object changes afterwards: the signer no longer resolves under that key
-    const info = tb._rootNodes.get('NODE');
-    tb._rootNodes.delete('NODE');
-    tb._rootNodes.set('OTHER', info as NonNullable<typeof info>);
+    // the history grows afterwards: epoch 2 starts at round 3, so round 5 is no longer in epoch 1
+    const next2 = RootTrustBaseV2.create({
+      changeRecordHash: new Uint8Array(32).fill(2),
+      epoch: 2n,
+      epochStartRound: 3n,
+      networkId: NetworkId.LOCAL.id,
+      previousEntryId: await genesis.entryId(),
+      quorumThreshold: 1n,
+      rootNodes: [{ nodeId: 'NODE', signingKey: signer(2).publicKey, weight: 1n }],
+      stateHash: new Uint8Array(32).fill(1),
+    });
+    const witness = await node.sign(await new DataHasher(HashAlgorithm.SHA256).update(next2.sigBytes()).digest());
+    expect(await history.append(next2.withSignatures(new Map([['NODE', witness.encode()]])).toCBOR())).toBe(true);
 
     // verdicts and memo keys of the running operation still agree with each other (the snapshot) ...
     expect(operation.identity).toEqual(identity);
     expect((await operation.authenticate(s)).status).toEqual(VerificationStatus.OK);
     expect(operation.stats).toMatchObject({ memoHits: 1, quorumChecks: 1 });
 
-    // ... and a new operation sees the new authority, with another identity, and never inherits the old verdict
-    const next = new SealVerificationSession(tb, rule);
+    // ... and a new operation sees the new history, with another identity, and never inherits the old verdict
+    const next = new SealVerificationSession(history, rule);
     expect(next.identity).not.toEqual(identity);
     expect((await next.authenticate(s)).status).toEqual(VerificationStatus.FAIL);
   });
 
-  it('binds the inner seal cache to the actual signer lookup entries too', async () => {
+  it('binds the inner seal cache to the committee content', async () => {
     const cached = new UnicitySealQuorumSignaturesVerificationRule(verifier, new VerifiedSealCache(8));
-    const tb = trustBase(node.publicKey);
     const s = await seal(node);
-    expect((await cached.verify(tb, s)).status).toEqual(VerificationStatus.OK);
-    const info = tb._rootNodes.get('NODE');
-    tb._rootNodes.delete('NODE');
-    tb._rootNodes.set('OTHER', info as NonNullable<typeof info>);
-    expect((await cached.verify(tb, s)).status).toEqual(VerificationStatus.FAIL);
+    expect((await cached.verify(trustBase(node.publicKey), s)).status).toEqual(VerificationStatus.OK);
+    // the same epoch with another key: a different committee, never served the first verdict
+    expect((await cached.verify(trustBase(signer(2).publicKey), s)).status).toEqual(VerificationStatus.FAIL);
   });
 
   it('bounds distinct concurrent checks', async () => {
@@ -228,15 +253,17 @@ describe('SealVerificationSession', () => {
     expect(new Set([a.identity, b.identity, c.identity]).size).toEqual(3);
   });
 
-  it('serves the ordinary quorum path from the same memo as the strict path, without the authority context', async () => {
+  it('serves the ordinary quorum path from the same memo as the strict path, both against the seal epoch committee', async () => {
     const s = await seal(node);
     expect((await session.authenticate(s)).status).toEqual(VerificationStatus.OK);
     expect((await session.verifyQuorumSignaturesOnly(s)).status).toEqual(VerificationStatus.OK);
     expect(session.stats).toMatchObject({ memoHits: 1, quorumChecks: 1 });
-    // another epoch is not an authority failure for the ordinary path (original proofs may be older) but is for the strict one
-    const older = await seal(node, { epoch: 7n });
-    expect((await session.verifyQuorumSignaturesOnly(older)).status).toEqual(VerificationStatus.OK);
-    expect((await session.authenticate(older)).status).toEqual(VerificationStatus.FAIL);
+    // an epoch the history does not hold is never accepted on signatures alone: a newer one is missing (retryable) on both paths
+    const newer = await seal(node, { epoch: 7n });
+    for (const result of [await session.verifyQuorumSignaturesOnly(newer), await session.authenticate(newer)]) {
+      expect(result.status).toEqual(VerificationStatus.FAIL);
+      expect(CertificateVerificationResult.verdictOf(result)).toEqual('no_entry_for_epoch');
+    }
   });
 
   it('rejects an invalid memo size', () => {

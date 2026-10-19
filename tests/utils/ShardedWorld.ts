@@ -1,12 +1,13 @@
 import { numberToBytesBE } from '@noble/curves/utils.js';
 
-import { createRootTrustBase } from './RootTrustBaseFixture.js';
+import { TEST_EPOCH, createTrustBase, createTrustBaseHistory } from './RootTrustBaseFixture.js';
 import { BatchProofError } from '../../src/api/BatchProofError.js';
 import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
 import { PartitionView, PartitionViewLeaf } from '../../src/api/bft/PartitionView.js';
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../src/api/bft/ShardId.js';
+import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
+import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { UnicityCertificate } from '../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../src/api/bft/UnicitySeal.js';
 import { HashStep, UnicityTreeCertificate } from '../../src/api/bft/UnicityTreeCertificate.js';
@@ -101,18 +102,17 @@ export class ShardedWorld {
 
   public readonly rounds: IRound[] = [];
 
-  public readonly trustBase: RootTrustBase;
+  public readonly signer = SigningService.generate();
+  public readonly trustBase: ITrustBaseAuthority;
 
   private readonly shardRound = new Map<string, bigint>();
 
   private readonly shards = new Map<string, { leaves: Map<string, CertificationData>; smt: SparseMerkleTree }>();
 
-  private readonly signer = SigningService.generate();
-
   private time = BASE_TIME;
 
   private constructor(public readonly bits: string[]) {
-    this.trustBase = createRootTrustBase(this.signer.publicKey);
+    this.trustBase = createTrustBase(this.signer.publicKey);
     for (const b of bits) {
       this.shards.set(b, {
         leaves: new Map(),
@@ -194,6 +194,12 @@ export class ShardedWorld {
   public shardOf(stateId: StateId): string {
     return this.bits.find((b) => b === '' || shardIdFromBits(b).isPrefixOf(stateId.data)) as string;
   }
+  /**
+   * @returns {Promise<TrustBaseHistory>} The world's authority as a held history (what crosses a worker boundary).
+   */
+  public trustBaseHistory(): Promise<TrustBaseHistory> {
+    return createTrustBaseHistory(this.signer.publicKey);
+  }
 
   private async commit(changed: Set<string>): Promise<void> {
     const number = BigInt(this.rounds.length + 1);
@@ -265,7 +271,7 @@ export class ShardedWorld {
     const seal = await UnicitySeal.create(
       NetworkId.LOCAL,
       number,
-      0n,
+      BigInt(TEST_EPOCH),
       this.time,
       previous?.seal.hash ?? null,
       sealHash,

@@ -65,11 +65,18 @@ export class UnicityTreeCertificate {
   public static readonly CBOR_TAG = 39004n;
   private static readonly VERSION = 1n;
 
+  /**
+   * @param {bigint} partitionIdentifier Partition.
+   * @param {HashStep[]} _steps Path steps.
+   * @param {boolean} [nullList] The (empty) step list was encoded as CBOR null, as Go encodes a nil slice; kept so the bytes round-trip.
+   */
   public constructor(
     public readonly partitionIdentifier: bigint,
     private readonly _steps: HashStep[],
+    private readonly nullList: boolean = false,
   ) {
     this._steps = _steps.slice();
+    this.nullList = nullList && _steps.length === 0;
   }
 
   /**
@@ -106,7 +113,10 @@ export class UnicityTreeCertificate {
 
     return new UnicityTreeCertificate(
       CborDeserializer.decodeUnsignedInteger(data[1]),
-      CborDeserializer.decodeArray(data[2]).map((step) => HashStep.fromCBOR(step)),
+      (CborDeserializer.decodeNullable(data[2], (list) => CborDeserializer.decodeArray(list)) ?? []).map((step) =>
+        HashStep.fromCBOR(step),
+      ),
+      CborDeserializer.decodeNullable(data[2], () => false) === null,
     );
   }
 
@@ -121,7 +131,9 @@ export class UnicityTreeCertificate {
       CborSerializer.encodeArray(
         CborSerializer.encodeUnsignedInteger(this.version),
         CborSerializer.encodeUnsignedInteger(this.partitionIdentifier),
-        CborSerializer.encodeArray(...this._steps.map((step) => step.toCBOR())),
+        this.nullList
+          ? CborSerializer.encodeNull()
+          : CborSerializer.encodeArray(...this._steps.map((step) => step.toCBOR())),
       ),
     );
   }

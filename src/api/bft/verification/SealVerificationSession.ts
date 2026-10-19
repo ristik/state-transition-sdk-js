@@ -1,15 +1,15 @@
+import { CertificateVerificationResult } from './CertificateVerdict.js';
 import { ISealAuthenticator } from './ISealAuthenticator.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
-import { authorityIdentity } from '../../../internal/bft/authorityIdentity.js';
 import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../util/HexConverter.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { NetworkId } from '../../NetworkId.js';
 import { SdkError } from '../../SdkError.js';
-import { RootTrustBase } from '../RootTrustBase.js';
+import { ITrustBaseAuthority } from '../trustbase/TrustBaseAuthority.js';
 import { UnicitySeal } from '../UnicitySeal.js';
 
 /**
@@ -49,8 +49,9 @@ export interface ISealVerificationSessionStats {
  * and a failed or throwing check is dropped from the in-flight set.
  *
  * The memo key commits to the length-delimited complete seal encoding (signatures included, so altered signature
- * witnesses cannot hit an entry), the trust base content (network, epoch, nodes, quorum) and the verifier policy id.
- * Network, epoch and epoch start of the seal are always checked against the trust base, independently of the memo.
+ * witnesses cannot hit an entry), the held trust-base history (network, genesis and latest EntryID) and the verifier policy id.
+ * The committee of the seal's epoch, its network and root-round interval are selected and checked by the quorum rule on every miss; a memo hit
+ * implies the same history snapshot, so the same committee and interval.
  *
  * The session owns exactly one quorum rule (and so one signature verifier); it is not shared between workers or
  * operations and no verified flag can be supplied from outside.
@@ -59,17 +60,16 @@ export class SealVerificationSession implements ISealAuthenticator {
   /** Minimum seal timestamp: Thursday, April 20, 2023 6:11:24 AM GMT+00:00. */
   public static readonly GENESIS_TIME = 1681971084n;
 
-  private readonly authorityId: string;
   private readonly completed = new Map<string, VerificationResult<VerificationStatus>>();
   private readonly counters = { inFlightJoins: 0, memoHits: 0, quorumChecks: 0 };
   private readonly customRule: boolean;
   private readonly identityText: string;
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
-  private readonly source: RootTrustBase;
-  private readonly trustBase: RootTrustBase;
+  private readonly source: ITrustBaseAuthority;
+  private readonly trustBase: ITrustBaseAuthority;
 
   /**
-   * @param {RootTrustBase} trustBase Trusted authority the seals are authenticated against.
+   * @param {ITrustBaseAuthority} trustBase Held trust-base history the seals are authenticated against.
    * @param {UnicitySealQuorumSignaturesVerificationRule} quorumRule Quorum rule, runs on every distinct miss.
    * @param {object} [options] Options.
    * @param {number} [options.maxEntries] Upper bound on retained successful checks, the oldest is evicted first.
@@ -78,7 +78,7 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @throws {Error} If `maxEntries` is not a positive integer.
    */
   public constructor(
-    trustBase: RootTrustBase,
+    trustBase: ITrustBaseAuthority,
     private readonly quorumRule: UnicitySealQuorumSignaturesVerificationRule,
     private readonly options: {
       readonly maxEntries?: number;
@@ -101,8 +101,7 @@ export class SealVerificationSession implements ISealAuthenticator {
     this.trustBase = trustBase.snapshot();
     // a customized rule is not wrapped: it is asked about the caller's own object and its verdicts are never remembered
     this.customRule = Object.getPrototypeOf(quorumRule) !== UnicitySealQuorumSignaturesVerificationRule.prototype;
-    this.authorityId = authorityIdentity(this.trustBase);
-    this.identityText = JSON.stringify([options.policy ?? '', this.authorityId]);
+    this.identityText = JSON.stringify([options.policy ?? '', this.trustBase.identity]);
   }
 
   /**
@@ -113,9 +112,9 @@ export class SealVerificationSession implements ISealAuthenticator {
   }
 
   /**
-   * @returns {RootTrustBase} The trust base object this session was created for (its authority is a snapshot).
+   * @returns {ITrustBaseAuthority} The trust-base object this session was created for (its authority is a snapshot).
    */
-  public get sourceTrustBase(): RootTrustBase {
+  public get sourceTrustBase(): ITrustBaseAuthority {
     return this.source;
   }
 
@@ -131,31 +130,6 @@ export class SealVerificationSession implements ISealAuthenticator {
    */
   public get trustBaseNetwork(): NetworkId {
     return this.trustBase.networkId;
-  }
-
-  /**
-   * Check the seal belongs to the authority the trust base represents: structure, network, epoch and epoch start.
-   * Quorum signatures are NOT checked.
-   *
-   * @param {RootTrustBase} trustBase Trusted authority.
-   * @param {UnicitySeal} seal Seal.
-   * @returns {string|null} Failure description or null if the seal is within the authority.
-   */
-  public static checkAuthority(trustBase: RootTrustBase, seal: UnicitySeal): string | null {
-    const structure = SealVerificationSession.checkSealStructure(seal);
-    if (structure !== null) {
-      return structure;
-    }
-    if (!seal.networkId.equals(trustBase.networkId)) {
-      return `Seal is of network ${seal.networkId.id}, trust base is of network ${trustBase.networkId.id}.`;
-    }
-    if (seal.epoch !== trustBase.epoch) {
-      return `Seal is of epoch ${seal.epoch}, trust base is of epoch ${trustBase.epoch}.`;
-    }
-    if (seal.rootChainRoundNumber < trustBase.epochStartRound) {
-      return `Seal round ${seal.rootChainRoundNumber} is before the start of epoch ${trustBase.epoch} (round ${trustBase.epochStartRound}).`;
-    }
-    return null;
   }
 
   /**
@@ -199,23 +173,24 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
   public authenticate(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
-    const failure = SealVerificationSession.checkAuthority(this.trustBase, seal);
+    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(seal);
+    if (malformed !== null) {
+      return Promise.resolve(new CertificateVerificationResult('SealAuthority', 'malformed', malformed));
+    }
+    const failure = SealVerificationSession.checkSealStructure(seal);
     if (failure !== null) {
-      return Promise.resolve(new VerificationResult('SealAuthority', VerificationStatus.FAIL, failure));
+      return Promise.resolve(new CertificateVerificationResult('SealAuthority', 'invalid', failure));
     }
 
     return this.verifyQuorumSignaturesOnly(seal);
   }
 
   /**
-   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Checks only the quorum signatures of
-   * the seal against the session's trust base: no structure, network, epoch or epoch start checks. Ordinary token
-   * verification needs exactly this, because it has always accepted original proofs' seals on signatures alone
-   * (including seals of earlier epochs and fixtures without a timestamp). Results are memoized and in-flight
-   * deduplicated like `authenticate`'s, in a memo shared with it, so a distinct complete seal is checked once.
-   * The structure check is deliberately not applied here, as it would reject seals the SDK has always accepted; the
-   * shared memo is still safe because `authenticate` runs its structure and authority checks before every memo lookup,
-   * so a quorum-only success can never admit a seal through the strict path.
+   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Runs only the quorum rule: the seal's epoch committee, network,
+   * round interval and signatures (see `UnicitySealQuorumSignaturesVerificationRule`), without the seal structure check, which the certificate
+   * verifier applies itself (`UnicityCertificateStructureRule`). Results are memoized and in-flight deduplicated like `authenticate`'s, in a memo
+   * shared with it, so a distinct complete seal is checked once; the shared memo is safe because `authenticate` runs its format and structure checks
+   * before every memo lookup.
    *
    * @internal
    * @param {UnicitySeal} seal Seal.

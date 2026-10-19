@@ -1,5 +1,6 @@
 import { IWorker } from './IWorker.js';
-import { RootTrustBase } from '../../../api/bft/RootTrustBase.js';
+import { TrustBaseHistory } from '../../../api/bft/trustbase/TrustBaseHistory.js';
+import { CertificateVerificationResult } from '../../../api/bft/verification/CertificateVerdict.js';
 import { UnicityCertificateVerifier } from '../../../api/bft/verification/UnicityCertificateVerifier.js';
 import { DataHash } from '../../../crypto/hash/DataHash.js';
 import { beginOperationContext } from '../../../internal/OperationContext.js';
@@ -26,12 +27,20 @@ export interface IEncodedTransferTransaction {
 }
 
 /**
- * The message posted to a worker: the transfers of one batch and the trust base serialised
- * as an opaque JSON blob for `RootTrustBase.fromJSON`.
+ * The held trust-base history as it crosses the worker boundary: the complete history as one bundle (tag 39015) and the genesis EntryID it is
+ * loaded against. The worker reloads it through the single append path.
+ */
+export interface ITransferTransactionVerificationTrustBase {
+  readonly bundle: Uint8Array;
+  readonly pin: Uint8Array;
+}
+
+/**
+ * The message posted to a worker: the transfers of one batch and the held trust-base history.
  */
 export interface ITransferTransactionVerificationRequest {
   readonly transfers: readonly IEncodedTransferTransaction[];
-  readonly trustBase: unknown;
+  readonly trustBase: ITransferTransactionVerificationTrustBase;
 }
 
 /**
@@ -40,6 +49,8 @@ export interface ITransferTransactionVerificationRequest {
 export interface ITransferTransactionVerificationResult {
   readonly index: number;
   readonly message: string;
+  /** For a certificate of an epoch the worker's history does not hold: that epoch and the latest held one (decimal strings). */
+  readonly missingEpoch?: { readonly epoch: string; readonly latest: string };
   readonly status: VerificationStatus;
 }
 
@@ -91,7 +102,12 @@ function toValidatedBatchResults(
       throw new Error('Invalid worker response: result is not an object.');
     }
 
-    const { index, message, status } = result as { index?: unknown; message?: unknown; status?: unknown };
+    const { index, message, missingEpoch, status } = result as {
+      index?: unknown;
+      message?: unknown;
+      missingEpoch?: unknown;
+      status?: unknown;
+    };
     if (typeof index !== 'number' || !Number.isInteger(index)) {
       throw new Error('Invalid worker response: transfer index is not an integer.');
     }
@@ -106,6 +122,16 @@ function toValidatedBatchResults(
 
     if (typeof message !== 'string') {
       throw new Error(`Invalid worker response: message of transfer ${index} is not a string.`);
+    }
+
+    if (
+      missingEpoch !== undefined &&
+      (typeof missingEpoch !== 'object' ||
+        missingEpoch === null ||
+        !/^[0-9]+$/.test(String((missingEpoch as { epoch?: unknown }).epoch)) ||
+        !/^[0-9]+$/.test(String((missingEpoch as { latest?: unknown }).latest)))
+    ) {
+      throw new Error(`Invalid worker response: missing epoch of transfer ${index} is malformed.`);
     }
 
     if (status !== VerificationStatus.OK && status !== VerificationStatus.FAIL) {
@@ -194,7 +220,7 @@ export abstract class TransferTransactionVerifier {
     request: ITransferTransactionVerificationRequest,
   ): Promise<TransferTransactionVerificationResponse> {
     try {
-      const trustBase = RootTrustBase.fromJSON(request.trustBase);
+      const trustBase = await TrustBaseHistory.fromBundle(request.trustBase.bundle, request.trustBase.pin);
 
       // one operation per request: the transfers of a batch share certificates and seals
       const unicityCertificateVerifier =
@@ -208,7 +234,13 @@ export abstract class TransferTransactionVerifier {
           trustBase,
           unicityCertificateVerifier,
         });
-        results.push({ index: transfer.index, message: result.message, status: result.status });
+        const missing = CertificateVerificationResult.findMissingEpoch(result)?.missing ?? null;
+        results.push({
+          index: transfer.index,
+          message: result.message,
+          ...(missing ? { missingEpoch: { epoch: missing.epoch.toString(), latest: missing.latest.toString() } } : {}),
+          status: result.status,
+        });
       }
 
       return results;
@@ -350,7 +382,15 @@ export abstract class WorkerTokenVerifier implements ITokenVerifier {
   public async verify(token: Token, outer: IVerificationContext): Promise<VerificationResult<VerificationStatus>> {
     // the genesis checks of the token and of every nested token run in one operation on this thread
     const context = beginOperationContext(outer);
-    const trustBaseJson = context.trustBase.toJSON();
+    if (!(context.trustBase instanceof TrustBaseHistory)) {
+      throw new TypeError(
+        'Worker verification needs the trust base as a TrustBaseHistory, which crosses the worker boundary as a bundle.',
+      );
+    }
+    const trustBase: ITransferTransactionVerificationTrustBase = {
+      bundle: await context.trustBase.exportBundle(),
+      pin: await context.trustBase.entry(context.trustBase.genesisEpoch)!.entryId(),
+    };
     const pending: Token[] = [token];
     const collectNestedToken = (nested: Token): void => {
       pending.push(nested);
@@ -391,7 +431,7 @@ export abstract class WorkerTokenVerifier implements ITokenVerifier {
                   bytes: encodeSelfContained(transactions[index]),
                   index,
                 })),
-                trustBase: trustBaseJson,
+                trustBase,
               })
               .then((batch) => toValidatedBatchResults(batch, indices)),
           ),
@@ -403,6 +443,20 @@ export abstract class WorkerTokenVerifier implements ITokenVerifier {
               'CertifiedTransferTransactionVerificationRule',
               result.status,
               result.message,
+              result.missingEpoch
+                ? [
+                    new CertificateVerificationResult(
+                      'WorkerCertificateVerification',
+                      'no_entry_for_epoch',
+                      result.message,
+                      [],
+                      {
+                        epoch: BigInt(result.missingEpoch.epoch),
+                        latest: BigInt(result.missingEpoch.latest),
+                      },
+                    ),
+                  ]
+                : [],
             );
           }
         }

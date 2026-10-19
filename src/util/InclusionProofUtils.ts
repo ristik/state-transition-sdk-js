@@ -1,4 +1,4 @@
-import { RootTrustBase } from '../api/bft/RootTrustBase.js';
+import { ITrustBaseAuthority } from '../api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { ILongPollOptions } from '../api/ILongPollOptions.js';
 import { InclusionProof } from '../api/InclusionProof.js';
@@ -180,7 +180,7 @@ function isSignalLike(value: unknown): value is AbortSignal {
  * answers `unknown`.
  *
  * @param {StateTransitionClient} client Client used to fetch inclusion proofs.
- * @param {RootTrustBase} trustBase Root trust base used to verify the inclusion certificate.
+ * @param {ITrustBaseAuthority} trustBase Held trust-base history (verifies each certificate against its own epoch's committee).
  * @param {PredicateVerifierService} predicateVerifier Verifier used to check the transaction predicate.
  * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
@@ -196,7 +196,7 @@ function isSignalLike(value: unknown): value is AbortSignal {
  */
 export function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: RootTrustBase,
+  trustBase: ITrustBaseAuthority,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,
@@ -206,7 +206,7 @@ export function waitInclusionProof(
  * @deprecated Positional form, kept (default budget 15 s, no status hints, they need the options form): pass
  *   `{ signal, intervalMs }` instead.
  * @param {StateTransitionClient} client Client used to fetch inclusion proofs.
- * @param {RootTrustBase} trustBase Root trust base used to verify the inclusion certificate.
+ * @param {ITrustBaseAuthority} trustBase Held trust-base history (verifies each certificate against its own epoch's committee).
  * @param {PredicateVerifierService} predicateVerifier Verifier used to check the transaction predicate.
  * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
@@ -216,7 +216,7 @@ export function waitInclusionProof(
  */
 export function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: RootTrustBase,
+  trustBase: ITrustBaseAuthority,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,
@@ -225,7 +225,7 @@ export function waitInclusionProof(
 ): Promise<InclusionProof>;
 export async function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: RootTrustBase,
+  trustBase: ITrustBaseAuthority,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,

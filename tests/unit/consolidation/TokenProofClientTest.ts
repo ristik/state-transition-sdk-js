@@ -2,6 +2,7 @@ import { BatchProofError } from '../../../src/api/BatchProofError.js';
 import { PartitionView } from '../../../src/api/bft/PartitionView.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../src/api/bft/UnicitySeal.js';
+import { CertificateVerificationResult } from '../../../src/api/bft/verification/CertificateVerdict.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { CertificationData } from '../../../src/api/CertificationData.js';
@@ -18,7 +19,6 @@ import { TokenProofClient } from '../../../src/consolidation/TokenProofClient.js
 import { Secp256k1SignatureVerifier } from '../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { Token } from '../../../src/transaction/Token.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
-import { VerificationResult } from '../../../src/verification/VerificationResult.js';
 import { VerificationStatus } from '../../../src/verification/VerificationStatus.js';
 import { IScenario, scenario, NestedTokenJustification } from '../../utils/ConsolidationScenario.js';
 import { shardIdFromBits } from '../../utils/ShardedWorld.js';
@@ -671,7 +671,7 @@ describe('TokenProofClient', () => {
           // a policy keyed on the identity of the trust base object
           return args[0] === this.pinned()
             ? super.verify(...args)
-            : Promise.resolve(new VerificationResult('Pinned', VerificationStatus.FAIL));
+            : Promise.resolve(new CertificateVerificationResult('Pinned', 'invalid'));
         }
       }
       const pin: { trustBase?: unknown } = {};

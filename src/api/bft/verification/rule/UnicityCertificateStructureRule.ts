@@ -14,12 +14,16 @@ import { SealVerificationSession } from '../SealVerificationSession.js';
 export class UnicityCertificateStructureRule {
   /**
    * @param {UnicityCertificate} unicityCertificate Certificate to check.
+   * @param {bigint} [partitionId] Expected partition, the aggregation partition by default.
    * @returns {string|null} Failure description, or `null` if the certificate is acceptable.
    */
-  public static failure(unicityCertificate: UnicityCertificate): string | null {
+  public static failure(
+    unicityCertificate: UnicityCertificate,
+    partitionId: bigint = AGGREGATION_PARTITION_ID,
+  ): string | null {
     try {
-      if (unicityCertificate.unicityTreeCertificate.partitionIdentifier !== AGGREGATION_PARTITION_ID) {
-        return `The certificate is of partition ${unicityCertificate.unicityTreeCertificate.partitionIdentifier}, expected ${AGGREGATION_PARTITION_ID}.`;
+      if (unicityCertificate.unicityTreeCertificate.partitionIdentifier !== partitionId) {
+        return `The certificate is of partition ${unicityCertificate.unicityTreeCertificate.partitionIdentifier}, expected ${partitionId}.`;
       }
       const inputRecordFailure = unicityCertificate.inputRecord.structureFailure();
       if (inputRecordFailure !== null) {
@@ -41,10 +45,14 @@ export class UnicityCertificateStructureRule {
 
   /**
    * @param {UnicityCertificate} unicityCertificate Certificate to check.
+   * @param {bigint} [partitionId] Expected partition, the aggregation partition by default.
    * @returns {VerificationResult<VerificationStatus>} Verification outcome.
    */
-  public static verify(unicityCertificate: UnicityCertificate): VerificationResult<VerificationStatus> {
-    const failure = UnicityCertificateStructureRule.failure(unicityCertificate);
+  public static verify(
+    unicityCertificate: UnicityCertificate,
+    partitionId: bigint = AGGREGATION_PARTITION_ID,
+  ): VerificationResult<VerificationStatus> {
+    const failure = UnicityCertificateStructureRule.failure(unicityCertificate, partitionId);
     return failure === null
       ? new VerificationResult('UnicityCertificateStructureRule', VerificationStatus.OK)
       : new VerificationResult('UnicityCertificateStructureRule', VerificationStatus.FAIL, failure);

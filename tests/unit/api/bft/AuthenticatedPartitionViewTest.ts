@@ -9,12 +9,14 @@ import {
 import { PartitionView } from '../../../../src/api/bft/PartitionView.js';
 import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../../../src/api/bft/ShardId.js';
+import { ITrustBaseAuthority } from '../../../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { UnicityCertificate } from '../../../../src/api/bft/UnicityCertificate.js';
 import { UnicityTreeCertificate } from '../../../../src/api/bft/UnicityTreeCertificate.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { SealVerificationSession } from '../../../../src/api/bft/verification/SealVerificationSession.js';
 import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { HexConverter } from '../../../../src/util/HexConverter.js';
+import { legacyAuthority } from '../../../utils/EpochListAuthority.js';
 
 const DIR = join(process.cwd(), 'tests/fixtures/uc-consolidation/partition-view/v1');
 
@@ -34,10 +36,14 @@ function vector(name: string): IVector {
   return JSON.parse(readFileSync(join(DIR, `assembly-${name}.json`), 'utf8')) as IVector;
 }
 
-function trustBase(v: IVector): RootTrustBase {
+function trustBase(v: IVector, epoch: number = v.epoch): ITrustBaseAuthority {
+  return legacyAuthority(trustBaseOf(v, epoch));
+}
+
+function trustBaseOf(v: IVector, epoch: number): RootTrustBase {
   return RootTrustBase.fromJSON({
     changeRecordHash: null,
-    epoch: String(v.epoch),
+    epoch: String(epoch),
     epochStartRound: String(v.epochStartRound),
     networkId: v.networkId,
     previousEntryHash: null,
@@ -108,7 +114,7 @@ describe('AuthenticatedPartitionView', () => {
 
   it('does not authenticate when the tree matches but the anchored authority does not', async () => {
     const other = new SealVerificationSession(
-      RootTrustBase.fromJSON({ ...trustBase(v).toJSON(), epoch: String(v.epoch + 1) }),
+      trustBase(v, v.epoch + 1),
       new UnicitySealQuorumSignaturesVerificationRule(verifier),
     );
     await expect(new PartitionViewAuthenticator(other).authenticate(viewBytes, ucBytes)).rejects.toMatchObject({

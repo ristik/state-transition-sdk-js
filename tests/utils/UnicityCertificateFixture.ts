@@ -1,6 +1,7 @@
 import { numberToBytesBE } from '@noble/curves/utils.js';
 
 import { REFERENCE_TIME } from './ReferenceTime.js';
+import { TEST_EPOCH } from './RootTrustBaseFixture.js';
 import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
 import { ShardId } from '../../src/api/bft/ShardId.js';
@@ -76,7 +77,7 @@ export async function createUnicityCertificate(
   const seal = await UnicitySeal.create(
     NetworkId.LOCAL,
     options.sealRound ?? 1n,
-    0n,
+    BigInt(TEST_EPOCH),
     options.sealTimestamp ?? timestamp,
     null,
     unicitySealHash.data,

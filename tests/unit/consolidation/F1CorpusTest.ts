@@ -231,6 +231,13 @@ const NOT_APPLICABLE = new Set([
   'negative/rmin-unknown',
 ]);
 
+/**
+ * Seal acceptance follows the native B1 rule (tests/fixtures/b1-seals/v1): a seal whose signature map is null decodes and is refused as not
+ * authenticated (B1 `seal.sigs-null`: shaped but false), where the F1 corpus expects a decoding failure. Both refuse the input; only the class
+ * differs.
+ */
+const B1_OUTCOME_OVERRIDES: Record<string, string> = { 'negative/seal-signatures-missing': 'unauthenticated' };
+
 describe('F1 negative cases', () => {
   const names = negativeCaseNames();
 
@@ -272,7 +279,7 @@ describe('F1 negative cases', () => {
     }
 
     const run = await execute(c);
-    expect(observe(run)).toEqual(outcome);
+    expect(observe(run)).toEqual(B1_OUTCOME_OVERRIDES[name] ?? outcome);
 
     // the aggregator's state status details are reported under their own names, retryability as the contract says
     const detail = c.expected.rpc?.detail;

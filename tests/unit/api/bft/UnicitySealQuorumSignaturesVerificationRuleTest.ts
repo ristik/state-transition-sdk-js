@@ -5,7 +5,7 @@ import { NetworkId } from '../../../../src/api/NetworkId.js';
 import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Secp256k1SignatureVerifier.js';
 import { SigningService } from '../../../../src/crypto/secp256k1/SigningService.js';
 import { VerificationStatus } from '../../../../src/verification/VerificationStatus.js';
-import { createRootTrustBase } from '../../../utils/RootTrustBaseFixture.js';
+import { createTrustBase, TEST_EPOCH } from '../../../utils/RootTrustBaseFixture.js';
 
 /** Seal body shared by every seal built here, so their content hashes match. */
 const SEAL_CONTENT_HASH = new Uint8Array(32).fill(0x11);
@@ -15,7 +15,15 @@ function signingServiceFrom(fill: number): SigningService {
 }
 
 function sealSignedBy(signingService: SigningService): Promise<UnicitySeal> {
-  return UnicitySeal.create(NetworkId.LOCAL, 0n, 0n, 0n, null, SEAL_CONTENT_HASH, new Map([['NODE', signingService]]));
+  return UnicitySeal.create(
+    NetworkId.LOCAL,
+    0n,
+    BigInt(TEST_EPOCH),
+    0n,
+    null,
+    SEAL_CONTENT_HASH,
+    new Map([['NODE', signingService]]),
+  );
 }
 
 describe('UnicitySealQuorumSignaturesVerificationRule', () => {
@@ -33,7 +41,7 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
   });
 
   it('verifies a quorum seal, then serves the repeat from the memo', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(rootNode);
 
     const first = await rule.verify(trustBase, seal);
@@ -47,7 +55,7 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
 
   it('verifies every seal afresh when constructed without a cache', async () => {
     const uncached = new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier);
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(rootNode);
 
     expect((await uncached.verify(trustBase, seal)).status).toEqual(VerificationStatus.OK);
@@ -61,7 +69,7 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
   // Keyed on it, this forged seal would be served a cached OK and its bogus
   // signatures would never be checked.
   it('rejects a seal whose signatures were replaced, even after the genuine one was memoised', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const genuine = await sealSignedBy(rootNode);
     const forged = await sealSignedBy(impostor);
 
@@ -72,27 +80,20 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
     expect((await rule.verify(trustBase, forged)).status).toEqual(VerificationStatus.FAIL);
   });
 
-  // The trust base is keyed by content, not identity: `_rootNodes` is an
-  // exposed Map and `readonly` stops only reassignment, so an in-place edit of
-  // the root keys must invalidate the memo rather than keep hitting a verdict
-  // computed under the old ones.
-  it('re-verifies after the trust base is mutated in place', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+  // The memo is keyed by the committee content (its EntryID in a held history), never by object identity: another key for the same epoch is
+  // another committee and never hits a verdict computed under the first one.
+  it('re-verifies under an authority with other keys', async () => {
     const seal = await sealSignedBy(rootNode);
 
-    expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.OK);
+    expect((await rule.verify(createTrustBase(rootNode.publicKey), seal)).status).toEqual(VerificationStatus.OK);
     expect(verifySpy).toHaveBeenCalledTimes(1);
 
-    // Swap the root node's key for one that did not sign this seal, mutating
-    // the exposed Map in place exactly as an application could.
-    trustBase._rootNodes.set('NODE', createRootTrustBase(impostor.publicKey)._rootNodes.get('NODE')!);
-
-    expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(2);
+    expect((await rule.verify(createTrustBase(impostor.publicKey), seal)).status).toEqual(VerificationStatus.FAIL);
+    expect(verifySpy).toHaveBeenCalledTimes(5); // the impostor's key: every recovery byte is tried
   });
 
   it('keeps separate rules from sharing a memo', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(rootNode);
 
     await rule.verify(trustBase, seal);
@@ -107,24 +108,25 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
   });
 
   it('does not memoise a seal that fails to reach quorum', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(impostor);
 
+    // a signature under another key fails for every recovery byte: four recoveries per check
     expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(1);
+    expect(verifySpy).toHaveBeenCalledTimes(4);
 
     expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(2);
+    expect(verifySpy).toHaveBeenCalledTimes(8);
   });
 
   it('evicts the oldest entry once the cache is full', async () => {
-    const trustBase = createRootTrustBase(rootNode.publicKey);
+    const trustBase = createTrustBase(rootNode.publicKey);
     const small = new UnicitySealQuorumSignaturesVerificationRule(signatureVerifier, new VerifiedSealCache(1));
     const first = await sealSignedBy(rootNode);
     const second = await UnicitySeal.create(
       NetworkId.LOCAL,
       1n,
-      0n,
+      BigInt(TEST_EPOCH),
       0n,
       null,
       SEAL_CONTENT_HASH,
