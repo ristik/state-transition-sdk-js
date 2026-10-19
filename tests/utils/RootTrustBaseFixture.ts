@@ -62,7 +62,8 @@ export function createLegacyTrustBaseJson(publicKey: Uint8Array): object {
     quorumThreshold: '1',
     rootNodes: [{ nodeId: 'NODE', sigKey: HexConverter.encode(publicKey), stake: '1' }],
     signatures: {},
-    stateHash: '00',
+    // empty, as the published genesis files: an absent hash (a 1-byte hash is not a valid version-2 genesis)
+    stateHash: '',
     version: '1',
   };
 }
