@@ -331,7 +331,7 @@ func main() {
 	w := &world{genesis: g, pin: gid, chain: [][]byte{enc(g), enc(e2), enc(e3), enc(e4)}}
 	f := &file{
 		Format:    "utb-vectors/v1",
-		Generator: "briefs/tools/utb-vectors (ristik/bft-core a20708b64a1c, ristik/bft-go-base f1fc4e5784b3 = bft-go-base#3 head)",
+		Generator: "briefs/tools/utb-vectors (ristik/bft-core a20708b64a1c, ristik/bft-go-base 8890ddce75de = bft-go-base#3 merge)",
 		Notes: []string{
 			"Entries are RootTrustBaseV2 (tag 39000, version 2). EntryID = SHA-256(sigBytes), sigBytes = the entry with signatures encoded as CBOR null.",
 			"Witness signatures: exactly 65 bytes r||s||v, 1 <= r,s < n, low-S, v in 0..3, the recovered key must equal the member key (bft-go-base#2).",
