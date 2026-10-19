@@ -12,7 +12,7 @@ const flatten = (text: string): string => text.replace(/\n\s*(?:\*|>)\s?/g, ' ')
 
 describe('the non-inclusion warning', () => {
   it.each([
-    ['README.md', 1],
+    ['unicity-token-protocol-spec.md', 1],
     ['src/api/NonInclusionVerification.ts', 3],
     ['src/api/NonInclusionProof.ts', 1],
     ['src/api/INonInclusionAggregatorClient.ts', 2],
@@ -22,7 +22,7 @@ describe('the non-inclusion warning', () => {
 
   it('is shown with the policy example on the entry points of the verification', () => {
     const example = "if (r.verdict !== 'absent_at_snapshot') throw new Error('No verified absence');";
-    expect(read('README.md')).toContain(example);
+    expect(read('unicity-token-protocol-spec.md')).toContain(example);
     expect(read('src/api/NonInclusionVerification.ts')).toContain(example);
   });
 });

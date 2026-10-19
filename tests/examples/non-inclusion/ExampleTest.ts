@@ -15,10 +15,10 @@ const ROOT = join(process.cwd(), 'tests/fixtures/non-inclusion/v2');
 const read = (path: string): string => readFileSync(join(ROOT, path), 'utf8');
 
 /**
- * The policy example of the README, run after verification with a checkpoint obtained independently of the proof and of
+ * The policy example of the API reference (unicity-token-protocol-spec.md, 12.4), run after verification with a checkpoint obtained independently of the proof and of
  * the server response. Absence holds at the returned snapshot only.
  */
-describe('non-inclusion example (README)', () => {
+describe('non-inclusion example (API reference)', () => {
   const golden = JSON.parse(read('cases/historical-snapshot-absent.json')) as { query: string; wrapper: string };
   const trustedContext = {
     trustBase: RootTrustBase.fromJSON(JSON.parse(read('authority/trust-base.json'))),
