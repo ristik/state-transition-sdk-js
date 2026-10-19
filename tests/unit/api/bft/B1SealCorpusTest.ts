@@ -36,6 +36,12 @@ describe('B1 seal corpus: certificate acceptance equals the native any-age verif
     expect(corpus.format).toBe('b1-seal-vectors/v1');
   });
 
+  // B1 requires the certificate to re-encode byte for byte (b1ref decodeUC, ErrReencode): every certificate that decodes must do so here too,
+  // including a null path collection, which stays null
+  it.each(corpus.cases.filter((c) => c.verdict !== 'malformed'))('$id re-encodes byte for byte', (c) => {
+    expect(HexConverter.encode(UnicityCertificate.fromCBOR(HexConverter.decode(c.uc)).toCBOR())).toBe(c.uc);
+  });
+
   it.each(corpus.cases)('$id ($verdict $b1Sentinel)', async (c) => {
     let verdict: string;
     let detail = '';
