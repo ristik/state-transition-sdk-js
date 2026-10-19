@@ -471,3 +471,73 @@ Public keys use the 33-byte compressed secp256k1 representation. `Signature.enco
 `SigningService.sign(hash)` signs the supplied `DataHash` bytes without hashing them again. The caller constructs the protocol-specific digest first: for `SignaturePredicateUnlockScript.create`, this is SHA-256 over the CBOR array of the source-state hash bytes and transaction hash bytes. Verification recovers the public key from the digest and recoverable signature, checks it against the expected key, and rejects high-S signatures.
 
 The implementation is authoritative: see [Signature](./src/crypto/secp256k1/Signature.ts), [SigningService](./src/crypto/secp256k1/SigningService.ts), [signature verification](./src/crypto/secp256k1/Secp256k1SignatureVerifier.ts), and [signature predicate unlocking](./src/predicate/builtin/SignaturePredicateUnlockScript.ts).
+
+## 12. TypeScript SDK API Reference
+
+This section documents SDK behaviour that the README only summarizes. The source and its TSDoc comments are authoritative.
+
+### 12.1 Waiting for Inclusion Proofs
+
+`waitInclusionProof(client, trustBase, predicateVerifier, unicityCertificateVerifier, transaction, options?)` polls the aggregator until it returns a proof for the transaction, verifies the proof and returns it. The options object accepts `signal`, `intervalMs` (default 1000), `statusHints` (default `true`) and `unknownGraceMs`. The positional form `(signal, interval)` from SDK 3.0 is still accepted and behaves as in 3.0.
+
+#### Status hints
+
+`getInclusionProof(stateId, { includeStatusHint: true })` asks the aggregator for its status of the request; the wire parameter is `includeStatus`. An aggregator that supports it answers `{ proof, status }`. `proof` is the same value as before and `response.statusHint` is one of `included`, `pending`, `expired` or `unknown`. It is `null` when the server answers with a plain string (servers without the feature) or sends a value this SDK does not know. Without the option, the request and the result are unchanged.
+
+The hint is unauthenticated. It is not signed, not part of any proof, and does not affect how a proof, token or transaction is verified; a proof that is present is verified regardless of the hint. `expired` and `unknown` are not proofs of absence and must not be used to decide that a state is unspent. For this reason the field is named `statusHint`, and `CertificationResponse.status` remains the authoritative result of a submission.
+
+With `statusHints` enabled, `waitInclusionProof` requests the hint on every poll and acts on it:
+
+- `pending`: keep waiting.
+- `expired`: fail at once with `InclusionProofExpiredError`.
+- `unknown`: fail with `InclusionProofUnknownError` once the answer has persisted for the grace period (`unknownGraceMs`, default two intervals). A wait that starts right after submission can reach an aggregator instance that has not seen the request yet.
+
+`statusHints: false` restores the 3.0 behaviour: no hint is requested and the wait ends only with a proof, an error or the signal.
+
+#### Errors and resubmission
+
+All waiting errors extend `InclusionProofWaitError`, with `code` (`expired`, `unknown` or `conflict`), `resubmittable` and `stateId`. The hint-based errors also extend `InclusionProofStatusError`, which carries the literal `status`.
+
+After `expired` or `unknown`, the same signed request may be submitted again. Resubmitting a request that is still pending does not create a second leaf. A MongoDB-backed queue rejects the copy with a duplicate key error on the state ID; a Redis-backed queue accepts and drops it. The duplicate key error only says that some request for this state ID is queued, not that it is the caller's: a different transaction for the same state is rejected the same way, and the queued one is the one that gets certified. `submitCertificationRequest` therefore returns `STATE_ID_QUEUED` for that error, with `isAccepted === false`. The classification matches the server's error text for the `stateId` index. The caller should wait for the proof and compare it with its own transaction.
+
+`waitInclusionProof` throws `InclusionProofConflictError` (`resubmittable === false`) when the proof served for the state certifies a different request. The error's `unverifiedInclusionProof` holds that proof, which has not been authenticated. `ALREADY_SUBMITTED` (`isAccepted === true`) is reported only when the server has compared the queued request with the submitted one; the SDK does not infer it. Other errors, including other internal server errors, are thrown as before.
+
+#### Changes from SDK 3.0
+
+- `waitInclusionProof` can reject earlier, with `InclusionProofExpiredError` or `InclusionProofUnknownError`. `statusHints: false` disables this.
+- `CertificationStatus` has two new members, `STATE_ID_QUEUED` and `ALREADY_SUBMITTED`. Exhaustive `switch` statements over it need new cases.
+- `submitCertificationRequest` returns `STATE_ID_QUEUED` for the duplicate key error described above instead of throwing.
+
+### 12.2 Proof Consolidation
+
+`TokenProofClient.consolidate(token, { timeoutMs, signal })` replaces the proofs of a token's outer transaction history with proofs that share one unicity seal, so that a verifier which authenticates the seal once can reuse the result for every transaction. This matters where certificate verification is expensive, for example in a smart contract or a zkVM guest.
+
+Properties:
+
+- It is only called explicitly. No mint, transfer, send, receive, import, export, serialization or verification call runs it, and there is no automatic policy.
+- It needs no signing key, submits nothing and does not modify its input.
+- It requires `get_inclusion_proofs.v1` on every participating shard and a trusted `ShardRouting`. A client without the batch method yields `unavailable`; single-proof requests are not used as a substitute.
+- The result is either `consolidated`, with a newly verified token, or `unavailable`, with a reason and a retry hint. Cancellation, deadline, transport, server, response and integrity failures are thrown as `ConsolidationError` and are not reported as `unavailable`.
+- Proofs nested in signed mint justifications, split and burn dependencies and predicate data are kept byte for byte and may refer to other seals. Tokens do not get smaller.
+- The target verifier (contract or zkVM guest) must authenticate the seal itself. A verdict computed on the host is not evidence for it.
+- An unsharded partition (routing with the empty shard ID and an empty scheme) needs no partition view. The latest response may omit it, and the authenticated certificate is the target: one request, no exact-root requests. This applies only to the empty shard with an empty shard path under the same pins, path and strict seal authentication. A sharded partition without its view stays `unavailable` (`partition_view_unavailable`); this cannot be relaxed.
+
+`unavailable` reasons:
+
+| Reason | Meaning | Action |
+|---|---|---|
+| `pending_publication` | The master view is behind the token's proofs, or there is no finalized view yet. | Retry later (`retryable`). |
+| `state_pending` | A shard accepted a request of the token and has not certified it. | Retry later (`retryable`). |
+| `state_expired` | A shard dropped a request of the token before inclusion. | Do not retry; resubmit the request if it is yours. |
+| `state_unknown` | A shard does not know a request of the token (misrouted, lost, restarted, other instance). | Do not retry blindly; check routing and the endpoint. Status hints are not evidence. |
+| `state_not_in_root` | The state is not a leaf of the root the master view commits to. | Do not retry; routing or input problem. |
+| `target_not_retained`, `busy`, `partition_view_unavailable` | The service cannot serve this attempt now. | Retry a new attempt later (`retryable` as sent). |
+| `unsupported_capability`, `unsupported_configuration`, `limit_exceeded` | The endpoint or the token cannot use this API. | Do not retry. |
+
+`unknown` is treated as transient for a wait that starts right after submission (12.1), but not for consolidation, where the original proofs already exist.
+
+Batch requests (`get_inclusion_proofs.v1`, and therefore consolidation) must be sent to the shard aggregators directly. The aggregator-subscription proxy routes only by `stateId`, `shardId` or `X-State-ID`, so it answers a batch request, which carries `stateIds`, with HTTP 400.
+
+### 12.3 Aggregation Partition
+
+The aggregation layer is partition `AGGREGATION_PARTITION_ID` (`7n`) on every network (mainnet network 1, testnet2 network 4, local network 3). It is a constant: `ShardRouting` takes no partition ID, and verification of tokens, consolidation evidence and partition views accepts certificates of that partition only, whatever a proof or response claims. Certificates must also satisfy the structural rules of the unicity certificate (input record, technical record hash, seal); a token whose certificates do not is rejected.
