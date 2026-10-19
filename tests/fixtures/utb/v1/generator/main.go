@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 
@@ -299,6 +300,7 @@ type file struct {
 
 func main() {
 	out := flag.String("out", "utb-vectors-v1.json", "output file")
+	devOut := flag.String("dev-out", "", "if set, also write the shared dev trust-base fixture (genesis JSON, its EntryID, the epochs 1..4 bundle) into this directory")
 	flag.Parse()
 
 	keys := make([]key, 13)
@@ -495,6 +497,14 @@ func main() {
 	full, err := gettrustbase.EncodeBundle(w.chain)
 	must(err)
 	addBundle("bundle.complete", "epochs 1..4, installed on a genesis-only store", full, 1)
+	if *devOut != "" {
+		// the genesis in bft-go-base's own JSON form (its json tags, field order and hex encoding)
+		gj, err := json.MarshalIndent(g, "", "  ")
+		must(err)
+		must(os.WriteFile(filepath.Join(*devOut, "bft-trustbase.dev.genesis.json"), append(gj, '\n'), 0o644))
+		must(os.WriteFile(filepath.Join(*devOut, "bft-trustbase.dev.genesis.entryid"), []byte(hex.EncodeToString(gid[:])+"\n"), 0o644))
+		must(os.WriteFile(filepath.Join(*devOut, "bft-trustbase.dev.bundle.cbor"), full, 0o644))
+	}
 	gonly, err := gettrustbase.EncodeBundle(w.chain[:1])
 	must(err)
 	addBundle("bundle.genesis-only", "the genesis alone", gonly, 1)
