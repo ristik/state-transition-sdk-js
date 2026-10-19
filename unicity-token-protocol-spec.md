@@ -544,7 +544,7 @@ The aggregation layer is partition `AGGREGATION_PARTITION_ID` (`7n`) on every ne
 
 ### 12.4 Non-inclusion Proofs
 
-A non-inclusion proof shows absence only at the authenticated snapshot returned by verification. It does not show absence now, continuous absence, or that a token can be spent. Compare the snapshot's network and root round (or its certified seal timestamp, under your application's time policy) with an independently trusted requirement. The seal timestamp is consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
+> Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
 
 `AggregatorClient.getNonInclusionProof(stateId, { signal })` calls `get_non_inclusion_proof.v1` once, without polling. It returns either an unverified `NonInclusionProof`, bound to the requested state ID (the ID is never read from the response), or `{ kind: 'state_included_hint' }`. The latter is the service's unauthenticated claim that the state is included; request an inclusion proof and verify it.
 
