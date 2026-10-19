@@ -43,7 +43,7 @@ export interface IWaitInclusionProofOptions {
    */
   readonly longPoll?: boolean | ILongPollOptions;
   /**
-   * Abort signal that terminates polling. Defaults to a 10s timeout unless `timeoutMs` is given. To bound the wait in
+   * Abort signal that terminates polling. Defaults to a 15s timeout unless `timeoutMs` is given. To bound the wait in
    * time prefer `timeoutMs`: a bare signal cannot be read as a deadline, so each poll asks for the full 20s window.
    */
   readonly signal?: AbortSignal;
@@ -57,7 +57,7 @@ export interface IWaitInclusionProofOptions {
    * Total time budget of the wait in milliseconds, counted from the call on a monotonic clock. With it the wait knows
    * how much time is left and sizes every long poll to fit (`min(window, left - margin)`), so it never asks for more than
    * the budget leaves; it applies together with `signal`, whichever ends first. Without `timeoutMs` and without `signal`
-   * the budget is 10s. A caller `signal` alone says nothing about the time left (an `AbortSignal` is not a readable
+   * the budget is 15s. A caller `signal` alone says nothing about the time left (an `AbortSignal` is not a readable
    * deadline): the wait then asks for the preferred window and stops when the signal fires.
    */
   readonly timeoutMs?: number;
@@ -69,8 +69,8 @@ export interface IWaitInclusionProofOptions {
   readonly unknownGraceMs?: number;
 }
 
-/** Budget of a wait that has neither a signal nor a `timeoutMs`: the behavior of SDK 3.0. */
-const DEFAULT_BUDGET_MS = 10_000;
+/** Budget of a wait that has neither a signal nor a `timeoutMs`: 15 s. */
+const DEFAULT_BUDGET_MS = 15_000;
 /** Pause that a long poll never undercuts, so that an instant or zero echo cannot make a tight loop. */
 const MIN_POLL_GAP_MS = 10;
 /** Greatest delay a platform timer accepts. */
@@ -108,7 +108,7 @@ function checkTimeoutMs(timeoutMs: number | undefined): number | undefined {
 }
 
 /**
- * The signal that ends a wait: the caller's own, or the 10s default, or one that joins the caller's signal with a
+ * The signal that ends a wait: the caller's own, or the 15s default, or one that joins the caller's signal with a
  * `timeoutMs` budget.
  */
 class Deadline {
@@ -203,14 +203,14 @@ export function waitInclusionProof(
   options?: IWaitInclusionProofOptions,
 ): Promise<InclusionProof>;
 /**
- * @deprecated Positional form of SDK 3.0, kept as it was (no status hints, they need the options form): pass
+ * @deprecated Positional form, kept (default budget 15 s, no status hints, they need the options form): pass
  *   `{ signal, intervalMs }` instead.
  * @param {StateTransitionClient} client Client used to fetch inclusion proofs.
  * @param {RootTrustBase} trustBase Root trust base used to verify the inclusion certificate.
  * @param {PredicateVerifierService} predicateVerifier Verifier used to check the transaction predicate.
  * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
- * @param {AbortSignal} signal Abort signal that terminates polling. Defaults to a 10s timeout.
+ * @param {AbortSignal} signal Abort signal that terminates polling. Defaults to a 15s timeout.
  * @param {number} interval Delay between polls in milliseconds. Defaults to 1000.
  * @returns {Promise<InclusionProof>} Verified inclusion proof.
  */
@@ -239,7 +239,7 @@ export async function waitInclusionProof(
   const begun = performance.now();
   const callerSignal = positional ? (signalOrOptions as AbortSignal | undefined) : options.signal;
   const timeoutMs = checkTimeoutMs(options.timeoutMs);
-  // the total budget when it is known: a `timeoutMs`, or the 10s default of a call with neither signal nor budget
+  // the total budget when it is known: a `timeoutMs`, or the 15s default of a call with neither signal nor budget
   const budgetMs = timeoutMs ?? (callerSignal === undefined ? DEFAULT_BUDGET_MS : undefined);
   const interval = positional ? (positionalInterval ?? 1000) : (options.intervalMs ?? 1000);
   const statusHints = positional ? false : options.statusHints !== false;
