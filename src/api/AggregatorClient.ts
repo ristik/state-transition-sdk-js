@@ -5,6 +5,7 @@ import {
   BatchProofError,
   isBatchStateDetail,
 } from './BatchProofError.js';
+import { TrustBaseResponse } from './bft/trustbase/TrustBaseResponse.js';
 import { UnicityCertificate } from './bft/UnicityCertificate.js';
 import { UnicityCertificateInterner } from './bft/UnicityCertificateInterner.js';
 import { CertificationData } from './CertificationData.js';
@@ -20,6 +21,7 @@ import {
 import { InclusionProofResponse } from './InclusionProofResponse.js';
 import { INonInclusionAggregatorClient, NonInclusionProofResponse } from './INonInclusionAggregatorClient.js';
 import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
+import { ITrustBaseSource } from './ITrustBaseSource.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
@@ -34,6 +36,35 @@ import { checkWaitMs, isMalformedParams, isWireMilliseconds } from '../internal/
 import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
 import { HexConverter } from '../util/HexConverter.js';
 
+/** Read a binary response body, refusing one larger than `maxBytes` without buffering it. */
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!response.body) {
+    return new Uint8Array(0);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (let result = await reader.read(); !result.done; result = await reader.read()) {
+      total += result.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new JsonRpcResponseError('Trust-base response exceeds the maximum allowed size.');
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 /** What a batch call sent: the HTTP requests it took so far and the `waitMs` of the one in flight, if any. */
 interface IBatchSend {
   readonly requests: 1 | 2;
@@ -43,8 +74,14 @@ interface IBatchSend {
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
  */
-export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient, INonInclusionAggregatorClient {
+export class AggregatorClient
+  implements IAggregatorClient, IBatchAggregatorClient, INonInclusionAggregatorClient, ITrustBaseSource
+{
+  /** Largest trust-base response read: the GetTrustBase page cap plus slack for the HTTP framing. */
+  public static readonly MAX_TRUST_BASE_RESPONSE_BYTES = TrustBaseResponse.PAGE_LIMITS.maxBytes + 1024;
+
   private readonly transport: JsonRpcHttpTransport;
+  private readonly url: string;
   readonly #key: string | null;
 
   /**
@@ -63,6 +100,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
     this.#key = key;
     this.transport = new JsonRpcHttpTransport(url);
+    this.url = url;
   }
 
   private static batchFailure(e: unknown, options: IBatchRequestOptions | undefined, sent: IBatchSend): unknown {
@@ -377,12 +415,6 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     return AggregatorClient.decodeBatch(result, ids.length, exact, sent);
   }
 
-  /**
-   * Query the aggregator's latest block number.
-   *
-   * @returns {Promise<bigint>} Latest block number.
-   * @throws {Error} If the response does not contain a numeric `blockNumber`.
-   */
   public async getLatestBlockNumber(): Promise<bigint> {
     const response = await this.transport.request('get_block_height', {});
     if (
@@ -430,6 +462,45 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         { cause: e },
       );
     }
+  }
+
+  /**
+   * Query the aggregator's latest block number.
+   *
+   * @returns {Promise<bigint>} Latest block number.
+   * @throws {Error} If the response does not contain a numeric `blockNumber`.
+   */
+  /**
+   * Fetch the signed trust-base entries after the latest held one: `GET /api/v1/trustbases?from=<epoch>&maxEntries=<n>` on the aggregator's
+   * origin, answered with the GetTrustBase response (tag 39015, `application/cbor`). The bytes are returned undecoded: the aggregator is untrusted
+   * transport, the caller decodes them with the page limits and appends each entry through the authenticated history.
+   *
+   * @param {bigint} fromEpoch First epoch wanted (the latest held epoch + 1).
+   * @param {number} maxEntries Most entries wanted.
+   * @param {IRequestOptions} [options] Request options.
+   * @returns {Promise<Uint8Array>} The encoded response.
+   * @throws {JsonRpcNetworkError} On a non-success HTTP status.
+   * @throws {JsonRpcResponseError} When the body exceeds {@link MAX_TRUST_BASE_RESPONSE_BYTES}.
+   */
+  public async getTrustBaseEntries(
+    fromEpoch: bigint,
+    maxEntries: number,
+    options?: IRequestOptions,
+  ): Promise<Uint8Array> {
+    // the trust-base endpoint is on the aggregator's origin, whatever path the JSON-RPC endpoint has
+    const url = new URL('/api/v1/trustbases', this.url);
+    url.searchParams.set('from', fromEpoch.toString());
+    url.searchParams.set('maxEntries', String(maxEntries));
+    const headers = new Headers({ Accept: 'application/cbor' });
+    if (this.#key) {
+      headers.set('X-API-Key', this.#key);
+    }
+    const response = await fetch(url, { headers, method: 'GET', redirect: 'error', signal: options?.signal });
+    const body = await readBoundedBytes(response, AggregatorClient.MAX_TRUST_BASE_RESPONSE_BYTES);
+    if (!response.ok) {
+      throw new JsonRpcNetworkError(response.status, new TextDecoder().decode(body));
+    }
+    return body;
   }
 
   /**

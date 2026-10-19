@@ -73,7 +73,33 @@ console.log('State certified:', response.inclusionProof !== null);
 
 This read-only probe should print `State certified: false` for the fresh state. It checks connectivity; it does not verify a token.
 
-The trust base identifies the Consensus Layer (BFT Core) instance. Pin a trusted copy in your application for production. Use `trustBase.networkId` when creating tokens so they match your gateway; testnet2 is network ID `4` (`NetworkId.TESTNET` is `2`). For offline construction, use `NetworkId.fromId(4)`.
+The trust base identifies the Consensus Layer (BFT Core) instance. Use `trustBase.networkId` when creating tokens so they match your gateway; testnet2 is network ID `4` (`NetworkId.TESTNET`).
+
+### Trust-base history
+
+Verification uses the held **Unicity Trust Base history** (`TrustBaseHistory`): the root committee of every epoch, each entry signed by the previous epoch's committee. Each certificate is verified against the committee of its own epoch.
+
+**Loading it:**
+- Ship the complete history with your application as one bundle, and load it with `TrustBaseHistory.fromBundle(bytes, genesisPin)`.
+- Alternatively, start from the JSON genesis file with `TrustBaseHistory.fromLegacyGenesis(RootTrustBase.fromJSON(json), genesisPin)`.
+
+`genesisPin` is the EntryID of the network's version-2 genesis entry, taken from your release configuration, never from the file itself.
+
+**Keeping it current.** When the committee changes after your release, verification reports `NO_ENTRY_FOR_EPOCH` for certificates of the newer epoch. Fetch, authenticate and append the newer entries, then verify again:
+
+```js
+import { verifyWithTrustBaseUpdate } from '@unicitylabs/state-transition-sdk/lib/util/TrustBaseUtils.js';
+
+// the aggregator client is the source of newer entries; every entry is authenticated by the previous committee
+const result = await verifyWithTrustBaseUpdate((history) => token.verify(contextWith(history)), history, aggregator);
+```
+
+`waitInclusionProof(..., { trustBaseSource: aggregator })` does the same for a freshly certified proof.
+
+**Rules:**
+- Held entries are never replaced.
+- The loop is bounded: 2 s between fetches, 5 fetches, 10 s overall, 64 entries per fetch.
+- Persist the grown history with `history.exportBundle()`.
 
 ## Work with tokens
 

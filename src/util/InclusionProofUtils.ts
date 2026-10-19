@@ -1,4 +1,6 @@
+import { verifyWithTrustBaseUpdate } from './TrustBaseUtils.js';
 import { ITrustBaseAuthority } from '../api/bft/trustbase/TrustBaseAuthority.js';
+import { TrustBaseHistory } from '../api/bft/trustbase/TrustBaseHistory.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { ILongPollOptions } from '../api/ILongPollOptions.js';
 import { InclusionProof } from '../api/InclusionProof.js';
@@ -7,6 +9,7 @@ import {
   InclusionProofExpiredError,
   InclusionProofUnknownError,
 } from '../api/InclusionProofStatusError.js';
+import { ITrustBaseSource } from '../api/ITrustBaseSource.js';
 import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { StateId } from '../api/StateId.js';
@@ -61,6 +64,13 @@ export interface IWaitInclusionProofOptions {
    * deadline): the wait then asks for the preferred window and stops when the signal fires.
    */
   readonly timeoutMs?: number;
+  /**
+   * Where newer trust-base entries come from (usually the same `AggregatorClient`). With it, a freshly certified proof whose seal is of an epoch the
+   * held history does not have yet (`NO_ENTRY_FOR_EPOCH`) does not fail the wait: the entries after the latest held one are fetched, authenticated
+   * and appended (see {@link verifyWithTrustBaseUpdate}, same bounds, within this wait's budget), and the same proof is verified again. Needs the
+   * trust base to be a `TrustBaseHistory`. Without it such a proof fails the wait as before.
+   */
+  readonly trustBaseSource?: ITrustBaseSource;
   /**
    * How long an `unknown` hint is tolerated, counted from the start of the wait, before the wait fails with
    * {@link InclusionProofUnknownError}. Defaults to two poll intervals; `0` fails at the first `unknown`. Ignored
@@ -243,6 +253,7 @@ export async function waitInclusionProof(
   const budgetMs = timeoutMs ?? (callerSignal === undefined ? DEFAULT_BUDGET_MS : undefined);
   const interval = positional ? (positionalInterval ?? 1000) : (options.intervalMs ?? 1000);
   const statusHints = positional ? false : options.statusHints !== false;
+  const trustBaseSource = positional ? undefined : options.trustBaseSource;
   const longPoll = positional ? null : longPollSettings(options.longPoll, true);
   const deadline = new Deadline(callerSignal, timeoutMs, budgetMs);
   const signal = deadline.signal;
@@ -336,16 +347,30 @@ export async function waitInclusionProof(
         return { inclusionProof: null, pendingHint: statusHint !== 'unknown', waitedMs: response.waitedMs };
       }
 
-      const verificationStatus = await InclusionProofVerificationRule.verify(
-        trustBase,
-        predicateVerifier,
-        unicityCertificateVerifier,
-        inclusionProof,
-        transactionHash,
-        transaction.expiresAt,
-        transaction.lockScript,
-        transaction.sourceStateHash,
-      );
+      const verifyProof = (authority: ITrustBaseAuthority): ReturnType<typeof InclusionProofVerificationRule.verify> =>
+        InclusionProofVerificationRule.verify(
+          authority,
+          predicateVerifier,
+          unicityCertificateVerifier,
+          inclusionProof,
+          transactionHash,
+          transaction.expiresAt,
+          transaction.lockScript,
+          transaction.sourceStateHash,
+        );
+      let verificationStatus = await verifyProof(trustBase);
+      // a freshly certified proof may be sealed by a committee whose entry is not held yet: update the history, verify the same proof again
+      if (
+        verificationStatus.status === InclusionProofVerificationStatus.NO_ENTRY_FOR_EPOCH &&
+        trustBaseSource !== undefined &&
+        trustBase instanceof TrustBaseHistory
+      ) {
+        const left = remainingMs();
+        verificationStatus = await verifyWithTrustBaseUpdate(verifyProof, trustBase, trustBaseSource, {
+          signal: requestSignal,
+          ...(left !== undefined ? { timeoutMs: Math.max(1, Math.floor(Math.min(left, 10_000))) } : {}),
+        });
+      }
 
       if (verificationStatus.status !== InclusionProofVerificationStatus.OK) {
         // another request was certified for this state id: typed, so that a conflicting submission is not reported as a
