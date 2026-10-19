@@ -23,7 +23,12 @@ export function createE2EContext(): {
   client: StateTransitionClient;
   trustBase: RootTrustBase;
 } {
-  const aggregatorClient = new AggregatorClient(AGGREGATOR_URL, process.env.AGGREGATOR_API_KEY ?? null);
+  const aggregatorClient = new AggregatorClient(
+    AGGREGATOR_URL,
+    process.env.AGGREGATOR_API_KEY ?? null,
+    // a local stack or gateway on http://: the client refuses to send an API key over plaintext otherwise
+    new URL(AGGREGATOR_URL).protocol !== 'https:',
+  );
   const trustBasePath = process.env.TRUST_BASE_PATH ?? null;
 
   return {
