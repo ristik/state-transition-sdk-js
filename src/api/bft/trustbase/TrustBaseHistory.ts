@@ -33,6 +33,8 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
   private readonly entries: RootTrustBaseV2[];
   private readonly ids: Uint8Array[];
   private readonly raw: Uint8Array[];
+  /** Serialises every mutation: each append runs its check, verification and push without another one interleaving at an `await`. */
+  private writes: Promise<unknown> = Promise.resolve();
 
   private constructor(entries: RootTrustBaseV2[], raw: Uint8Array[], ids: Uint8Array[]) {
     this.entries = entries;
@@ -127,49 +129,15 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
   }
 
   /**
-   * Append one entry given as its canonical bytes.
+   * Append one entry given as its canonical bytes. Appends are serialised: concurrent calls (a piggybacked entry and a fetch, or two
+   * verifications that both miss an epoch) take effect one after another, so an epoch is never stored twice.
    *
    * @param {Uint8Array} bytes Tagged entry.
    * @returns {Promise<boolean>} True when the entry was new; false for a no-op replay of a held entry.
    * @throws {TrustBaseError} `malformed` or `invalid` (refused), `gap`, or `conflict`.
    */
-  public async append(bytes: Uint8Array): Promise<boolean> {
-    const entry = RootTrustBaseV2.fromCBOR(bytes);
-    const first = this.genesisEpoch;
-    const tip = this.entries[this.entries.length - 1];
-    if (entry.epoch < first) {
-      throw new TrustBaseError('gap', `Epoch ${entry.epoch} precedes the genesis ${first}.`);
-    }
-    if (entry.epoch <= tip.epoch) {
-      const index = Number(entry.epoch - first);
-      if (!areUint8ArraysEqual(await entry.entryId(), this.ids[index])) {
-        throw new TrustBaseError(
-          'conflict',
-          `An entry of epoch ${entry.epoch} with different unsigned bytes is already held.`,
-        );
-      }
-      if (index === 0) {
-        // the genesis is authenticated by the pin; it has no witness
-        if (entry.signatures !== null) {
-          throw new TrustBaseError('invalid', 'A genesis entry carrying signatures.');
-        }
-        return false;
-      }
-      // the supplied witness must itself be valid; the first held witness is kept
-      await entry.verifySuccessor(this.entries[index - 1]);
-      return false;
-    }
-    if (entry.epoch !== tip.epoch + 1n) {
-      throw new TrustBaseError('gap', `Epoch ${entry.epoch} does not directly follow the held tip ${tip.epoch}.`);
-    }
-    if (entry.rootNodes.length > RootTrustBaseV2.MAX_ADMITTED_MEMBERS) {
-      throw new TrustBaseError('invalid', `Epoch ${entry.epoch} has ${entry.rootNodes.length} members.`);
-    }
-    await entry.verifySuccessor(tip);
-    this.entries.push(entry);
-    this.raw.push(new Uint8Array(bytes));
-    this.ids.push(await entry.entryId());
-    return true;
+  public append(bytes: Uint8Array): Promise<boolean> {
+    return this.exclusive(() => this.appendExclusive(bytes));
   }
 
   /**
@@ -229,21 +197,23 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
   }
 
   /**
-   * Append the entries of a decoded bundle (or page) in order; a refusal leaves the history at the last good entry. An older bundle neither
-   * truncates nor rolls back the history.
+   * Append the entries of a decoded bundle (or page) in order, as one serialised mutation (no other append interleaves); a refusal leaves the
+   * history at the last good entry. An older bundle neither truncates nor rolls back the history.
    *
    * @param {TrustBaseResponse} bundle Decoded bundle or OK page.
    * @returns {Promise<number>} The number of new entries.
    * @throws {TrustBaseError} The first refusal.
    */
-  public async installBundle(bundle: TrustBaseResponse): Promise<number> {
-    let added = 0;
-    for (const raw of bundle.rawEntries) {
-      if (await this.append(raw)) {
-        added++;
+  public installBundle(bundle: TrustBaseResponse): Promise<number> {
+    return this.exclusive(async () => {
+      let added = 0;
+      for (const raw of bundle.rawEntries) {
+        if (await this.appendExclusive(raw)) {
+          added++;
+        }
       }
-    }
-    return added;
+      return added;
+    });
   }
 
   /**
@@ -251,5 +221,59 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
    */
   public snapshot(): TrustBaseHistory {
     return new TrustBaseHistory([...this.entries], [...this.raw], [...this.ids]);
+  }
+
+  /** {@link append} while holding the write chain. */
+  private async appendExclusive(bytes: Uint8Array): Promise<boolean> {
+    const entry = RootTrustBaseV2.fromCBOR(bytes);
+    const first = this.genesisEpoch;
+    const tip = this.entries[this.entries.length - 1];
+    if (entry.epoch < first) {
+      throw new TrustBaseError('gap', `Epoch ${entry.epoch} precedes the genesis ${first}.`);
+    }
+    if (entry.epoch <= tip.epoch) {
+      const index = Number(entry.epoch - first);
+      if (!areUint8ArraysEqual(await entry.entryId(), this.ids[index])) {
+        throw new TrustBaseError(
+          'conflict',
+          `An entry of epoch ${entry.epoch} with different unsigned bytes is already held.`,
+        );
+      }
+      if (index === 0) {
+        // the genesis is authenticated by the pin; it has no witness
+        if (entry.signatures !== null) {
+          throw new TrustBaseError('invalid', 'A genesis entry carrying signatures.');
+        }
+        return false;
+      }
+      // the supplied witness must itself be valid; the first held witness is kept
+      await entry.verifySuccessor(this.entries[index - 1]);
+      return false;
+    }
+    if (entry.epoch !== tip.epoch + 1n) {
+      throw new TrustBaseError('gap', `Epoch ${entry.epoch} does not directly follow the held tip ${tip.epoch}.`);
+    }
+    if (entry.rootNodes.length > RootTrustBaseV2.MAX_ADMITTED_MEMBERS) {
+      throw new TrustBaseError('invalid', `Epoch ${entry.epoch} has ${entry.rootNodes.length} members.`);
+    }
+    await entry.verifySuccessor(tip);
+    // everything awaited before the first mutation: the three lists change together or not at all
+    const id = await entry.entryId();
+    this.entries.push(entry);
+    this.raw.push(new Uint8Array(bytes));
+    this.ids.push(id);
+    return true;
+  }
+
+  /**
+   * Run a mutation after every earlier one has settled, whatever its outcome.
+   *
+   * @param {Function} task The mutation.
+   * @returns {Promise<T>} Its result.
+   */
+  private exclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(task, task);
+    this.writes = run.catch(() => undefined);
+    return run;
   }
 }
