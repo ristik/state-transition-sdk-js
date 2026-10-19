@@ -83,7 +83,8 @@ jobs:
   publish:
     name: Publish to npm
     needs: [build, integration]
-    if: github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # never from a fork: only the upstream repository publishes
+    if: github.repository == 'unicitynetwork/state-transition-sdk-js' && (github.event_name == 'release' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
