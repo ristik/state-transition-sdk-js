@@ -64,6 +64,15 @@ export class JsonRpcHttpTransport {
     return new JsonRpcDataError(error as { code: number; data?: unknown; message: string }, idMatched, retryAfterMs);
   }
 
+  private static parseEnvelope(body: string): IJsonRpcResponse | null {
+    try {
+      const data: unknown = JSON.parse(body);
+      return typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as IJsonRpcResponse) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * An HTTP-date (RFC 9110 §5.6.7) in exactly one of its three forms, IMF-fixdate, RFC 850 or asctime, with every field
    * validated (a day within its month, hour at most 23, ...). Anything else is not a date.
@@ -102,15 +111,6 @@ export class JsonRpcHttpTransport {
     const at = Date.UTC(y, month, d, hh, mm, Math.min(ss, 59));
     // a day outside its month rolls over: reject
     return new Date(at).getUTCDate() === d ? at : undefined;
-  }
-
-  private static parseEnvelope(body: string): IJsonRpcResponse | null {
-    try {
-      const data: unknown = JSON.parse(body);
-      return typeof data === 'object' && data !== null && !Array.isArray(data) ? (data as IJsonRpcResponse) : null;
-    } catch {
-      return null;
-    }
   }
 
   /**
