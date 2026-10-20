@@ -351,6 +351,119 @@ describe('waitInclusionProof overload answers', () => {
     expect(client.calls).toHaveLength(1);
   });
 
+  describe('transport failures of a proof read', () => {
+    const reset = (): TypeError =>
+      new TypeError('fetch failed', { cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }) });
+
+    it.each([
+      ['a reset connection', reset()],
+      [
+        'a stale keep-alive socket',
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+        }),
+      ],
+      [
+        'a refused connection',
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+        }),
+      ],
+      ['a truncated response', new TypeError('terminated')],
+    ])('%s is inconclusive: plain reads at the interval, original budget', async (_name, error) => {
+      const client = new Scripted(pendingFirst(failing(error)));
+      const done = start(client, { intervalMs: 600, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(await done).toEqual(new Error('end'));
+      expect(client.calls).toHaveLength(4);
+      expect(client.calls[0].options?.waitMs).toBeGreaterThan(0);
+      expect(client.calls.slice(1).every((c) => c.options?.waitMs === undefined)).toBe(true);
+      expect(times(client)[1] - times(client)[0]).toBe(600);
+    });
+
+    it('a reset then the proof: the wait returns the proof, the transport error never reaches the caller', async () => {
+      const world = await ShardedWorld.create(0);
+      const mint = await MintTransaction.create(world.network, SignaturePredicate.create(owner.publicKey), {
+        salt: TokenSalt.generate(),
+        tokenType: TokenType.generate(),
+      });
+      await world.router.submitCertificationRequest(await CertificationData.fromMintTransaction(mint));
+      const real = world.client('');
+      let calls = 0;
+      const client: IAggregatorClient = {
+        getInclusionProof: (stateId, options) =>
+          ++calls === 1 ? Promise.reject(reset()) : real.getInclusionProof(stateId, options),
+        submitCertificationRequest: (data) => real.submitCertificationRequest(data),
+      };
+      const done = waitInclusionProof(
+        new StateTransitionClient(client),
+        world.trustBase,
+        predicateVerifier,
+        createUnicityCertificateVerifier(),
+        mint,
+        { intervalMs: 500, timeoutMs: 15_000 },
+      );
+      await jest.advanceTimersByTimeAsync(5000);
+      expect((await done).certificationData.transactionHash).toEqual(await mint.calculateTransactionHash());
+      expect(calls).toBe(2);
+    });
+
+    it('a pause that does not fit fails within the budget with the transport error as cause', async () => {
+      const error = reset();
+      const client = new Scripted([step(failing(error))]);
+      const done = start(client, { intervalMs: 5000, timeoutMs: 3000 });
+      await jest.advanceTimersByTimeAsync(1);
+      const result = await done;
+      expect(result).toBeInstanceOf(SleepError);
+      expect((result as SleepError).cause).toBe(error);
+      expect(client.calls).toHaveLength(1);
+    });
+
+    it.each([
+      [
+        'an expired certificate',
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error('certificate has expired'), { code: 'CERT_HAS_EXPIRED' }),
+        }),
+      ],
+      [
+        'an untrusted issuer',
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error('unable to verify the first certificate'), {
+            code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+          }),
+        }),
+      ],
+      [
+        'a hostname mismatch',
+        new TypeError('fetch failed', {
+          cause: Object.assign(new Error("Hostname/IP does not match certificate's altnames"), {
+            code: 'ERR_TLS_CERT_ALTNAME_INVALID',
+          }),
+        }),
+      ],
+      ['an invalid URL', new TypeError('Failed to parse URL from nope', { cause: new TypeError('Invalid URL') })],
+      ['a refused redirect', new TypeError('fetch failed', { cause: new Error('unexpected redirect') })],
+      ['an error that is not a network error', new Error('boom')],
+    ])('%s stays terminal', async (_name, error) => {
+      const client = new Scripted([step(failing(error))]);
+      const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(1);
+      expect(await done).toBe(error);
+      expect(client.calls).toHaveLength(1);
+    });
+
+    it('an abort stays terminal (cancellation wins over the retry)', async () => {
+      const controller = new AbortController();
+      const client = new Scripted(pendingFirst(failing(reset())));
+      const done = start(client, { intervalMs: 5000, signal: controller.signal });
+      await jest.advanceTimersByTimeAsync(100);
+      controller.abort();
+      expect(await done).toBeInstanceOf(SleepError);
+      expect(client.calls).toHaveLength(1);
+    });
+  });
+
   it('a non-retryable error still ends the wait at once', async () => {
     for (const error of [http(500), http(501), new JsonRpcDataError({ code: -32000, message: 'bad' })]) {
       const client = new Scripted([step(failing(error))]);

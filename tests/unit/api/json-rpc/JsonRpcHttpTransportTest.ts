@@ -211,4 +211,34 @@ describe('JsonRpcHttpTransport', () => {
       expect((big as JsonRpcResponseError).retryAfterMs).toBe(3000);
     });
   });
+
+  describe('transport failures are not retried by the transport', () => {
+    it('a failing request (a submission included) is sent once and the error surfaces', async () => {
+      const failure = new TypeError('fetch failed', {
+        cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+      });
+      fetchMock.mockRejectedValue(failure);
+      await expect(transport.request('certification_request', {})).rejects.toBe(failure);
+      await expect(transport.request('get_inclusion_proof.v2', {})).rejects.toBe(failure);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Retry-After HTTP-date bounds', () => {
+    const now = Date.parse('Sun, 06 Nov 1994 08:49:37 GMT');
+    const parse = (v: string): number | undefined => JsonRpcHttpTransport.parseRetryAfter(v, now);
+    it('rejects years before 1970 and impossible days, caps the far future, reads RFC 850 years relative to now', () => {
+      expect(parse('Thu, 01 Jan 1970 00:00:00 GMT')).toBe(0);
+      expect(parse('Wed, 31 Dec 1969 23:59:59 GMT')).toBeUndefined();
+      expect(parse('Sat, 01 Jan 0050 00:00:00 GMT')).toBeUndefined();
+      expect(parse('Fri, 31 Dec 9999 23:59:59 GMT')).toBe(60_000);
+      expect(parse('Tue, 29 Feb 1996 00:00:00 GMT')).toBe(60_000);
+      expect(parse('Wed, 29 Feb 1995 00:00:00 GMT')).toBeUndefined();
+      expect(parse('Sun, 31 Apr 1994 08:49:37 GMT')).toBeUndefined();
+      expect(parse('Sunday, 06-Nov-9223372036854775807 08:49:37 GMT')).toBeUndefined();
+      expect(parse('Sun Nov  6 08:49:37 99999999999999')).toBeUndefined();
+      // "94" is 1994 (2094 would be more than 50 years ahead of 1994+... it is 100 years): read as the past year
+      expect(parse('Sunday, 06-Nov-94 08:49:47 GMT')).toBe(10_000);
+    });
+  });
 });
