@@ -1,6 +1,8 @@
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
+import { CertificationData } from '../../../src/api/CertificationData.js';
 import { IAggregatorClient } from '../../../src/api/IAggregatorClient.js';
 import { InclusionProofResponse } from '../../../src/api/InclusionProofResponse.js';
+import { InclusionProofUnknownError } from '../../../src/api/InclusionProofStatusError.js';
 import { IInclusionProofRequestOptions } from '../../../src/api/IRequestOptions.js';
 import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../../../src/api/json-rpc/JsonRpcNetworkError.js';
@@ -18,6 +20,7 @@ import { TokenType } from '../../../src/transaction/TokenType.js';
 import { IWaitInclusionProofOptions, SleepError, waitInclusionProof } from '../../../src/util/InclusionProofUtils.js';
 import { expiresAt } from '../../utils/ExpiresAt.js';
 import { createRootTrustBase } from '../../utils/RootTrustBaseFixture.js';
+import { ShardedWorld } from '../../utils/ShardedWorld.js';
 import { createUnicityCertificate } from '../../utils/UnicityCertificateFixture.js';
 import { createUnicityCertificateVerifier } from '../../utils/UnicityCertificateVerifierFixture.js';
 
@@ -180,6 +183,82 @@ describe('waitInclusionProof overload answers', () => {
     const done = start(client, { intervalMs: 1000, timeoutMs: 15_000 });
     await jest.advanceTimersByTimeAsync(1);
     expect(((await done) as SleepError).message).toMatch(/60000 ms/);
+  });
+
+  it('-32021 and -32020 with data.retryable:true are overloads, not pending/unknown (never an unknown failure)', async () => {
+    for (const code of [-32021, -32020]) {
+      const error = new JsonRpcDataError({ code, data: { retryable: true }, message: 'later' }, true, 2000);
+      const client = new Scripted(pendingFirst(failing(error)));
+      const done = start(client, { intervalMs: 500, statusHints: true, timeoutMs: 15_000, unknownGraceMs: 0 });
+      await jest.advanceTimersByTimeAsync(10_000);
+      const result = await done;
+      expect(result).not.toBeInstanceOf(InclusionProofUnknownError);
+      expect(result).toEqual(new Error('end'));
+      expect(client.calls).toHaveLength(4);
+      expect(client.calls.slice(1).every((c) => c.options?.waitMs === undefined)).toBe(true);
+      expect(times(client)[1] - times(client)[0]).toBe(2000);
+    }
+  });
+
+  it('-32021 / -32020 without retryable keep their meaning', async () => {
+    const client = new Scripted([
+      step(failing(new JsonRpcDataError({ code: -32021, message: 'pending' }))),
+      step(failing(new Error('end'))),
+    ]);
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(5000);
+    expect(await done).toEqual(new Error('end'));
+    expect(client.calls).toHaveLength(2);
+  });
+
+  it('an HTTP-200 JSON-RPC error carries Retry-After into the pause', async () => {
+    const error = new JsonRpcDataError({ code: -32006, message: 'busy' }, true, 4000);
+    const client = new Scripted(pendingFirst(failing(error)));
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(10_000);
+    await done;
+    expect(times(client)[1] - times(client)[0]).toBe(4000);
+    expect(times(client)[2] - times(client)[1]).toBe(500);
+  });
+
+  it('503 then pending then proof returns the verified proof', async () => {
+    const world = await ShardedWorld.create(0);
+    const mint = await MintTransaction.create(world.network, SignaturePredicate.create(owner.publicKey), {
+      salt: TokenSalt.generate(),
+      tokenType: TokenType.generate(),
+    });
+    await world.router.submitCertificationRequest(await CertificationData.fromMintTransaction(mint));
+    const real = world.client('');
+    let calls = 0;
+    const seen: Array<number | undefined> = [];
+    const client: IAggregatorClient = {
+      getInclusionProof: (stateId, options) => {
+        seen.push(options?.waitMs);
+        calls++;
+        if (calls === 1) {
+          return Promise.reject(http(503));
+        }
+        if (calls === 2) {
+          return pending();
+        }
+        return real.getInclusionProof(stateId, options);
+      },
+      submitCertificationRequest: (data) => real.submitCertificationRequest(data),
+    };
+    const done = waitInclusionProof(
+      new StateTransitionClient(client),
+      world.trustBase,
+      predicateVerifier,
+      createUnicityCertificateVerifier(),
+      mint,
+      { intervalMs: 1000, timeoutMs: 15_000 },
+    );
+    await jest.advanceTimersByTimeAsync(5000);
+    const proof = await done;
+    expect(proof.certificationData.transactionHash).toEqual(await mint.calculateTransactionHash());
+    expect(calls).toBe(3);
+    expect(seen[0]).toBeGreaterThan(0);
+    expect(seen.slice(1)).toEqual([undefined, undefined]);
   });
 
   it('a non-retryable error still ends the wait at once', async () => {

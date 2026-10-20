@@ -174,15 +174,9 @@ function overloadOf(err: unknown): { retryAfterMs: number | undefined } | null {
     rpc !== undefined &&
     (rpc.code === BUSY_CODE ||
       (typeof data === 'object' && data !== null && (data as { retryable?: unknown }).retryable === true));
-  if (err instanceof JsonRpcNetworkError) {
-    if (err.status === 503 || err.status === 429 || retryable) {
-      return {
-        retryAfterMs: err.retryAfterMs === undefined ? undefined : Math.min(err.retryAfterMs, MAX_RETRY_AFTER_MS),
-      };
-    }
-    return null;
-  }
-  return retryable ? { retryAfterMs: undefined } : null;
+  const header = err instanceof JsonRpcNetworkError ? (err.retryAfterMs ?? rpc?.retryAfterMs) : rpc?.retryAfterMs;
+  const overloaded = retryable || (err instanceof JsonRpcNetworkError && (err.status === 503 || err.status === 429));
+  return overloaded ? { retryAfterMs: header === undefined ? undefined : Math.min(header, MAX_RETRY_AFTER_MS) } : null;
 }
 
 function isSignalLike(value: unknown): value is AbortSignal {
@@ -419,14 +413,14 @@ export async function waitInclusionProof(
           await sleep(Math.max(interval, MIN_POLL_GAP_MS), signal);
           continue;
         }
+        // An overload answer (any code with data.retryable, 503, 429, -32006) is classified first, before pending and
+        // unknown: it is inconclusive, pause max(interval, Retry-After), fail fast when that does not fit the budget, and
+        // poll plainly (no waitMs) for the rest of the wait.
         // A missing proof is the expected "not certified yet" answer. JSON-RPC -32021 (certification pending) always keeps
         // polling. HTTP 404 and -32020 (no proof known for the state) are the legacy "unknown" answer: without status hints
         // they keep polling, with hints they follow the `unknown` hint (grace period, then InclusionProofUnknownError).
         // Anything else, including the {@link SleepError} raised on abort, ends the wait.
-        const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
-        // An overload answer is inconclusive: pause max(interval, Retry-After), fail fast when that does not fit the
-        // budget, and poll plainly (no waitMs) for the rest of the wait.
-        const overload = pending ? null : overloadOf(err);
+        const overload = overloadOf(err);
         if (overload !== null) {
           longPolling = false;
           const overloadPause = Math.max(interval, MIN_POLL_GAP_MS, overload.retryAfterMs ?? 0);
@@ -441,6 +435,7 @@ export async function waitInclusionProof(
           await sleep(overloadPause, signal);
           continue;
         }
+        const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
         const unknown =
           (err instanceof JsonRpcNetworkError && err.status === 404) ||
           (err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);

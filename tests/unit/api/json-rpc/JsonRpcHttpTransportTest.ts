@@ -1,4 +1,6 @@
+import { JsonRpcDataError } from '../../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from '../../../../src/api/json-rpc/JsonRpcHttpTransport.js';
+import { JsonRpcNetworkError } from '../../../../src/api/json-rpc/JsonRpcNetworkError.js';
 
 describe('JsonRpcHttpTransport', () => {
   const transport = new JsonRpcHttpTransport('https://example.com');
@@ -88,5 +90,51 @@ describe('JsonRpcHttpTransport', () => {
     });
 
     await expect(transport.request('m', {})).resolves.toBe('🎉');
+  });
+
+  describe('Retry-After', () => {
+    const answer = (status: number, retryAfter: string | null, error = { code: -32006, message: 'busy' }): void => {
+      fetchMock.mockImplementation((_input, init) => {
+        const id = (JSON.parse(init?.body as string) as { id: unknown }).id;
+        const headers: Record<string, string> = retryAfter === null ? {} : { 'Retry-After': retryAfter };
+        return Promise.resolve(new Response(JSON.stringify({ error, id, jsonrpc: '2.0' }), { headers, status }));
+      });
+    };
+    const caught = (): Promise<unknown> => transport.request('m', {}).catch((e: unknown) => e);
+
+    it.each([
+      ['3', 3000],
+      [' 7 ', 7000],
+      ['0', 0],
+      ['60', 60_000],
+      ['61', 60_000],
+      ['99999999999999999999999999', 60_000],
+      ['9'.repeat(400), 60_000],
+    ])('delta-seconds %j is %j ms on an HTTP error and on an HTTP-200 error', async (value, ms) => {
+      answer(503, value);
+      const network = await caught();
+      expect(network).toBeInstanceOf(JsonRpcNetworkError);
+      expect((network as JsonRpcNetworkError).retryAfterMs).toBe(ms);
+      expect((network as JsonRpcNetworkError).rpcError?.retryAfterMs).toBe(ms);
+      answer(200, value);
+      const data = await caught();
+      expect(data).toBeInstanceOf(JsonRpcDataError);
+      expect((data as JsonRpcDataError).retryAfterMs).toBe(ms);
+    });
+
+    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '', 'abc', '-1', '+5', '1.5', '1e3', '3 s'])(
+      'ignores %j',
+      async (value) => {
+        answer(429, value);
+        expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
+        answer(200, value);
+        expect(((await caught()) as JsonRpcDataError).retryAfterMs).toBeUndefined();
+      },
+    );
+
+    it('is absent without the header', async () => {
+      answer(503, null);
+      expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
+    });
   });
 });
