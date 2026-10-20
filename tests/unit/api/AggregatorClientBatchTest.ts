@@ -190,4 +190,24 @@ describe('AggregatorClient.getInclusionProofs', () => {
       name: 'AbortError',
     });
   });
+
+  it('a gateway HTTP 400 for a batch across shards keeps the -32602 classification of the unchanged body', async () => {
+    const fetchMock = respond(
+      {
+        error: {
+          code: -32602,
+          data: { detail: 'wrong_shard', reason: 'invalid_request', retryable: false },
+          message: 'Invalid params',
+        },
+      },
+      400,
+    );
+    const error = await failure(client.getInclusionProofs([stateId(1), stateId(2)], { waitMs: 5000 }));
+    // read from the envelope behind the 400, as on HTTP 200: a rejected request, not a transport failure, and not the
+    // malformed_params case, so there is no second request without waitMs
+    expect(error.kind).toBe('rejected');
+    expect(error.detail).toBe('wrong_shard');
+    expect(error.retryable).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

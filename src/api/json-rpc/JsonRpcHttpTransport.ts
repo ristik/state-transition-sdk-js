@@ -29,18 +29,27 @@ export class JsonRpcHttpTransport {
 
   /** The error object of an envelope as an error, or a response error if it is not a valid error object. */
   /**
-   * The `Retry-After` header as milliseconds: decimal seconds of any length saturate at 60 s, a date, a sign or anything
-   * else is ignored.
+   * The `Retry-After` header as milliseconds (RFC 9110): delay-seconds of any length saturate at 60 s, an HTTP-date is
+   * the date minus the local clock (floored at 0, capped at 60 s), a sign or anything else is ignored.
    *
    * @param {string | null} value Header value.
-   * @returns {number | undefined} Milliseconds, `undefined` when absent or not delta-seconds.
+   * @param {number} [now] Local time in milliseconds (for the date form).
+   * @returns {number | undefined} Milliseconds, `undefined` when absent or not a valid form.
    */
-  public static parseRetryAfter(value: string | null): number | undefined {
+  public static parseRetryAfter(value: string | null, now: number = Date.now()): number | undefined {
     const trimmed = value?.trim();
-    if (trimmed === undefined || !/^\d+$/.test(trimmed)) {
+    if (trimmed === undefined || trimmed === '') {
       return undefined;
     }
-    return Math.min(Number(trimmed), 60) * 1000;
+    if (/^\d+$/.test(trimmed)) {
+      return Math.min(Number(trimmed), 60) * 1000;
+    }
+    // HTTP-date (IMF-fixdate, RFC 850, asctime): the delay is the date minus the local clock, floored at 0
+    if (!/^[A-Za-z]{3,9}[ ,]/.test(trimmed) || !/(GMT|\d{4}$)/.test(trimmed)) {
+      return undefined;
+    }
+    const when = Date.parse(/GMT$/.test(trimmed) ? trimmed : `${trimmed} GMT`);
+    return Number.isNaN(when) ? undefined : Math.min(Math.max(when - now, 0), 60_000);
   }
 
   private static dataError(
@@ -138,7 +147,16 @@ export class JsonRpcHttpTransport {
     });
 
     const retryAfterMs = JsonRpcHttpTransport.parseRetryAfter(response.headers.get('Retry-After'));
-    const body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
+    let body: string;
+    try {
+      body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
+    } catch (e) {
+      // the status of a non-2xx answer classifies it even when its body is oversized
+      if (!response.ok && e instanceof JsonRpcResponseError) {
+        throw new JsonRpcResponseError(e.message, { retryAfterMs, status: response.status });
+      }
+      throw e;
+    }
     const envelope = JsonRpcHttpTransport.parseEnvelope(body);
     if (!response.ok) {
       // Always a network error with its status, as it has been. A complete JSON-RPC error envelope for this very request

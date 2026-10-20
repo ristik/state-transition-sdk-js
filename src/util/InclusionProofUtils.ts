@@ -9,6 +9,7 @@ import {
 } from '../api/InclusionProofStatusError.js';
 import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
+import { JsonRpcResponseError } from '../api/json-rpc/JsonRpcResponseError.js';
 import { StateId } from '../api/StateId.js';
 import {
   abortable,
@@ -175,7 +176,15 @@ function overloadOf(err: unknown): { retryAfterMs: number | undefined } | null {
     (rpc.code === BUSY_CODE ||
       (typeof data === 'object' && data !== null && (data as { retryable?: unknown }).retryable === true));
   const header = err instanceof JsonRpcNetworkError ? (err.retryAfterMs ?? rpc?.retryAfterMs) : rpc?.retryAfterMs;
-  const overloaded = retryable || (err instanceof JsonRpcNetworkError && (err.status === 503 || err.status === 429));
+  // 502/504 are intermediary timeouts inside a wait: inconclusive like an overload. The status counts even when the body
+  // could not be read (JsonRpcResponseError carries it); one-shot calls still surface these as errors.
+  const status = err instanceof JsonRpcNetworkError || err instanceof JsonRpcResponseError ? err.status : undefined;
+  const overloaded = retryable || (status !== undefined && [429, 502, 503, 504].includes(status));
+  if (err instanceof JsonRpcResponseError) {
+    return overloaded
+      ? { retryAfterMs: err.retryAfterMs === undefined ? undefined : Math.min(err.retryAfterMs, MAX_RETRY_AFTER_MS) }
+      : null;
+  }
   return overloaded ? { retryAfterMs: header === undefined ? undefined : Math.min(header, MAX_RETRY_AFTER_MS) } : null;
 }
 

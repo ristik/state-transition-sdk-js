@@ -354,7 +354,10 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     let result: unknown;
     try {
       result = await request(waitMs);
-    } catch (e) {
+    } catch (error) {
+      // a gateway may carry the service's JSON-RPC error behind a non-2xx status (HTTP 400 for a batch across shards,
+      // 503 for an overload): the envelope is classified as on HTTP 200
+      const e = error instanceof JsonRpcNetworkError && error.rpcError ? error.rpcError : error;
       // A strict parser that does not know `waitMs` answers the generic malformed params without naming the field. Repeat
       // once without it, same other params and same signal (the deadline is the caller's, never renewed); the second
       // answer stands, whatever it is. Nothing is cached: the next call tries the wait again.
