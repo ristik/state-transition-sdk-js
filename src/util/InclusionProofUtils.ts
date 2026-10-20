@@ -12,6 +12,7 @@ import {
 import { ITrustBaseSource } from '../api/ITrustBaseSource.js';
 import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
+import { JsonRpcResponseError } from '../api/json-rpc/JsonRpcResponseError.js';
 import { StateId } from '../api/StateId.js';
 import {
   abortable,
@@ -165,6 +166,69 @@ const CERTIFICATION_PENDING_CODE = -32021;
 /** Aggregator answer: no proof known for the state (the JSON-RPC form of HTTP 404). */
 const NOT_FOUND_CODE = -32020;
 
+/** Aggregator answer: busy, retry later. */
+const BUSY_CODE = -32006;
+/** Greatest `Retry-After` honored. */
+const MAX_RETRY_AFTER_MS = 60_000;
+
+/**
+ * Whether a failed proof read is an overload answer (HTTP 503 or 429, JSON-RPC -32006, or an error whose
+ * `data.retryable` is true): inconclusive, not a failure.
+ *
+ * @param {unknown} err The error of the read.
+ * @returns {{retryAfterMs: number|undefined}|null} The advertised `Retry-After` (capped), `null` if not an overload.
+ */
+function overloadOf(err: unknown): { retryAfterMs: number | undefined } | null {
+  const rpc = err instanceof JsonRpcNetworkError ? err.rpcError : err instanceof JsonRpcDataError ? err : undefined;
+  const data = rpc?.data;
+  const retryable =
+    rpc !== undefined &&
+    (rpc.code === BUSY_CODE ||
+      (typeof data === 'object' && data !== null && (data as { retryable?: unknown }).retryable === true));
+  const header = err instanceof JsonRpcNetworkError ? (err.retryAfterMs ?? rpc?.retryAfterMs) : rpc?.retryAfterMs;
+  // 502/504 are intermediary timeouts inside a wait: inconclusive like an overload. The status counts even when the body
+  // could not be read (JsonRpcResponseError carries it); one-shot calls still surface these as errors.
+  const status = err instanceof JsonRpcNetworkError || err instanceof JsonRpcResponseError ? err.status : undefined;
+  const overloaded = retryable || (status !== undefined && [429, 502, 503, 504].includes(status));
+  if (err instanceof JsonRpcResponseError) {
+    return overloaded
+      ? { retryAfterMs: err.retryAfterMs === undefined ? undefined : Math.min(err.retryAfterMs, MAX_RETRY_AFTER_MS) }
+      : null;
+  }
+  return overloaded ? { retryAfterMs: header === undefined ? undefined : Math.min(header, MAX_RETRY_AFTER_MS) } : null;
+}
+
+/** Codes (Node) of a failed TLS validation of the peer certificate: no retry can fix them. */
+const TLS_VALIDATION_CODE =
+  /CERT|ISSUER|SELF_SIGNED|LEAF_SIGNATURE|ALTNAME|HOSTNAME_MISMATCH|TLS|SSL|UNABLE_TO_VERIFY/i;
+
+/**
+ * Whether a failed proof read is a transport-level failure inconclusive inside a wait: a `fetch` network error (refused
+ * or reset connection, stale keep-alive socket, truncated response). TLS certificate/hostname validation failures, an
+ * invalid URL and a refused redirect are terminal, as is anything that is not a network error (aborts included).
+ *
+ * @param {unknown} err The error of the read.
+ * @returns {boolean} True for an inconclusive transport failure.
+ */
+function isTransportFailure(err: unknown): boolean {
+  if (!(err instanceof TypeError)) {
+    return false;
+  }
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 6; e = e.cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (/invalid url|failed to parse url|unsupported|redirect/i.test(e.message)) {
+      return false;
+    }
+    if (typeof code === 'string' && TLS_VALIDATION_CODE.test(code)) {
+      return false;
+    }
+    if (/certificate|hostname\/ip does not match|altnames/i.test(e.message)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isSignalLike(value: unknown): value is AbortSignal {
   return (
     typeof value === 'object' &&
@@ -301,6 +365,8 @@ export async function waitInclusionProof(
     // `waitMs` is sent only when a positive wait fits; the request then gets a transport timeout of wait + margin, kept
     // within the budget, which is an inconclusive answer and not a failure of the wait
     let requestTimedOut = false;
+    // the error of the aggregator read itself (not of verification): only that can be a transport failure
+    let readError: unknown;
     const poll = async (requestSignal: AbortSignal, waitMs: number): Promise<IPollOutcome> => {
       requestTimedOut = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -326,6 +392,9 @@ export async function waitInclusionProof(
           signal: signalOfRequest,
           ...(waitMs > 0 ? { waitMs } : {}),
         });
+      } catch (e) {
+        readError = e;
+        throw e;
       } finally {
         clearTimeout(timer);
         joined?.dispose();
@@ -414,14 +483,51 @@ export async function waitInclusionProof(
           await sleep(Math.max(interval, MIN_POLL_GAP_MS), signal);
           continue;
         }
+        // A transport-level failure of a proof read inside a wait (refused or reset connection, stale keep-alive socket,
+        // truncated response) is inconclusive: plain reads at the interval within the original budget. TLS validation,
+        // invalid URLs and aborts stay terminal; a submission is never part of this loop and never replayed.
+        if (!signal.aborted && err === readError && isTransportFailure(err)) {
+          longPolling = false;
+          const transportPause = Math.max(interval, MIN_POLL_GAP_MS);
+          const left = remainingMs();
+          if (left !== undefined && transportPause > left) {
+            throw new SleepError(
+              `The proof read failed at the transport level and the ${transportPause} ms pause does not fit the ` +
+                `${Math.max(0, Math.round(left))} ms left of the wait budget.`,
+              { cause: err },
+            );
+          }
+          await sleep(transportPause, signal);
+          continue;
+        }
+        // An overload answer (any code with data.retryable, 503, 429, -32006) is classified first, before pending and
+        // unknown: it is inconclusive, pause max(interval, Retry-After), fail fast when that does not fit the budget, and
+        // poll plainly (no waitMs) for the rest of the wait.
         // A missing proof is the expected "not certified yet" answer. JSON-RPC -32021 (certification pending) always keeps
         // polling. HTTP 404 and -32020 (no proof known for the state) are the legacy "unknown" answer: without status hints
         // they keep polling, with hints they follow the `unknown` hint (grace period, then InclusionProofUnknownError).
         // Anything else, including the {@link SleepError} raised on abort, ends the wait.
-        const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
+        const overload = overloadOf(err);
+        if (overload !== null) {
+          longPolling = false;
+          const overloadPause = Math.max(interval, MIN_POLL_GAP_MS, overload.retryAfterMs ?? 0);
+          const left = remainingMs();
+          if (left !== undefined && overloadPause > left) {
+            throw new SleepError(
+              `The aggregator is overloaded (retry after ${overloadPause} ms) and the pause does not fit the ` +
+                `${Math.max(0, Math.round(left))} ms left of the wait budget.`,
+              { cause: err },
+            );
+          }
+          await sleep(overloadPause, signal);
+          continue;
+        }
+        // an answer that does not carry our id (a null id) is terminal, whatever its code (overload was decided above)
+        const matched = !(err instanceof JsonRpcDataError) || err.idMatched;
+        const pending = matched && err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
         const unknown =
           (err instanceof JsonRpcNetworkError && err.status === 404) ||
-          (err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);
+          (matched && err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);
         if (!pending && !unknown) {
           throw err;
         }
