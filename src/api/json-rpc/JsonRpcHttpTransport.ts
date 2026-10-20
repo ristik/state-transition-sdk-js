@@ -44,7 +44,7 @@ export class JsonRpcHttpTransport {
     if (/^\d+$/.test(trimmed)) {
       return Math.min(Number(trimmed), 60) * 1000;
     }
-    const when = JsonRpcHttpTransport.parseHttpDate(trimmed);
+    const when = JsonRpcHttpTransport.parseHttpDate(trimmed, now);
     return when === undefined ? undefined : Math.min(Math.max(when - now, 0), 60_000);
   }
 
@@ -78,9 +78,10 @@ export class JsonRpcHttpTransport {
    * validated (a day within its month, hour at most 23, ...). Anything else is not a date.
    *
    * @param {string} text The header value.
+   * @param {number} now Local time in milliseconds (the two-digit year of RFC 850 is read relative to it).
    * @returns {number | undefined} Milliseconds since the epoch, `undefined` when it is not an HTTP-date.
    */
-  private static parseHttpDate(text: string): number | undefined {
+  private static parseHttpDate(text: string, now: number): number | undefined {
     const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
     const longDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -94,7 +95,9 @@ export class JsonRpcHttpTransport {
       longDays.includes(match[1])
     ) {
       [, , day, mon, year, h, m, sec] = match;
-      year = String(Number(year) < 70 ? 2000 + Number(year) : 1900 + Number(year));
+      // RFC 9110: a two-digit year more than 50 years in the future is read as the most recent past year with those digits
+      const nowYear = new Date(now).getUTCFullYear();
+      year = String(2000 + Number(year) > nowYear + 50 ? 1900 + Number(year) : 2000 + Number(year));
     } else if (
       (match = new RegExp(`^(\\w{3}) (\\w{3}) ([ \\d]\\d) ${time} (\\d{4})$`).exec(text)) !== null &&
       days.includes(match[1])
@@ -105,7 +108,7 @@ export class JsonRpcHttpTransport {
     }
     const month = months.indexOf(mon);
     const [d, y, hh, mm, ss] = [Number(day), Number(year), Number(h), Number(m), Number(sec)];
-    if (month < 0 || hh > 23 || mm > 59 || ss > 60) {
+    if (month < 0 || y < 1970 || hh > 23 || mm > 59 || ss > 60) {
       return undefined;
     }
     const at = Date.UTC(y, month, d, hh, mm, Math.min(ss, 59));

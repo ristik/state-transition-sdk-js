@@ -188,6 +188,37 @@ function overloadOf(err: unknown): { retryAfterMs: number | undefined } | null {
   return overloaded ? { retryAfterMs: header === undefined ? undefined : Math.min(header, MAX_RETRY_AFTER_MS) } : null;
 }
 
+/** Codes (Node) of a failed TLS validation of the peer certificate: no retry can fix them. */
+const TLS_VALIDATION_CODE =
+  /CERT|ISSUER|SELF_SIGNED|LEAF_SIGNATURE|ALTNAME|HOSTNAME_MISMATCH|TLS|SSL|UNABLE_TO_VERIFY/i;
+
+/**
+ * Whether a failed proof read is a transport-level failure inconclusive inside a wait: a `fetch` network error (refused
+ * or reset connection, stale keep-alive socket, truncated response). TLS certificate/hostname validation failures, an
+ * invalid URL and a refused redirect are terminal, as is anything that is not a network error (aborts included).
+ *
+ * @param {unknown} err The error of the read.
+ * @returns {boolean} True for an inconclusive transport failure.
+ */
+function isTransportFailure(err: unknown): boolean {
+  if (!(err instanceof TypeError)) {
+    return false;
+  }
+  for (let e: unknown = err, depth = 0; e instanceof Error && depth < 6; e = e.cause, depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (/invalid url|failed to parse url|unsupported|redirect/i.test(e.message)) {
+      return false;
+    }
+    if (typeof code === 'string' && TLS_VALIDATION_CODE.test(code)) {
+      return false;
+    }
+    if (/certificate|hostname\/ip does not match|altnames/i.test(e.message)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isSignalLike(value: unknown): value is AbortSignal {
   return (
     typeof value === 'object' &&
@@ -323,6 +354,8 @@ export async function waitInclusionProof(
     // `waitMs` is sent only when a positive wait fits; the request then gets a transport timeout of wait + margin, kept
     // within the budget, which is an inconclusive answer and not a failure of the wait
     let requestTimedOut = false;
+    // the error of the aggregator read itself (not of verification): only that can be a transport failure
+    let readError: unknown;
     const poll = async (requestSignal: AbortSignal, waitMs: number): Promise<IPollOutcome> => {
       requestTimedOut = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -348,6 +381,9 @@ export async function waitInclusionProof(
           signal: signalOfRequest,
           ...(waitMs > 0 ? { waitMs } : {}),
         });
+      } catch (e) {
+        readError = e;
+        throw e;
       } finally {
         clearTimeout(timer);
         joined?.dispose();
@@ -420,6 +456,23 @@ export async function waitInclusionProof(
         if (requestTimedOut && !signal.aborted && waitMs > 0) {
           longPolling = false;
           await sleep(Math.max(interval, MIN_POLL_GAP_MS), signal);
+          continue;
+        }
+        // A transport-level failure of a proof read inside a wait (refused or reset connection, stale keep-alive socket,
+        // truncated response) is inconclusive: plain reads at the interval within the original budget. TLS validation,
+        // invalid URLs and aborts stay terminal; a submission is never part of this loop and never replayed.
+        if (!signal.aborted && err === readError && isTransportFailure(err)) {
+          longPolling = false;
+          const transportPause = Math.max(interval, MIN_POLL_GAP_MS);
+          const left = remainingMs();
+          if (left !== undefined && transportPause > left) {
+            throw new SleepError(
+              `The proof read failed at the transport level and the ${transportPause} ms pause does not fit the ` +
+                `${Math.max(0, Math.round(left))} ms left of the wait budget.`,
+              { cause: err },
+            );
+          }
+          await sleep(transportPause, signal);
           continue;
         }
         // An overload answer (any code with data.retryable, 503, 429, -32006) is classified first, before pending and
