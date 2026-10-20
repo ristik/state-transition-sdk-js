@@ -137,4 +137,25 @@ describe('JsonRpcHttpTransport', () => {
       expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
     });
   });
+
+  describe('error answers by id', () => {
+    const raw = (body: string): void => {
+      fetchMock.mockImplementation(() => Promise.resolve(new Response(body, { status: 200 })));
+    };
+
+    it('the exact null-id concurrency answer is a JsonRpcDataError that did not match our id', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"Concurrency limit exceeded"},"id":null}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(JsonRpcDataError);
+      expect((error as JsonRpcDataError).code).toBe(-32006);
+      expect((error as JsonRpcDataError).idMatched).toBe(false);
+    });
+
+    it('a different non-null id is a protocol error, even for -32006', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"busy"},"id":"someone-else"}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(JsonRpcDataError);
+      expect((error as Error).message).toContain('id mismatch');
+    });
+  });
 });

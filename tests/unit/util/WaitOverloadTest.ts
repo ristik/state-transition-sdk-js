@@ -261,6 +261,31 @@ describe('waitInclusionProof overload answers', () => {
     expect(seen.slice(1)).toEqual([undefined, undefined]);
   });
 
+  it('a null-id answer (the pre-parse concurrency limit) is an overload only for -32006 or data.retryable', async () => {
+    for (const data of [undefined, { retryable: true }]) {
+      const error = new JsonRpcDataError({ code: data === undefined ? -32006 : -32099, data, message: 'busy' }, false);
+      const client = new Scripted(pendingFirst(failing(error)));
+      const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(await done).toEqual(new Error('end'));
+      expect(client.calls).toHaveLength(4);
+      expect(client.calls.slice(1).every((c) => c.options?.waitMs === undefined)).toBe(true);
+    }
+  });
+
+  it('other unmatched answers stay terminal: null-id pending, not found, other errors', async () => {
+    for (const code of [-32021, -32020, -32000]) {
+      for (const statusHints of [true, false]) {
+        const error = new JsonRpcDataError({ code, message: 'x' }, false);
+        const client = new Scripted([step(failing(error))]);
+        const done = start(client, { intervalMs: 500, statusHints, timeoutMs: 15_000 });
+        await jest.advanceTimersByTimeAsync(1);
+        expect(await done).toBe(error);
+        expect(client.calls).toHaveLength(1);
+      }
+    }
+  });
+
   it('a non-retryable error still ends the wait at once', async () => {
     for (const error of [http(500), http(404 + 100), new JsonRpcDataError({ code: -32000, message: 'bad' })]) {
       const client = new Scripted([step(failing(error))]);

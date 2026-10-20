@@ -435,10 +435,12 @@ export async function waitInclusionProof(
           await sleep(overloadPause, signal);
           continue;
         }
-        const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
+        // an answer that does not carry our id (a null id) is terminal, whatever its code (overload was decided above)
+        const matched = !(err instanceof JsonRpcDataError) || err.idMatched;
+        const pending = matched && err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
         const unknown =
           (err instanceof JsonRpcNetworkError && err.status === 404) ||
-          (err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);
+          (matched && err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);
         if (!pending && !unknown) {
           throw err;
         }
