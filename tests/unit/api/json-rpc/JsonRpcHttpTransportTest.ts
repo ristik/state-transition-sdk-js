@@ -149,6 +149,13 @@ describe('JsonRpcHttpTransport', () => {
       expect((error as JsonRpcDataError).idMatched).toBe(false);
     });
 
+    it('a MISSING id is a protocol error, even for a retryable -32006 (only an explicit null id is the busy exception)', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"busy","data":{"retryable":true}}}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(JsonRpcDataError);
+      expect((error as Error).message).toContain('id mismatch');
+    });
+
     it('a different non-null id is a protocol error, even for -32006', async () => {
       raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"busy"},"id":"someone-else"}');
       const error = await transport.request('m', {}).catch((e: unknown) => e);
@@ -166,7 +173,21 @@ describe('JsonRpcHttpTransport', () => {
       expect(parse('Sun Nov  6 08:49:47 1994')).toBe(10_000);
       expect(parse('Sun, 06 Nov 1994 08:00:00 GMT')).toBe(0);
       expect(parse('Mon, 07 Nov 1994 08:49:37 GMT')).toBe(60_000);
-      for (const junk of ['soon', 'Sun, 32 Nov 1994 08:49:37 GMT', 'Sun, 06 Nov 1994 08:49:37 PST', '+5', '1.5']) {
+      for (const junk of [
+        'soon',
+        'Soon 2026',
+        'Sun 1994',
+        'May 1994',
+        'Sun, 31 Feb 1994 08:49:47 GMT',
+        'Sun, 29 Feb 1995 08:49:47 GMT',
+        'Sun, 06 Nov 1994 24:00:00 GMT',
+        'Xyz, 06 Nov 1994 08:49:47 GMT',
+        'Sun, 06 Nov 1994 08:49:47',
+        'Sun, 32 Nov 1994 08:49:37 GMT',
+        'Sun, 06 Nov 1994 08:49:37 PST',
+        '+5',
+        '1.5',
+      ]) {
         expect(parse(junk)).toBeUndefined();
       }
     });

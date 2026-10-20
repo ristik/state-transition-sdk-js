@@ -342,6 +342,15 @@ describe('waitInclusionProof overload answers', () => {
     }
   });
 
+  it('a missing id (not null) is a protocol error and terminal, even for a retryable busy answer', async () => {
+    const missingId = new JsonRpcResponseError('JSON-RPC response id mismatch: expected x, got undefined.');
+    const client = new Scripted([step(failing(missingId))]);
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await done).toBe(missingId);
+    expect(client.calls).toHaveLength(1);
+  });
+
   it('a non-retryable error still ends the wait at once', async () => {
     for (const error of [http(500), http(501), new JsonRpcDataError({ code: -32000, message: 'bad' })]) {
       const client = new Scripted([step(failing(error))]);
