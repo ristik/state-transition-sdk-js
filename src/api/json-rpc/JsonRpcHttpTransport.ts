@@ -28,7 +28,26 @@ export class JsonRpcHttpTransport {
   }
 
   /** The error object of an envelope as an error, or a response error if it is not a valid error object. */
-  private static dataError(error: unknown, idMatched: boolean): JsonRpcDataError | JsonRpcResponseError {
+  /**
+   * The `Retry-After` header as milliseconds: decimal seconds of any length saturate at 60 s, a date, a sign or anything
+   * else is ignored.
+   *
+   * @param {string | null} value Header value.
+   * @returns {number | undefined} Milliseconds, `undefined` when absent or not delta-seconds.
+   */
+  public static parseRetryAfter(value: string | null): number | undefined {
+    const trimmed = value?.trim();
+    if (trimmed === undefined || !/^\d+$/.test(trimmed)) {
+      return undefined;
+    }
+    return Math.min(Number(trimmed), 60) * 1000;
+  }
+
+  private static dataError(
+    error: unknown,
+    idMatched: boolean,
+    retryAfterMs?: number,
+  ): JsonRpcDataError | JsonRpcResponseError {
     if (
       typeof error !== 'object' ||
       error === null ||
@@ -37,7 +56,7 @@ export class JsonRpcHttpTransport {
     ) {
       return new JsonRpcResponseError('JSON-RPC error object needs an integer code and a message.');
     }
-    return new JsonRpcDataError(error as { code: number; data?: unknown; message: string }, idMatched);
+    return new JsonRpcDataError(error as { code: number; data?: unknown; message: string }, idMatched, retryAfterMs);
   }
 
   private static parseEnvelope(body: string): IJsonRpcResponse | null {
@@ -118,6 +137,7 @@ export class JsonRpcHttpTransport {
       signal: options?.signal,
     });
 
+    const retryAfterMs = JsonRpcHttpTransport.parseRetryAfter(response.headers.get('Retry-After'));
     const body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
     const envelope = JsonRpcHttpTransport.parseEnvelope(body);
     if (!response.ok) {
@@ -133,10 +153,10 @@ export class JsonRpcHttpTransport {
         envelope.result === undefined &&
         envelope.id === id
       ) {
-        const candidate = JsonRpcHttpTransport.dataError(envelope.error, true);
+        const candidate = JsonRpcHttpTransport.dataError(envelope.error, true, retryAfterMs);
         rpcError = candidate instanceof JsonRpcDataError ? candidate : undefined;
       }
-      throw new JsonRpcNetworkError(response.status, body, rpcError);
+      throw new JsonRpcNetworkError(response.status, body, rpcError, retryAfterMs);
     }
 
     if (envelope === null) {
@@ -159,7 +179,7 @@ export class JsonRpcHttpTransport {
       if (data.id !== id && data.id !== null) {
         throw new JsonRpcResponseError(`JSON-RPC response id mismatch: expected ${id}, got ${String(data.id)}.`);
       }
-      throw JsonRpcHttpTransport.dataError(data.error, data.id === id);
+      throw JsonRpcHttpTransport.dataError(data.error, data.id === id, retryAfterMs);
     }
 
     if (data.id !== id) {

@@ -13,10 +13,12 @@ export class JsonRpcDataError extends Error {
    * JSON-RPC error object constructor.
    * @param {{code: number; message: string; data?: unknown}} data Error data.
    * @param {boolean} idMatched Whether the envelope carried the id of the request (false: a null id).
+   * @param {number} [retryAfterMs] The `Retry-After` header of the HTTP response in milliseconds (capped at 60 s).
    */
   public constructor(
     { code, data, message }: { code: number; data?: unknown; message: string },
     public readonly idMatched: boolean = true,
+    public readonly retryAfterMs?: number,
   ) {
     super(message);
     this.code = code;
