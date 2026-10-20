@@ -1,6 +1,7 @@
 import { JsonRpcDataError } from '../../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from '../../../../src/api/json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from '../../../../src/api/json-rpc/JsonRpcNetworkError.js';
+import { JsonRpcResponseError } from '../../../../src/api/json-rpc/JsonRpcResponseError.js';
 
 describe('JsonRpcHttpTransport', () => {
   const transport = new JsonRpcHttpTransport('https://example.com');
@@ -122,19 +123,92 @@ describe('JsonRpcHttpTransport', () => {
       expect((data as JsonRpcDataError).retryAfterMs).toBe(ms);
     });
 
-    it.each(['Wed, 21 Oct 2026 07:28:00 GMT', '', 'abc', '-1', '+5', '1.5', '1e3', '3 s'])(
-      'ignores %j',
-      async (value) => {
-        answer(429, value);
-        expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
-        answer(200, value);
-        expect(((await caught()) as JsonRpcDataError).retryAfterMs).toBeUndefined();
-      },
-    );
+    it.each(['', 'abc', '-1', '+5', '1.5', '1e3', '3 s'])('ignores %j', async (value) => {
+      answer(429, value);
+      expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
+      answer(200, value);
+      expect(((await caught()) as JsonRpcDataError).retryAfterMs).toBeUndefined();
+    });
 
     it('is absent without the header', async () => {
       answer(503, null);
       expect(((await caught()) as JsonRpcNetworkError).retryAfterMs).toBeUndefined();
+    });
+  });
+
+  describe('error answers by id', () => {
+    const raw = (body: string): void => {
+      fetchMock.mockImplementation(() => Promise.resolve(new Response(body, { status: 200 })));
+    };
+
+    it('the exact null-id concurrency answer is a JsonRpcDataError that did not match our id', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"Concurrency limit exceeded"},"id":null}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(JsonRpcDataError);
+      expect((error as JsonRpcDataError).code).toBe(-32006);
+      expect((error as JsonRpcDataError).idMatched).toBe(false);
+    });
+
+    it('a MISSING id is a protocol error, even for a retryable -32006 (only an explicit null id is the busy exception)', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"busy","data":{"retryable":true}}}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(JsonRpcDataError);
+      expect((error as Error).message).toContain('id mismatch');
+    });
+
+    it('a different non-null id is a protocol error, even for -32006', async () => {
+      raw('{"jsonrpc":"2.0","error":{"code":-32006,"message":"busy"},"id":"someone-else"}');
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).not.toBeInstanceOf(JsonRpcDataError);
+      expect((error as Error).message).toContain('id mismatch');
+    });
+  });
+
+  describe('Retry-After HTTP-date and intermediary statuses', () => {
+    const now = Date.parse('Sun, 06 Nov 1994 08:49:37 GMT');
+    it('accepts the three HTTP-date forms, floored at 0 and capped at 60 s', () => {
+      const parse = (v: string): number | undefined => JsonRpcHttpTransport.parseRetryAfter(v, now);
+      expect(parse('Sun, 06 Nov 1994 08:49:47 GMT')).toBe(10_000);
+      expect(parse('Sunday, 06-Nov-94 08:49:47 GMT')).toBe(10_000);
+      expect(parse('Sun Nov  6 08:49:47 1994')).toBe(10_000);
+      expect(parse('Sun, 06 Nov 1994 08:00:00 GMT')).toBe(0);
+      expect(parse('Mon, 07 Nov 1994 08:49:37 GMT')).toBe(60_000);
+      for (const junk of [
+        'soon',
+        'Soon 2026',
+        'Sun 1994',
+        'May 1994',
+        'Sun, 31 Feb 1994 08:49:47 GMT',
+        'Sun, 29 Feb 1995 08:49:47 GMT',
+        'Sun, 06 Nov 1994 24:00:00 GMT',
+        'Xyz, 06 Nov 1994 08:49:47 GMT',
+        'Sun, 06 Nov 1994 08:49:47',
+        'Sun, 32 Nov 1994 08:49:37 GMT',
+        'Sun, 06 Nov 1994 08:49:37 PST',
+        '+5',
+        '1.5',
+      ]) {
+        expect(parse(junk)).toBeUndefined();
+      }
+    });
+
+    it('a 502 with a non-JSON body is a network error with its status; an oversized one carries the status too', async () => {
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(new Response('<html>bad gateway</html>', { headers: { 'Retry-After': '2' }, status: 502 })),
+      );
+      const error = await transport.request('m', {}).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(JsonRpcNetworkError);
+      expect((error as JsonRpcNetworkError).status).toBe(502);
+      expect((error as JsonRpcNetworkError).retryAfterMs).toBe(2000);
+
+      const small = new JsonRpcHttpTransport('https://example.com', 16);
+      fetchMock.mockImplementation(() =>
+        Promise.resolve(new Response('x'.repeat(100), { headers: { 'Retry-After': '3' }, status: 504 })),
+      );
+      const big = await small.request('m', {}).catch((e: unknown) => e);
+      expect(big).toBeInstanceOf(JsonRpcResponseError);
+      expect((big as JsonRpcResponseError).status).toBe(504);
+      expect((big as JsonRpcResponseError).retryAfterMs).toBe(3000);
     });
   });
 });

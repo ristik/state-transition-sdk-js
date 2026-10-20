@@ -29,18 +29,23 @@ export class JsonRpcHttpTransport {
 
   /** The error object of an envelope as an error, or a response error if it is not a valid error object. */
   /**
-   * The `Retry-After` header as milliseconds: decimal seconds of any length saturate at 60 s, a date, a sign or anything
-   * else is ignored.
+   * The `Retry-After` header as milliseconds (RFC 9110): delay-seconds of any length saturate at 60 s, an HTTP-date is
+   * the date minus the local clock (floored at 0, capped at 60 s), a sign or anything else is ignored.
    *
    * @param {string | null} value Header value.
-   * @returns {number | undefined} Milliseconds, `undefined` when absent or not delta-seconds.
+   * @param {number} [now] Local time in milliseconds (for the date form).
+   * @returns {number | undefined} Milliseconds, `undefined` when absent or not a valid form.
    */
-  public static parseRetryAfter(value: string | null): number | undefined {
+  public static parseRetryAfter(value: string | null, now: number = Date.now()): number | undefined {
     const trimmed = value?.trim();
-    if (trimmed === undefined || !/^\d+$/.test(trimmed)) {
+    if (trimmed === undefined || trimmed === '') {
       return undefined;
     }
-    return Math.min(Number(trimmed), 60) * 1000;
+    if (/^\d+$/.test(trimmed)) {
+      return Math.min(Number(trimmed), 60) * 1000;
+    }
+    const when = JsonRpcHttpTransport.parseHttpDate(trimmed);
+    return when === undefined ? undefined : Math.min(Math.max(when - now, 0), 60_000);
   }
 
   private static dataError(
@@ -66,6 +71,46 @@ export class JsonRpcHttpTransport {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * An HTTP-date (RFC 9110 §5.6.7) in exactly one of its three forms, IMF-fixdate, RFC 850 or asctime, with every field
+   * validated (a day within its month, hour at most 23, ...). Anything else is not a date.
+   *
+   * @param {string} text The header value.
+   * @returns {number | undefined} Milliseconds since the epoch, `undefined` when it is not an HTTP-date.
+   */
+  private static parseHttpDate(text: string): number | undefined {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const longDays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const time = '(\\d{2}):(\\d{2}):(\\d{2})';
+    let day: string, mon: string, year: string, h: string, m: string, sec: string;
+    let match = new RegExp(`^(\\w{3}), (\\d{2}) (\\w{3}) (\\d{4}) ${time} GMT$`).exec(text);
+    if (match !== null && days.includes(match[1])) {
+      [, , day, mon, year, h, m, sec] = match;
+    } else if (
+      (match = new RegExp(`^(\\w{6,9}), (\\d{2})-(\\w{3})-(\\d{2}) ${time} GMT$`).exec(text)) !== null &&
+      longDays.includes(match[1])
+    ) {
+      [, , day, mon, year, h, m, sec] = match;
+      year = String(Number(year) < 70 ? 2000 + Number(year) : 1900 + Number(year));
+    } else if (
+      (match = new RegExp(`^(\\w{3}) (\\w{3}) ([ \\d]\\d) ${time} (\\d{4})$`).exec(text)) !== null &&
+      days.includes(match[1])
+    ) {
+      [, , mon, day, h, m, sec, year] = match;
+    } else {
+      return undefined;
+    }
+    const month = months.indexOf(mon);
+    const [d, y, hh, mm, ss] = [Number(day), Number(year), Number(h), Number(m), Number(sec)];
+    if (month < 0 || hh > 23 || mm > 59 || ss > 60) {
+      return undefined;
+    }
+    const at = Date.UTC(y, month, d, hh, mm, Math.min(ss, 59));
+    // a day outside its month rolls over: reject
+    return new Date(at).getUTCDate() === d ? at : undefined;
   }
 
   /**
@@ -138,7 +183,16 @@ export class JsonRpcHttpTransport {
     });
 
     const retryAfterMs = JsonRpcHttpTransport.parseRetryAfter(response.headers.get('Retry-After'));
-    const body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
+    let body: string;
+    try {
+      body = await JsonRpcHttpTransport.readBoundedText(response, this.maxResponseBytes);
+    } catch (e) {
+      // the status of a non-2xx answer classifies it even when its body is oversized
+      if (!response.ok && e instanceof JsonRpcResponseError) {
+        throw new JsonRpcResponseError(e.message, { retryAfterMs, status: response.status });
+      }
+      throw e;
+    }
     const envelope = JsonRpcHttpTransport.parseEnvelope(body);
     if (!response.ok) {
       // Always a network error with its status, as it has been. A complete JSON-RPC error envelope for this very request

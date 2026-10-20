@@ -6,6 +6,7 @@ import { InclusionProofUnknownError } from '../../../src/api/InclusionProofStatu
 import { IInclusionProofRequestOptions } from '../../../src/api/IRequestOptions.js';
 import { JsonRpcDataError } from '../../../src/api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../../../src/api/json-rpc/JsonRpcNetworkError.js';
+import { JsonRpcResponseError } from '../../../src/api/json-rpc/JsonRpcResponseError.js';
 import { NetworkId } from '../../../src/api/NetworkId.js';
 import { StateId } from '../../../src/api/StateId.js';
 import { DataHash } from '../../../src/crypto/hash/DataHash.js';
@@ -261,8 +262,97 @@ describe('waitInclusionProof overload answers', () => {
     expect(seen.slice(1)).toEqual([undefined, undefined]);
   });
 
+  it('a null-id answer (the pre-parse concurrency limit) is an overload only for -32006 or data.retryable', async () => {
+    for (const data of [undefined, { retryable: true }]) {
+      const error = new JsonRpcDataError({ code: data === undefined ? -32006 : -32099, data, message: 'busy' }, false);
+      const client = new Scripted(pendingFirst(failing(error)));
+      const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(await done).toEqual(new Error('end'));
+      expect(client.calls).toHaveLength(4);
+      expect(client.calls.slice(1).every((c) => c.options?.waitMs === undefined)).toBe(true);
+    }
+  });
+
+  it('other unmatched answers stay terminal: null-id pending, not found, other errors', async () => {
+    for (const code of [-32021, -32020, -32000]) {
+      for (const statusHints of [true, false]) {
+        const error = new JsonRpcDataError({ code, message: 'x' }, false);
+        const client = new Scripted([step(failing(error))]);
+        const done = start(client, { intervalMs: 500, statusHints, timeoutMs: 15_000 });
+        await jest.advanceTimersByTimeAsync(1);
+        expect(await done).toBe(error);
+        expect(client.calls).toHaveLength(1);
+      }
+    }
+  });
+
+  it.each([502, 504])(
+    'HTTP %i inside a wait is inconclusive: plain reads, original budget, paced by the interval',
+    async (status) => {
+      const client = new Scripted(pendingFirst(failing(http(status))));
+      const done = start(client, { intervalMs: 700, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(10_000);
+      expect(await done).toEqual(new Error('end'));
+      expect(client.calls).toHaveLength(4);
+      expect(client.calls[0].options?.waitMs).toBeGreaterThan(0);
+      expect(client.calls.slice(1).every((c) => c.options?.waitMs === undefined)).toBe(true);
+      expect(times(client)[1] - times(client)[0]).toBe(700);
+    },
+  );
+
+  it('a 502 whose body was oversized (status carried by the response error) is classified by its status', async () => {
+    const oversized = new JsonRpcResponseError('JSON-RPC response exceeds the maximum allowed size.', {
+      retryAfterMs: 3000,
+      status: 502,
+    });
+    const client = new Scripted(pendingFirst(failing(oversized)));
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(10_000);
+    expect(await done).toEqual(new Error('end'));
+    expect(client.calls).toHaveLength(4);
+    expect(times(client)[1] - times(client)[0]).toBe(3000);
+    // a malformed *successful* response (no status) stays terminal
+    const malformed = new JsonRpcResponseError('JSON-RPC response id mismatch');
+    const terminal = new Scripted([step(failing(malformed))]);
+    const result = start(terminal, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await result).toBe(malformed);
+    expect(terminal.calls).toHaveLength(1);
+  });
+
+  it('a 504 pause beyond the budget fails within it with the gateway error as cause', async () => {
+    const gateway = http(504, 30_000);
+    const client = new Scripted([step(failing(gateway))]);
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(1);
+    const error = await done;
+    expect(error).toBeInstanceOf(SleepError);
+    expect((error as SleepError).cause).toBe(gateway);
+    expect(client.calls).toHaveLength(1);
+  });
+
+  it('other 5xx statuses stay terminal', async () => {
+    for (const status of [500, 501, 505]) {
+      const error = http(status);
+      const client = new Scripted([step(failing(error))]);
+      const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+      await jest.advanceTimersByTimeAsync(1);
+      expect(await done).toBe(error);
+    }
+  });
+
+  it('a missing id (not null) is a protocol error and terminal, even for a retryable busy answer', async () => {
+    const missingId = new JsonRpcResponseError('JSON-RPC response id mismatch: expected x, got undefined.');
+    const client = new Scripted([step(failing(missingId))]);
+    const done = start(client, { intervalMs: 500, timeoutMs: 15_000 });
+    await jest.advanceTimersByTimeAsync(1);
+    expect(await done).toBe(missingId);
+    expect(client.calls).toHaveLength(1);
+  });
+
   it('a non-retryable error still ends the wait at once', async () => {
-    for (const error of [http(500), http(404 + 100), new JsonRpcDataError({ code: -32000, message: 'bad' })]) {
+    for (const error of [http(500), http(501), new JsonRpcDataError({ code: -32000, message: 'bad' })]) {
       const client = new Scripted([step(failing(error))]);
       const done = start(client, { intervalMs: 1000, timeoutMs: 15_000 });
       await jest.advanceTimersByTimeAsync(1);
