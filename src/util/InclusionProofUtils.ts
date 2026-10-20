@@ -155,6 +155,36 @@ const CERTIFICATION_PENDING_CODE = -32021;
 /** Aggregator answer: no proof known for the state (the JSON-RPC form of HTTP 404). */
 const NOT_FOUND_CODE = -32020;
 
+/** Aggregator answer: busy, retry later. */
+const BUSY_CODE = -32006;
+/** Greatest `Retry-After` honored. */
+const MAX_RETRY_AFTER_MS = 60_000;
+
+/**
+ * Whether a failed proof read is an overload answer (HTTP 503 or 429, JSON-RPC -32006, or an error whose
+ * `data.retryable` is true): inconclusive, not a failure.
+ *
+ * @param {unknown} err The error of the read.
+ * @returns {{retryAfterMs: number|undefined}|null} The advertised `Retry-After` (capped), `null` if not an overload.
+ */
+function overloadOf(err: unknown): { retryAfterMs: number | undefined } | null {
+  const rpc = err instanceof JsonRpcNetworkError ? err.rpcError : err instanceof JsonRpcDataError ? err : undefined;
+  const data = rpc?.data;
+  const retryable =
+    rpc !== undefined &&
+    (rpc.code === BUSY_CODE ||
+      (typeof data === 'object' && data !== null && (data as { retryable?: unknown }).retryable === true));
+  if (err instanceof JsonRpcNetworkError) {
+    if (err.status === 503 || err.status === 429 || retryable) {
+      return {
+        retryAfterMs: err.retryAfterMs === undefined ? undefined : Math.min(err.retryAfterMs, MAX_RETRY_AFTER_MS),
+      };
+    }
+    return null;
+  }
+  return retryable ? { retryAfterMs: undefined } : null;
+}
+
 function isSignalLike(value: unknown): value is AbortSignal {
   return (
     typeof value === 'object' &&
@@ -394,6 +424,23 @@ export async function waitInclusionProof(
         // they keep polling, with hints they follow the `unknown` hint (grace period, then InclusionProofUnknownError).
         // Anything else, including the {@link SleepError} raised on abort, ends the wait.
         const pending = err instanceof JsonRpcDataError && err.code === CERTIFICATION_PENDING_CODE;
+        // An overload answer is inconclusive: pause max(interval, Retry-After), fail fast when that does not fit the
+        // budget, and poll plainly (no waitMs) for the rest of the wait.
+        const overload = pending ? null : overloadOf(err);
+        if (overload !== null) {
+          longPolling = false;
+          const overloadPause = Math.max(interval, MIN_POLL_GAP_MS, overload.retryAfterMs ?? 0);
+          const left = remainingMs();
+          if (left !== undefined && overloadPause > left) {
+            throw new SleepError(
+              `The aggregator is overloaded (retry after ${overloadPause} ms) and the pause does not fit the ` +
+                `${Math.max(0, Math.round(left))} ms left of the wait budget.`,
+              { cause: err },
+            );
+          }
+          await sleep(overloadPause, signal);
+          continue;
+        }
         const unknown =
           (err instanceof JsonRpcNetworkError && err.status === 404) ||
           (err instanceof JsonRpcDataError && err.code === NOT_FOUND_CODE);

@@ -136,7 +136,14 @@ export class JsonRpcHttpTransport {
         const candidate = JsonRpcHttpTransport.dataError(envelope.error, true);
         rpcError = candidate instanceof JsonRpcDataError ? candidate : undefined;
       }
-      throw new JsonRpcNetworkError(response.status, body, rpcError);
+      const retryAfter = response.headers.get('Retry-After')?.trim();
+      const seconds = retryAfter !== undefined && /^\d+$/.test(retryAfter) ? Number(retryAfter) : undefined;
+      throw new JsonRpcNetworkError(
+        response.status,
+        body,
+        rpcError,
+        seconds === undefined ? undefined : seconds * 1000,
+      );
     }
 
     if (envelope === null) {
