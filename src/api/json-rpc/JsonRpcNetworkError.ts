@@ -6,6 +6,9 @@ import { JsonRpcDataError } from './JsonRpcDataError.js';
 export class JsonRpcNetworkError extends Error {
   public readonly name: string = 'JsonRpcNetworkError';
 
+  /** The `Retry-After` header of the response in milliseconds (delta-seconds form), absent when missing or unparseable. */
+  public readonly retryAfterMs?: number;
+
   /**
    * Set when the body of the non-2xx response is a complete JSON-RPC error envelope for this very request (version 2.0,
    * matching id, an error and no result): the service's own error, whatever the HTTP status is. Additive: the error is
@@ -17,8 +20,10 @@ export class JsonRpcNetworkError extends Error {
     public readonly status: number,
     public readonly message: string,
     rpcError?: JsonRpcDataError,
+    retryAfterMs?: number,
   ) {
     super(message);
     this.rpcError = rpcError;
+    this.retryAfterMs = retryAfterMs;
   }
 }
