@@ -30,8 +30,15 @@ import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
 import { abortable } from '../internal/abortable.js';
+import { checkWaitMs, isMalformedParams, isWireMilliseconds } from '../internal/longPoll.js';
 import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
 import { HexConverter } from '../util/HexConverter.js';
+
+/** What a batch call sent: the HTTP requests it took so far and the `waitMs` of the one in flight, if any. */
+interface IBatchSend {
+  readonly requests: 1 | 2;
+  readonly waitMs: number | undefined;
+}
 
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
@@ -58,7 +65,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     this.transport = new JsonRpcHttpTransport(url);
   }
 
-  private static batchFailure(e: unknown, options?: IBatchRequestOptions): unknown {
+  private static batchFailure(e: unknown, options: IBatchRequestOptions | undefined, sent: IBatchSend): unknown {
     if (e instanceof BatchProofError) {
       return e;
     }
@@ -69,32 +76,67 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     ) {
       return e;
     }
+    const { requests } = sent;
     if (e instanceof JsonRpcDataError) {
-      return AggregatorClient.rpcFailure(e);
+      return AggregatorClient.rpcFailure(e, sent);
     }
     if (e instanceof JsonRpcResponseError) {
-      return new BatchProofError('invalid_response', e.message, { cause: e });
+      return new BatchProofError('invalid_response', e.message, { cause: e, requests });
     }
     if (e instanceof JsonRpcNetworkError) {
       return new BatchProofError('transport', `HTTP ${e.status}`, {
         cause: e,
         detail: `http_${e.status}`,
+        requests,
         // the credential is missing or wrong: a new attempt with the same key cannot succeed
         retryable: e.status !== 401 && e.status !== 403,
       });
     }
-    return new BatchProofError('transport', e instanceof Error ? e.message : String(e), { cause: e, retryable: true });
+    return new BatchProofError('transport', e instanceof Error ? e.message : String(e), {
+      cause: e,
+      requests,
+      retryable: true,
+    });
   }
 
-  private static decodeBatch(result: unknown, count: number, exact: boolean): InclusionProofBatch {
+  /** The validated `waitMs` of a batch call: a caller error is a `rejected` failure before anything is sent. */
+  private static batchWait(options: IBatchRequestOptions | undefined, exact: boolean): number | undefined {
+    if (options?.waitMs === undefined) {
+      return undefined;
+    }
+    if (exact) {
+      throw new BatchProofError(
+        'rejected',
+        'waitMs cannot be combined with stateRoot: an exact root is never waited on.',
+        {
+          detail: 'wait_with_state_root',
+        },
+      );
+    }
+    if (!isWireMilliseconds(options.waitMs)) {
+      throw new BatchProofError('rejected', 'waitMs must be an integer in [0, Number.MAX_SAFE_INTEGER].', {
+        detail: 'invalid_wait_ms',
+      });
+    }
+    return options.waitMs;
+  }
+
+  private static decodeBatch(result: unknown, count: number, exact: boolean, sent: IBatchSend): InclusionProofBatch {
     const invalid = (message: string, cause?: unknown): BatchProofError =>
-      new BatchProofError('invalid_response', message, { cause });
+      new BatchProofError('invalid_response', message, { cause, requests: sent.requests });
     if (typeof result !== 'object' || result === null || Array.isArray(result)) {
       throw invalid('Batch result must be an object.');
     }
     const body = result as Record<string, unknown>;
     // Unknown result fields are ignored (the service may add fields), never copied into trusted material: only the
     // known fields below are read, and they stay strictly validated.
+    // the echo is a known field: admitted only as the answer to a request that asked for a wait
+    if (body.waitedMs !== undefined && sent.waitMs === undefined) {
+      throw invalid('Unexpected batch result field "waitedMs".');
+    }
+    if (body.waitedMs !== undefined && !isWireMilliseconds(body.waitedMs)) {
+      throw invalid('Malformed waitedMs: it must be an integer in [0, Number.MAX_SAFE_INTEGER].');
+    }
     if (!Array.isArray(body.proofs) || body.proofs.length !== count) {
       throw invalid(`Expected ${count} proofs.`);
     }
@@ -113,7 +155,7 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
         return InclusionProofResponse.decodeWith(HexConverter.decode(proof), interner);
       });
       const view = typeof body.partitionView === 'string' ? HexConverter.decode(body.partitionView) : null;
-      return new InclusionProofBatch(proofs, view);
+      return new InclusionProofBatch(proofs, view, { requests: sent.requests, waitedMs: body.waitedMs ?? null });
     } catch (e) {
       throw invalid(`Malformed batch result: ${e instanceof Error ? e.message : String(e)}`, e);
     }
@@ -171,11 +213,17 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     return Object.keys(classes).length > 0 ? classes : undefined;
   }
 
-  private static rpcFailure(e: JsonRpcDataError): BatchProofError {
+  private static rpcFailure(e: JsonRpcDataError, sent: IBatchSend): BatchProofError {
     const data = typeof e.data === 'object' && e.data !== null ? (e.data as Record<string, unknown>) : {};
     const detail = typeof data.detail === 'string' ? data.detail : undefined;
     const retryable = data.retryable === true;
     const code = e.code;
+    const { requests } = sent;
+    // the echo of a request that asked for a wait; a malformed one is a protocol error, not metadata
+    if (sent.waitMs !== undefined && data.waitedMs !== undefined && !isWireMilliseconds(data.waitedMs)) {
+      return new BatchProofError('invalid_response', 'Malformed waitedMs in the error data.', { cause: e, requests });
+    }
+    const waitedMs = sent.waitMs !== undefined ? (data.waitedMs as number | undefined) : undefined;
     switch (code) {
       case -32008: // proof unavailable
         if (isBatchStateDetail(detail)) {
@@ -184,27 +232,31 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
             code,
             detail,
             ...AggregatorClient.stateIndexes(data, detail),
+            requests,
             retryable: detail === 'state_pending',
+            waitedMs,
           });
         }
         return detail === 'unsupported_configuration'
-          ? new BatchProofError('unsupported', e.message, { code, detail })
-          : new BatchProofError('unavailable', e.message, { code, detail, retryable });
+          ? new BatchProofError('unsupported', e.message, { code, detail, requests, waitedMs })
+          : new BatchProofError('unavailable', e.message, { code, detail, requests, retryable, waitedMs });
       case -32006: // concurrency limit: busy, with or without data
         return new BatchProofError('unavailable', e.message, {
           code,
           detail: detail ? `busy:${detail}` : 'busy',
+          requests,
           retryable: true,
+          waitedMs,
         });
       case -32601:
-        return new BatchProofError('unsupported', e.message, { code, detail: 'method_not_found' });
+        return new BatchProofError('unsupported', e.message, { code, detail: 'method_not_found', requests });
       case -32602:
       case -32600:
-        return new BatchProofError('rejected', e.message, { code, detail });
+        return new BatchProofError('rejected', e.message, { code, detail, requests, waitedMs });
       case -32007:
-        return new BatchProofError('limit_exceeded', e.message, { code, detail });
+        return new BatchProofError('limit_exceeded', e.message, { code, detail, requests, waitedMs });
       default: // database, internal and unknown codes are operational failures, not unavailability
-        return new BatchProofError('server', e.message, { code, detail, retryable });
+        return new BatchProofError('server', e.message, { code, detail, requests, retryable, waitedMs });
     }
   }
 
@@ -227,22 +279,34 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     stateId: StateId,
     options?: IInclusionProofRequestOptions,
   ): Promise<InclusionProofResponse> {
-    const data: { includeStatus?: true; stateId: string } = { stateId: HexConverter.encode(stateId.data) };
+    const waitMs = options?.waitMs === undefined ? undefined : checkWaitMs(options.waitMs);
+    const data: { includeStatus?: true; stateId: string; waitMs?: number } = {
+      stateId: HexConverter.encode(stateId.data),
+    };
     if (options?.includeStatusHint === true) {
       data.includeStatus = true;
     }
+    if (waitMs !== undefined) {
+      data.waitMs = waitMs;
+    }
     const result = await this.transport.request('get_inclusion_proof.v2', data, new Headers(), options);
 
-    // a plain string is the legacy result (and the answer of a server that ignores the flag): no status
+    // a plain string is the legacy result (and the answer of a server that ignores the flags): no status, no echo
     if (typeof result === 'string') {
       return AggregatorClient.decodeInclusionProofResponse(result);
     }
     if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
       throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
     }
-    const { proof, status } = result as { proof: string; status?: unknown };
+    const { proof, status, waitedMs } = result as { proof: string; status?: unknown; waitedMs?: unknown };
+    // the echo answers a wait request, nothing else, and is an integer or a protocol error
+    if (waitedMs !== undefined && (waitMs === undefined || !isWireMilliseconds(waitedMs))) {
+      throw new JsonRpcResponseError('Unexpected or malformed waitedMs in the result of get_inclusion_proof.v2.');
+    }
     // an unrecognized status value is treated like no status at all
-    return AggregatorClient.decodeInclusionProofResponse(proof).withStatusHint(parseProofStatusHint(status));
+    return AggregatorClient.decodeInclusionProofResponse(proof)
+      .withStatusHint(parseProofStatusHint(status))
+      .withWaitedMs(waitedMs ?? null);
   }
 
   /**
@@ -271,24 +335,49 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       });
     }
 
+    const waitMs = AggregatorClient.batchWait(options, exact);
     const headers = new Headers();
     if (this.#key) {
       headers.set('X-API-Key', this.#key);
     }
-
-    let result: unknown;
-    try {
-      result = await this.transport.request(
+    const request = (wait: number | undefined): Promise<unknown> =>
+      this.transport.request(
         'get_inclusion_proofs.v1',
-        { stateIds: ids, stateRoot: exact ? HexConverter.encode(options.stateRoot?.data) : 'latest' },
+        wait === undefined
+          ? { stateIds: ids, stateRoot: exact ? HexConverter.encode(options.stateRoot?.data) : 'latest' }
+          : { stateIds: ids, stateRoot: 'latest', waitMs: wait },
         headers,
         options,
       );
-    } catch (e) {
-      throw AggregatorClient.batchFailure(e, options);
+
+    let sent: IBatchSend = { requests: 1, waitMs };
+    let result: unknown;
+    try {
+      result = await request(waitMs);
+    } catch (error) {
+      // a gateway may carry the service's JSON-RPC error behind a non-2xx status (HTTP 400 for a batch across shards,
+      // 503 for an overload): the envelope is classified as on HTTP 200
+      const e = error instanceof JsonRpcNetworkError && error.rpcError ? error.rpcError : error;
+      // A strict parser that does not know `waitMs` answers the generic malformed params without naming the field. Repeat
+      // once without it, same other params and same signal (the deadline is the caller's, never renewed); the second
+      // answer stands, whatever it is. Nothing is cached: the next call tries the wait again.
+      if (
+        waitMs === undefined ||
+        !(e instanceof JsonRpcDataError) ||
+        !e.idMatched ||
+        !isMalformedParams(e.code, e.data)
+      ) {
+        throw AggregatorClient.batchFailure(e, options, sent);
+      }
+      sent = { requests: 2, waitMs: undefined };
+      try {
+        result = await request(undefined);
+      } catch (retryFailure) {
+        throw AggregatorClient.batchFailure(retryFailure, options, sent);
+      }
     }
 
-    return AggregatorClient.decodeBatch(result, ids.length, exact);
+    return AggregatorClient.decodeBatch(result, ids.length, exact, sent);
   }
 
   /**

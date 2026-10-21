@@ -478,7 +478,7 @@ This section documents SDK behaviour that the README only summarizes. The source
 
 ### 12.1 Waiting for Inclusion Proofs
 
-`waitInclusionProof(client, trustBase, predicateVerifier, unicityCertificateVerifier, transaction, options?)` polls the aggregator until it returns a proof for the transaction, verifies the proof and returns it. The options object accepts `signal`, `intervalMs` (default 1000), `statusHints` (default `true`) and `unknownGraceMs`. The positional form `(signal, interval)` from SDK 3.0 is still accepted and behaves as in 3.0.
+`waitInclusionProof(client, trustBase, predicateVerifier, unicityCertificateVerifier, transaction, options?)` polls the aggregator until it returns a proof for the transaction, verifies the proof and returns it. The options object accepts `signal`, `timeoutMs`, `intervalMs` (default 1000), `statusHints` (default `true`), `unknownGraceMs` and `longPoll` (default `true`). The positional form `(signal, interval)` from SDK 3.0 is still accepted and behaves as in 3.0.
 
 #### Status hints
 
@@ -493,6 +493,20 @@ With `statusHints` enabled, `waitInclusionProof` requests the hint on every poll
 - `unknown`: fail with `InclusionProofUnknownError` once the answer has persisted for the grace period (`unknownGraceMs`, default two intervals). A wait that starts right after submission can reach an aggregator instance that has not seen the request yet.
 
 `statusHints: false` restores the 3.0 behaviour: no hint is requested and the wait ends only with a proof, an error or the signal.
+
+#### Long polling
+
+With the options form, `waitInclusionProof` also asks the aggregator to hold each request while the state is pending (`waitMs`). This means fewer requests and an earlier answer after certification. Each wait is sized from the time left: `timeoutMs` is the total budget (default 15 s when neither `signal` nor `timeoutMs` is given). A `signal` alone does not tell how much time is left, so the full 20 s window is requested and the wait stops when the signal fires. `longPoll: false` polls as in 3.0; `longPoll: { windowMs, marginMs }` tunes the window. The positional form never long polls.
+
+The aggregator echoes the time it waited in `response.waitedMs`. The echo is unauthenticated metadata: it never extends a deadline and never replaces proof verification. A missing or zero echo makes the rest of that call poll at `intervalMs`; nothing is cached across calls.
+
+Lower-level calls:
+
+- `getInclusionProof(stateId, { waitMs })` sends one request with the wait parameter and returns the ordinary answer when the wait ends, pending included. Without `waitMs` the request is unchanged.
+- `getInclusionProofs(stateIds, { waitMs })` does the same for a batch (latest view only). A server that rejects the unknown field with the generic `malformed_params` error gets one repeat without it (`batch.requests === 2`).
+- `consolidate(token, { masterLongPoll: true })` (or `{ windowMs, marginMs }`) enables one wait on the master's latest request.
+
+An invalid `waitMs` raises a `RangeError` from `getInclusionProof`, a `BatchProofError` (`rejected`) from `getInclusionProofs` and a `ConsolidationError` (`input`) from consolidation.
 
 #### Errors and resubmission
 
