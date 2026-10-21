@@ -17,6 +17,20 @@
 - `AGGREGATION_PARTITION_ID` (`7n`, `lib/api/bft/AggregationPartition.js`): the aggregation partition of every network
   (mainnet network 1, testnet2 network 4, local network 3). It cannot be configured.
 
+### Breaking: non-inclusion verification (`verifyNonInclusion`)
+
+- Returns a discriminated result: `verdict` `absent_at_snapshot` or `included_at_snapshot` with the queried `stateId` and
+  the authenticated `snapshot` (`NonInclusionSnapshot`: `networkId`, `partitionId`, `shardId`, `rootRound`,
+  `sealTimestampSeconds`, `rootEpoch`, `shardRound`, `shardEpoch` as `bigint`, `stateRoot` or `null` for the empty tree),
+  or a rejection (`uc_invalid`, `authority_rejected`, `certificate_invalid`) with `snapshot: null` and a `reason`. It is
+  no longer a `VerificationResult` (no `status`, no `absence`); `VerifiedAbsence` and `absentAtRound` are removed.
+- Removed: the options `expectedPartition` (the partition is `AGGREGATION_PARTITION_ID`; a validly signed certificate of
+  another partition is `uc_invalid`) and `minRound`, and the `stale` verdict. Freshness is the caller's decision on the
+  snapshot. A state present at the snapshot is `included_at_snapshot`, no longer the rejection `state_included`.
+- Every non-inclusion entry point and the README carry the warning that absence holds only at the authenticated
+  snapshot. The shared corpus is `non-inclusion/v2` of aggregator-go (the locally generated sharded vectors are gone: the
+  shared corpus covers them).
+
 ### Behaviour
 
 - Application verification requires the authenticated unicity certificate to be of partition 7: genesis, transfers and
@@ -38,5 +52,9 @@
 - The shared JSON-RPC transport throws `JsonRpcResponseError` (instead of `JsonRpcDataError`) for an error envelope whose
   id does not match the request. The behaviour is kept; callers of other methods that match on the old class should
   catch both.
+- An undecodable `get_inclusion_proof.v2` result makes `AggregatorClient.getInclusionProof` throw `JsonRpcResponseError`
+  instead of the raw `CborError`, `HashError` or `Error`; the original error is its `cause`. Retry and wait behaviour is
+  unchanged (`waitInclusionProof` already ended on any such error); only code that matches the old error class or text
+  needs to change.
 - `get_inclusion_proofs.v1` has to be sent to the shard aggregators directly; the aggregator-subscription proxy cannot
   route it yet (see the README).

@@ -32,19 +32,22 @@ export interface IUnicityCertificateOptions {
 }
 
 export async function createUnicityCertificate(
-  rootHash: DataHash,
+  rootHash: DataHash | Uint8Array | null,
   signingService: SigningService,
   timestamp: bigint = REFERENCE_TIME,
   options: IUnicityCertificateOptions = {},
 ): Promise<UnicityCertificate> {
-  // a record the native IsValid accepts: a round with an assigned timestamp and summary, a changed state hash and so a
-  // block hash
+  // a record the native IsValid accepts: a round with an assigned timestamp and summary; a changed state hash needs a
+  // block hash, the certified empty tree (null or empty hash, like the null previous hash) is unchanged and has none
+  const rootBytes = rootHash instanceof DataHash ? rootHash.data : rootHash;
   const blockHash =
     options.blockHash !== undefined
       ? options.blockHash
-      : (await new DataHasher(HashAlgorithm.SHA256).update(rootHash.data).digest()).data;
+      : rootBytes === null || rootBytes.length === 0
+        ? null
+        : (await new DataHasher(HashAlgorithm.SHA256).update(rootBytes).digest()).data;
   const summaryValue = options.summaryValue !== undefined ? options.summaryValue : new Uint8Array(0);
-  const inputRecord = new InputRecord(1n, 0n, null, rootHash.data, summaryValue, timestamp, blockHash, 0n, null);
+  const inputRecord = new InputRecord(1n, 0n, null, rootBytes, summaryValue, timestamp, blockHash, 0n, null);
   const technicalRecordHash =
     options.technicalRecordHash !== undefined ? options.technicalRecordHash : new Uint8Array(32);
   const shardConfigurationHash = new Uint8Array(32);

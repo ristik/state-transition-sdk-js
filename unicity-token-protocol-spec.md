@@ -541,3 +541,31 @@ Batch requests (`get_inclusion_proofs.v1`, and therefore consolidation) must be 
 ### 12.3 Aggregation Partition
 
 The aggregation layer is partition `AGGREGATION_PARTITION_ID` (`7n`) on every network (mainnet network 1, testnet2 network 4, local network 3). It is a constant: `ShardRouting` takes no partition ID, and verification of tokens, consolidation evidence and partition views accepts certificates of that partition only, whatever a proof or response claims. Certificates must also satisfy the structural rules of the unicity certificate (input record, technical record hash, seal); a token whose certificates do not is rejected.
+
+### 12.4 Non-inclusion Proofs
+
+> Non-inclusion proves absence only at the authenticated snapshot returned by verification. It does not prove absence now, continuous absence, or that a token can be spent. Compare the snapshot’s network and root round (or its certified seal timestamp under your application’s time policy) with an independently trusted requirement. The seal timestamp is a consensus-certified time, not proof of real-time freshness. Do not use unverified response metadata for this check.
+
+`AggregatorClient.getNonInclusionProof(stateId, { signal })` calls `get_non_inclusion_proof.v1` once, without polling. It returns either an unverified `NonInclusionProof`, bound to the requested state ID (the ID is never read from the response), or `{ kind: 'state_included_hint' }`. The latter is the service's unauthenticated claim that the state is included; request an inclusion proof and verify it.
+
+`verifyNonInclusion(proof, { trustBase, unicityCertificateVerifier }, { nextEpochStartRound?, shard?, shardConfigurationHash? })` authenticates the unicity certificate (partition `AGGREGATION_PARTITION_ID`, the expected shard, and strict seal authentication: network, exact epoch, epoch start, quorum) and the state tree path before it exposes any value. The result is discriminated by `verdict`:
+
+- `absent_at_snapshot`: the path proves the key absent.
+- `included_at_snapshot`: the path proves that exact key present.
+- `uc_invalid`, `authority_rejected`, `certificate_invalid`: rejection, with `snapshot: null` and a `reason`. `reason` is diagnostic text for logs and may quote unverified proof values; decide on `verdict` only.
+
+The first two carry the queried `stateId` and the authenticated `snapshot`. The snapshot holds `networkId`, `partitionId`, `shardId`, `rootRound`, `sealTimestampSeconds`, `rootEpoch`, `shardRound`, `shardEpoch` (uint64 values are `bigint`) and `stateRoot` (`null` for the certified empty tree). All are read from the authenticated certificate, not from RPC block metadata or the time of receipt.
+
+There is no freshness option. Freshness is the application's decision on the returned snapshot, against a `checkpoint` obtained independently of the proof and the server response:
+
+```ts
+const r = await verifyNonInclusion(proof, trustedContext);
+if (r.verdict !== 'absent_at_snapshot') throw new Error('No verified absence');
+if (r.snapshot.networkId !== checkpoint.networkId ||
+    r.snapshot.rootRound < checkpoint.requiredRootRound) {
+  throw new Error('Snapshot does not meet application policy');
+}
+// Absence at r.snapshot only; any spend or finality decision needs its own policy.
+```
+
+A proof that does not decode is an error of `NonInclusionProof.decode`, not a rejection. Request failures are reported as `NonInclusionProofError` (`kind`, `retryable`; on cancellation, `cause` is the signal's `reason`). The service codes `-32020` (unavailable), `-32022` (included claim) and `-32023` (busy) are recognized over HTTP 200, 404, 409 and 429. `fetchMembershipEvidence` makes two independent calls, is not atomic, and returns unverified evidence. The shared test corpus is `tests/fixtures/non-inclusion/v2` (from aggregator-go, schema 2).

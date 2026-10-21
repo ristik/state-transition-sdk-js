@@ -118,6 +118,10 @@ if (result.status !== VerificationStatus.OK) {
 
 Each transaction in a token's history has its own unicity proof, usually certified in a different round. Verifying the history inside a constrained environment, such as a smart contract or a zkVM guest, means authenticating every one of those certificates. `TokenProofClient.consolidate(token)` fetches new proofs for the token's history so that they share one unicity certificate, which then has to be authenticated only once. It is optional and the SDK never calls it on its own. See the [consolidation example](./tests/examples/consolidation/ExampleTest.ts) and the [API reference](./unicity-token-protocol-spec.md#122-proof-consolidation).
 
+### Non-inclusion proofs
+
+A non-inclusion proof shows that a state ID was absent from the aggregator's state tree at one certified snapshot. It does not show that the state is absent now or that a token can be spent. `AggregatorClient.getNonInclusionProof(stateId)` fetches the proof, and `verifyNonInclusion(proof, context)` verifies it and returns the authenticated snapshot. Before relying on the result, compare the snapshot's network and round with a checkpoint your application trusts independently. See the [API reference](./unicity-token-protocol-spec.md#124-non-inclusion-proofs).
+
 ## Security
 
 Unicity Proofs provide independently verifiable evidence of certified state transitions being unique, backed by the network's Byzantine fault tolerant consensus. Together with ownership verification, they protect against double-spending without publishing token contents to a public ledger.

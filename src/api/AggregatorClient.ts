@@ -18,20 +18,25 @@ import {
   InclusionProofBatch,
 } from './IBatchAggregatorClient.js';
 import { InclusionProofResponse } from './InclusionProofResponse.js';
+import { INonInclusionAggregatorClient, NonInclusionProofResponse } from './INonInclusionAggregatorClient.js';
 import { IInclusionProofRequestOptions, IRequestOptions } from './IRequestOptions.js';
 import { JsonRpcDataError } from './json-rpc/JsonRpcDataError.js';
 import { JsonRpcHttpTransport } from './json-rpc/JsonRpcHttpTransport.js';
 import { JsonRpcNetworkError } from './json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from './json-rpc/JsonRpcResponseError.js';
+import { NonInclusionProof } from './NonInclusionProof.js';
+import { NonInclusionProofError } from './NonInclusionProofError.js';
 import { parseProofStatusHint } from './ProofStatusHint.js';
 import { StateId } from './StateId.js';
 import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
+import { abortable } from '../internal/abortable.js';
+import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
 import { HexConverter } from '../util/HexConverter.js';
 
 /**
  * Client implementation for communicating with an aggregator via JSON-RPC.
  */
-export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient {
+export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClient, INonInclusionAggregatorClient {
   private readonly transport: JsonRpcHttpTransport;
   readonly #key: string | null;
 
@@ -111,6 +116,21 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       return new InclusionProofBatch(proofs, view);
     } catch (e) {
       throw invalid(`Malformed batch result: ${e instanceof Error ? e.message : String(e)}`, e);
+    }
+  }
+
+  /**
+   * Decode the proof of a received result. Any failure here, whatever its type or text, is the phase "the service sent
+   * material that is not a proof": a malformed response, never a transport or RPC condition.
+   */
+  private static decodeInclusionProofResponse(hex: string): InclusionProofResponse {
+    try {
+      return InclusionProofResponse.fromCBOR(HexConverter.decode(hex));
+    } catch (e) {
+      throw new JsonRpcResponseError(
+        `Malformed result of get_inclusion_proof.v2: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
     }
   }
 
@@ -199,6 +219,9 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
   /**
    * @inheritDoc
+   * @throws {JsonRpcResponseError} If the result cannot be decoded as a proof (not hex, not CBOR, malformed proof
+   *   material): the original decoding error is kept as `cause`. Earlier releases threw that raw error (`CborError`,
+   *   `HashError` or `Error`).
    */
   public async getInclusionProof(
     stateId: StateId,
@@ -212,14 +235,14 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
 
     // a plain string is the legacy result (and the answer of a server that ignores the flag): no status
     if (typeof result === 'string') {
-      return InclusionProofResponse.fromCBOR(HexConverter.decode(result));
+      return AggregatorClient.decodeInclusionProofResponse(result);
     }
     if (typeof result !== 'object' || result === null || typeof (result as { proof?: unknown }).proof !== 'string') {
       throw new JsonRpcResponseError('Unexpected result of get_inclusion_proof.v2.');
     }
     const { proof, status } = result as { proof: string; status?: unknown };
     // an unrecognized status value is treated like no status at all
-    return InclusionProofResponse.fromCBOR(HexConverter.decode(proof)).withStatusHint(parseProofStatusHint(status));
+    return AggregatorClient.decodeInclusionProofResponse(proof).withStatusHint(parseProofStatusHint(status));
   }
 
   /**
@@ -287,6 +310,40 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       return BigInt(response.blockNumber);
     }
     throw new Error('Invalid response format for block height');
+  }
+
+  /**
+   * @inheritDoc
+   */
+  public async getNonInclusionProof(stateId: StateId, options?: IRequestOptions): Promise<NonInclusionProofResponse> {
+    const params = { stateId: HexConverter.encode(stateId.data) };
+    let result: unknown;
+    try {
+      const call = (signal?: AbortSignal): Promise<unknown> =>
+        this.transport.request('get_non_inclusion_proof.v1', params, new Headers(), { signal });
+      // the request is raced against the signal: a transport that ignores it cannot outlive the caller's deadline
+      result = options?.signal ? await abortable(call, options.signal) : await call();
+    } catch (e) {
+      const failure = classifyNonInclusionFailure(e, options?.signal);
+      if (failure === null) {
+        return { kind: 'state_included_hint' };
+      }
+      throw failure;
+    }
+
+    // the result is one hex string; its size is bounded before anything is decoded
+    if (typeof result !== 'string' || result.length > NonInclusionProof.MAX_WIRE_BYTES * 2 + 2) {
+      throw new NonInclusionProofError('invalid_response', 'The result must be a bounded hex string.');
+    }
+    try {
+      return { kind: 'absence_proof', proof: NonInclusionProof.decode(stateId, HexConverter.decode(result)) };
+    } catch (e) {
+      throw new NonInclusionProofError(
+        'invalid_response',
+        `Malformed non-inclusion proof: ${e instanceof Error ? e.message : String(e)}`,
+        { cause: e },
+      );
+    }
   }
 
   /**
