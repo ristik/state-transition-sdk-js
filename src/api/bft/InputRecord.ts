@@ -3,6 +3,7 @@ import { CborError } from '../../serialization/cbor/CborError.js';
 import { CborSerializer } from '../../serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../util/HexConverter.js';
 import { dedent } from '../../util/StringUtils.js';
+import { areUint8ArraysEqual } from '../../util/TypedArrayUtils.js';
 
 /**
  * Input record for UnicityCertificate.
@@ -15,16 +16,16 @@ export class InputRecord {
     public readonly roundNumber: bigint,
     public readonly epoch: bigint,
     private readonly _previousHash: Uint8Array | null,
-    private readonly _hash: Uint8Array,
-    private readonly _summaryValue: Uint8Array,
+    private readonly _hash: Uint8Array | null,
+    private readonly _summaryValue: Uint8Array | null,
     public readonly timestamp: bigint,
     private readonly _blockHash: Uint8Array | null,
     public readonly sumOfEarnedFees: bigint,
     private readonly _executedTransactionsHash: Uint8Array | null,
   ) {
     this._previousHash = _previousHash ? new Uint8Array(_previousHash) : null;
-    this._hash = new Uint8Array(_hash);
-    this._summaryValue = new Uint8Array(_summaryValue);
+    this._hash = _hash ? new Uint8Array(_hash) : null;
+    this._summaryValue = _summaryValue ? new Uint8Array(_summaryValue) : null;
     this._blockHash = _blockHash ? new Uint8Array(_blockHash) : null;
     this._executedTransactionsHash = _executedTransactionsHash ? new Uint8Array(_executedTransactionsHash) : null;
   }
@@ -44,10 +45,27 @@ export class InputRecord {
   }
 
   /**
-   * Get the hash.
+   * Get the hash. Empty when the native record carries CBOR null (initial state), so an empty result is NOT a hash and
+   * two records with null hashes must never be treated as equal roots.
+   *
+   * @deprecated Use {@link InputRecord.nullableHash}, which tells null from a value.
    */
   public get hash(): Uint8Array {
-    return new Uint8Array(this._hash);
+    return new Uint8Array(this._hash ?? new Uint8Array(0));
+  }
+
+  /**
+   * Get the hash, `null` if the native record carries CBOR null (distinct from an empty byte string).
+   */
+  public get nullableHash(): Uint8Array | null {
+    return this._hash ? new Uint8Array(this._hash) : null;
+  }
+
+  /**
+   * Get the summary value, `null` if the native record carries CBOR null (distinct from an empty byte string).
+   */
+  public get nullableSummaryValue(): Uint8Array | null {
+    return this._summaryValue ? new Uint8Array(this._summaryValue) : null;
   }
 
   /**
@@ -58,10 +76,12 @@ export class InputRecord {
   }
 
   /**
-   * Get the summary value.
+   * Get the summary value. Empty when the native record carries CBOR null, see {@link nullableSummaryValue}.
+   *
+   * @deprecated Use {@link InputRecord.nullableSummaryValue}, which tells null from a value.
    */
   public get summaryValue(): Uint8Array {
-    return new Uint8Array(this._summaryValue);
+    return new Uint8Array(this._summaryValue ?? new Uint8Array(0));
   }
 
   /**
@@ -92,13 +112,42 @@ export class InputRecord {
       CborDeserializer.decodeUnsignedInteger(data[1]),
       CborDeserializer.decodeUnsignedInteger(data[2]),
       CborDeserializer.decodeNullable(data[3], CborDeserializer.decodeByteString),
-      CborDeserializer.decodeByteString(data[4]),
-      CborDeserializer.decodeByteString(data[5]),
+      CborDeserializer.decodeNullable(data[4], CborDeserializer.decodeByteString),
+      CborDeserializer.decodeNullable(data[5], CborDeserializer.decodeByteString),
       CborDeserializer.decodeUnsignedInteger(data[6]),
       CborDeserializer.decodeNullable(data[7], CborDeserializer.decodeByteString),
       CborDeserializer.decodeUnsignedInteger(data[8]),
       CborDeserializer.decodeNullable(data[9], CborDeserializer.decodeByteString),
     );
+  }
+
+  /**
+   * Native structural validity (bft-go-base `InputRecord.IsValid`), which is conditional: from round 1 the summary value
+   * must not be null and the timestamp must be assigned; if the state hash did not change the block hash must be nil
+   * (null or empty), and if it changed the block hash must not be nil. A null field alone is not malformed, only these
+   * combinations are (a null summary is legal at round 0, an empty block hash is required for an unchanged state).
+   *
+   * @returns {string|null} Failure description, or `null` if the record is structurally valid.
+   */
+  public structureFailure(): string | null {
+    if (this.roundNumber !== 0n) {
+      if (this._summaryValue === null) {
+        return 'The summary value is nil.';
+      }
+      if (this.timestamp === 0n) {
+        return 'The timestamp is unassigned.';
+      }
+    }
+    // Go compares with bytes.Equal and len(): a nil and an empty byte string are the same there
+    const sameStateHash = areUint8ArraysEqual(this._previousHash ?? new Uint8Array(0), this._hash ?? new Uint8Array(0));
+    const nilBlockHash = (this._blockHash?.length ?? 0) === 0;
+    if (sameStateHash && !nilBlockHash) {
+      return 'The state hash did not change but the block hash is not nil.';
+    }
+    if (!sameStateHash && nilBlockHash) {
+      return 'The block hash is nil but the state hash changed.';
+    }
+    return null;
   }
 
   /**
@@ -114,8 +163,8 @@ export class InputRecord {
         CborSerializer.encodeUnsignedInteger(this.roundNumber),
         CborSerializer.encodeUnsignedInteger(this.epoch),
         CborSerializer.encodeNullable(this._previousHash, CborSerializer.encodeByteString),
-        CborSerializer.encodeByteString(this._hash),
-        CborSerializer.encodeByteString(this._summaryValue),
+        CborSerializer.encodeNullable(this._hash, CborSerializer.encodeByteString),
+        CborSerializer.encodeNullable(this._summaryValue, CborSerializer.encodeByteString),
         CborSerializer.encodeUnsignedInteger(this.timestamp),
         CborSerializer.encodeNullable(this._blockHash, CborSerializer.encodeByteString),
         CborSerializer.encodeUnsignedInteger(this.sumOfEarnedFees),
@@ -135,8 +184,8 @@ export class InputRecord {
         Round Number: ${this.roundNumber.toString()}
         Epoch: ${this.epoch.toString()}
         Previous Hash: ${this._previousHash ? HexConverter.encode(this._previousHash) : 'null'}
-        Hash: ${HexConverter.encode(this._hash)}
-        Summary Value: ${HexConverter.encode(this._summaryValue)}
+        Hash: ${this._hash ? HexConverter.encode(this._hash) : 'null'}
+        Summary Value: ${this._summaryValue ? HexConverter.encode(this._summaryValue) : 'null'}
         Timestamp: ${this.timestamp.toString()}
         Block Hash: ${this._blockHash ? HexConverter.encode(this._blockHash) : 'null'}
         Sum of Earned Fees: ${this.sumOfEarnedFees.toString()}

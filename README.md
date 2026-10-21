@@ -88,6 +88,8 @@ The SDK handles cryptography and token encoding. Your application manages keys, 
 
 For minting and transfers, create the transaction, submit its `CertificationData` with `client.submitCertificationRequest()`, and check the response status. Obtain the verified unicity proof with the standalone `waitInclusionProof(client, trustBase, predicateVerifier, unicityCertificateVerifier, transaction)` function from `@unicitylabs/state-transition-sdk/lib/util/InclusionProofUtils.js`, then use `transaction.toCertifiedTransaction()` and `Token.mint()` or `token.transfer()` to produce the updated token. These API methods use the name `InclusionProof` for the proof object.
 
+`waitInclusionProof` stops early with `InclusionProofExpiredError` or `InclusionProofUnknownError` when the aggregator reports that it dropped the request or does not know it. The request can then be submitted again. See the [API reference](./unicity-token-protocol-spec.md#12-typescript-sdk-api-reference) for the options and errors.
+
 The linked examples are tests in a repository checkout, not files shipped in the npm package. Their helper imports and permissive issuance policies are for demonstrations. To adapt them:
 
 - Change the gateway to the network's HTTPS URL and pass the key as the second argument to `new AggregatorClient(...)` in the example source; `config.json` has no API-key field. Do not add a key while keeping the local HTTP URL.
@@ -111,6 +113,10 @@ if (result.status !== VerificationStatus.OK) {
   throw new Error(`Token verification failed: ${result.status}`);
 }
 ```
+
+### Proof consolidation
+
+Each transaction in a token's history has its own unicity proof, usually certified in a different round. Verifying the history inside a constrained environment, such as a smart contract or a zkVM guest, means authenticating every one of those certificates. `TokenProofClient.consolidate(token)` fetches new proofs for the token's history so that they share one unicity certificate, which then has to be authenticated only once. It is optional and the SDK never calls it on its own. See the [consolidation example](./tests/examples/consolidation/ExampleTest.ts) and the [API reference](./unicity-token-protocol-spec.md#122-proof-consolidation).
 
 ## Security
 
