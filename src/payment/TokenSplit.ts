@@ -3,6 +3,7 @@ import { DuplicateSplitTokenIdError } from './error/DuplicateSplitTokenIdError.j
 import { TokenAssetCountMismatchError } from './error/TokenAssetCountMismatchError.js';
 import { TokenAssetMissingError } from './error/TokenAssetMissingError.js';
 import { TokenAssetValueMismatchError } from './error/TokenAssetValueMismatchError.js';
+import { FrozenPaymentData } from './FrozenPaymentData.js';
 import { IPaymentData } from './IPaymentData.js';
 import { ISplitOptions } from './ISplitOptions.js';
 import { SplitAllocationProof } from './SplitAllocationProof.js';
@@ -46,9 +47,13 @@ export class TokenSplit {
    *
    * @param {Token} token Source token to split (the token being burned).
    * @param {(bytes: Uint8Array) => Promise<IPaymentData>} decodePaymentData Decoder for the source token's payment data.
-   * @param {SplitTokenRequest[]} requests Per-output mint requests; each carries its own payment data.
+   * @param {SplitTokenRequest[]} requests Per-output mint requests; each carries its own payment data, which must
+   *   decode with `decodePaymentData` to exactly its declared assets.
    * @param {ISplitOptions} options Optional burn state mask and request deadline.
-   * @returns {Promise<ISplit>} Burn transaction and split tokens ready to mint.
+   * @returns {Promise<ISplit>} Burn transaction and split tokens ready to mint; each token carries frozen
+   *   payment data whose `encode()` returns a copy of the committed bytes.
+   * @throws {SplitPayloadMismatchError} If an output's payment data does not decode to its declared assets;
+   *   no burn is built.
    */
   public static async split(
     token: Token,
@@ -72,6 +77,7 @@ export class TokenSplit {
     const trees = new Map<string, SparseMerkleSumTree>();
     const usedTokenIdList = new Set<string>();
     const tokenIds: TokenId[] = [];
+    const payloads: FrozenPaymentData[] = [];
 
     for (const request of requests) {
       const tokenId = await TokenId.fromSalt(token.networkId, request.salt);
@@ -83,8 +89,11 @@ export class TokenSplit {
       usedTokenIdList.add(tokenIdKey);
 
       const recipient = EncodedPredicate.fromPredicate(request.recipient);
-      const data = await request.paymentData.encode();
-      const assets = request.paymentData.assets.toArray();
+      // Freeze the output payload: the exact bytes committed below are the bytes minted later.
+      const payload = await FrozenPaymentData.freeze(request.paymentData, decodePaymentData);
+      payloads.push(payload);
+      const data = await payload.encode();
+      const assets = payload.assets.toArray();
 
       const leafData = await SplitMintJustification.calculateLeafData(token, recipient, request.salt, tokenId, data);
 
@@ -137,15 +146,14 @@ export class TokenSplit {
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
       const tokenId = tokenIds[i];
-      const proofs = request.paymentData.assets
+      const payload = payloads[i];
+      const proofs = payload.assets
         .toArray()
         .map((asset) =>
           SplitAllocationProof.create(rootByAsset.get(HexConverter.encode(asset.id.bytes))!, tokenId.bytes),
         );
 
-      tokens.push(
-        new SplitToken(token.networkId, request.recipient, token.type, request.salt, request.paymentData, proofs),
-      );
+      tokens.push(new SplitToken(token.networkId, request.recipient, token.type, request.salt, payload, proofs));
     }
 
     return {
