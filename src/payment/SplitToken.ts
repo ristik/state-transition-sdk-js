@@ -8,7 +8,8 @@ import { TokenType } from '../transaction/TokenType.js';
 /**
  * Realized split output: everything needed to mint the new token. Mint it with
  * exactly `paymentData.encode()` as the auxiliary payload — those are the bytes
- * bound by the split allocation proofs.
+ * bound by the split allocation proofs. `paymentData` is frozen by {@link TokenSplit.split}:
+ * its `encode()` returns a copy of the committed bytes on every call.
  */
 export class SplitToken {
   public constructor(

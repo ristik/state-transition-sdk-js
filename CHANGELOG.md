@@ -12,6 +12,15 @@
   `PartitionViewAuthenticator` no longer takes a partition as its first constructor argument: the partition is the
   fixed `AGGREGATION_PARTITION_ID`. Delete the argument.
 
+### Changed
+
+- `TokenSplit.split` now validates and freezes every output payload before the burn is built: it encodes the output
+  payment data once, decodes a copy with the `decodePaymentData` passed to the split, and requires the decoded assets to
+  equal the declared assets, else it throws the new `SplitPayloadMismatchError`. The committed bytes are exactly those
+  bytes, and `SplitToken.paymentData` is now a frozen `FrozenPaymentData` whose `encode()` returns a copy of them. The
+  `IPaymentData` API, wire format, commitment formula and verifier are unchanged; bare-asset splits produce identical
+  bytes. A split whose payload did not decode to its declared assets previously failed only at mint verification.
+
 ### Added
 
 - `AGGREGATION_PARTITION_ID` (`7n`, `lib/api/bft/AggregationPartition.js`): the aggregation partition of every network
