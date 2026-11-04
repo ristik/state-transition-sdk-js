@@ -41,3 +41,48 @@ export class TrustBaseBundleError extends TrustBaseError {
     super('bundle', message);
   }
 }
+
+/**
+ * A well-formed entry that does not extend its predecessor: a genesis entry where a successor is expected, another network, an epoch that is not
+ * the predecessor's plus one, a start round that does not advance, a predecessor id that does not match, or a genesis that is not the pinned one.
+ */
+export class TrustBaseChainError extends TrustBaseError {
+  public constructor(message: string) {
+    super('chain', message);
+  }
+}
+
+/**
+ * A signature check failed: a signer that is not a member, a malformed or invalid signature (even among enough valid ones), or a signed weight
+ * below the quorum threshold.
+ */
+export class TrustBaseSignatureError extends TrustBaseError {
+  public constructor(message: string) {
+    super('signature', message);
+  }
+}
+
+/**
+ * The history already holds a different entry for this epoch. Not retryable: one of the two histories is not the network's.
+ */
+export class TrustBaseConflictError extends TrustBaseError {
+  public constructor(
+    public readonly epoch: bigint,
+    message: string,
+  ) {
+    super('conflict', message);
+  }
+}
+
+/**
+ * The entry is more than one epoch ahead of the history's tip. Retryable once the missing entries are fetched.
+ */
+export class TrustBaseGapError extends TrustBaseError {
+  public constructor(
+    public readonly epoch: bigint,
+    public readonly tipEpoch: bigint,
+    message: string,
+  ) {
+    super('gap', message);
+  }
+}
