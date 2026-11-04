@@ -5,7 +5,9 @@ import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
 /**
- * Budget of a bundle decode, checked before anything is allocated: a release supplies it, there is no fixed history length.
+ * Budget of a bundle decode; a release supplies it, there is no fixed history length. `maxBytes` is checked before anything is read. `maxEntries`
+ * is checked after the entry list has been split (the CBOR reader walks the array before the count is known), so what bounds that allocation is
+ * the input size, `maxBytes`, not `maxEntries`.
  */
 export interface ITrustBaseBundleLimits {
   readonly maxBytes: number;
