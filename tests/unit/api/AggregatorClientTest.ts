@@ -1,5 +1,8 @@
-import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
+import { readFileSync } from 'node:fs';
+
+import { AggregatorClient, SDK_VERSION_HEADER } from '../../../src/api/AggregatorClient.js';
 import { StateId } from '../../../src/api/StateId.js';
+import { SDK_VERSION } from '../../../src/SdkVersion.js';
 import { CborSerializer } from '../../../src/serialization/cbor/CborSerializer.js';
 
 describe('AggregatorClient', () => {
@@ -39,5 +42,77 @@ describe('AggregatorClient', () => {
     expect(JSON.stringify(client)).not.toContain('secret-key');
     expect(Object.keys(client)).not.toContain('key');
     expect(Object.values(client)).not.toContain('secret-key');
+  });
+
+  describe('SDK version header', () => {
+    const sentHeaders = async (client: AggregatorClient): Promise<Headers> => {
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('', { status: 500 }));
+      try {
+        await expect(client.getLatestBlockNumber()).rejects.toThrow();
+        return new Headers(fetchMock.mock.calls[0][1]?.headers);
+      } finally {
+        fetchMock.mockRestore();
+      }
+    };
+
+    it('equals the package version', () => {
+      const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
+      expect(SDK_VERSION).toBe(pkg.version);
+    });
+
+    it('is sent by default outside a browser', async () => {
+      const headers = await sentHeaders(new AggregatorClient('https://example.com'));
+      expect(headers.get(SDK_VERSION_HEADER)).toBe(`js/${SDK_VERSION}`);
+    });
+
+    it('is sent on an inclusion proof request as well', async () => {
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(new Response('', { status: 500 }));
+      try {
+        const client = new AggregatorClient('https://example.com', 'k');
+        const stateId = StateId.fromCBOR(CborSerializer.encodeByteString(new Uint8Array(32)));
+        await expect(client.getInclusionProof(stateId)).rejects.toThrow();
+        const seen = new Headers(fetchMock.mock.calls[0][1]?.headers);
+        expect(seen.get(SDK_VERSION_HEADER)).toBe(`js/${SDK_VERSION}`);
+      } finally {
+        fetchMock.mockRestore();
+      }
+    });
+
+    it('is not sent when switched off', async () => {
+      const headers = await sentHeaders(
+        new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: false }),
+      );
+      expect(headers.has(SDK_VERSION_HEADER)).toBe(false);
+    });
+
+    it('can be a custom string', async () => {
+      const headers = await sentHeaders(
+        new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: 'wallet/7' }),
+      );
+      expect(headers.get(SDK_VERSION_HEADER)).toBe('wallet/7');
+    });
+
+    it('rejects a value that is not printable ASCII', () => {
+      expect(() => new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: 'a\nb' })).toThrow(
+        /printable ASCII/,
+      );
+      expect(() => new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: '' })).toThrow(
+        /printable ASCII/,
+      );
+    });
+
+    it('is off by default in a browser and on when asked', async () => {
+      const g = globalThis as unknown as { window?: unknown };
+      g.window = { document: {} };
+      try {
+        expect((await sentHeaders(new AggregatorClient('https://example.com'))).has(SDK_VERSION_HEADER)).toBe(false);
+        const on = await sentHeaders(
+          new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: true }),
+        );
+        expect(on.get(SDK_VERSION_HEADER)).toBe(`js/${SDK_VERSION}`);
+      } finally {
+        delete g.window;
+      }
+    });
   });
 });

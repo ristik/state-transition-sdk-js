@@ -32,12 +32,26 @@ import { HashAlgorithm } from '../crypto/hash/HashAlgorithm.js';
 import { abortable } from '../internal/abortable.js';
 import { checkWaitMs, isMalformedParams, isWireMilliseconds } from '../internal/longPoll.js';
 import { classifyNonInclusionFailure } from '../internal/nonInclusionFailure.js';
+import { SDK_VERSION } from '../SdkVersion.js';
 import { HexConverter } from '../util/HexConverter.js';
 
 /** What a batch call sent: the HTTP requests it took so far and the `waitMs` of the one in flight, if any. */
 interface IBatchSend {
   readonly requests: 1 | 2;
   readonly waitMs: number | undefined;
+}
+
+/** Name of the request header that carries the SDK version, so an aggregator operator can count how many clients run which version. */
+export const SDK_VERSION_HEADER = 'X-SDK-Version';
+
+/** Options of {@link AggregatorClient}. */
+export interface IAggregatorClientOptions {
+  /**
+   * The SDK version header on every request. `true` sends `js/<package version>`, a string sends that value, `false` sends nothing.
+   * Default: on outside a browser, off in a browser (a custom header makes the request subject to a CORS preflight that the aggregator has to
+   * allow). Never used as a retry fallback.
+   */
+  readonly sdkVersionHeader?: boolean | string;
 }
 
 /**
@@ -54,15 +68,37 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
    * @param key API key for authenticating
    * @param allowInsecureTransport When `true`, permit sending the API key over a non-HTTPS URL
    *   (intended for local development and testing only).
+   * @param options Client options, e.g. the SDK version header.
    * @throws {Error} If an API key is supplied for a non-HTTPS URL and `allowInsecureTransport` is `false`.
    */
-  public constructor(url: string, key: string | null = null, allowInsecureTransport: boolean = false) {
+  public constructor(
+    url: string,
+    key: string | null = null,
+    allowInsecureTransport: boolean = false,
+    options: IAggregatorClientOptions = {},
+  ) {
     if (key != null && !allowInsecureTransport && new URL(url).protocol !== 'https:') {
       throw new Error('API key must not be sent over plaintext HTTP; use an https URL.');
     }
 
     this.#key = key;
-    this.transport = new JsonRpcHttpTransport(url);
+    const version = AggregatorClient.versionHeaderValue(options.sdkVersionHeader);
+    this.transport = new JsonRpcHttpTransport(
+      url,
+      JsonRpcHttpTransport.DEFAULT_MAX_RESPONSE_BYTES,
+      version === null ? [] : [[SDK_VERSION_HEADER, version]],
+    );
+  }
+
+  private static versionHeaderValue(option: boolean | string | undefined): string | null {
+    if (typeof option === 'string') {
+      if (option === '' || !/^[\x20-\x7e]+$/.test(option)) {
+        throw new Error('sdkVersionHeader must be printable ASCII.');
+      }
+      return option;
+    }
+    const inBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
+    return (option ?? !inBrowser) ? `js/${SDK_VERSION}` : null;
   }
 
   private static batchFailure(e: unknown, options: IBatchRequestOptions | undefined, sent: IBatchSend): unknown {
