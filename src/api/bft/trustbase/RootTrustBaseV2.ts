@@ -1,8 +1,15 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
-import { TrustBaseEncodingError, TrustBaseInvalidError } from './TrustBaseError.js';
+import {
+  TrustBaseChainError,
+  TrustBaseEncodingError,
+  TrustBaseInvalidError,
+  TrustBaseSignatureError,
+} from './TrustBaseError.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
+import { Secp256k1SignatureVerifier } from '../../../crypto/secp256k1/Secp256k1SignatureVerifier.js';
+import { Signature } from '../../../crypto/secp256k1/Signature.js';
 import { CborDeserializer } from '../../../serialization/cbor/CborDeserializer.js';
 import { CborMap } from '../../../serialization/cbor/CborMap.js';
 import { CborMapEntry } from '../../../serialization/cbor/CborMapEntry.js';
@@ -58,6 +65,8 @@ export class RootTrustBaseV2 {
   /** Length of a compressed secp256k1 signing key. */
   public static readonly SIGNING_KEY_LENGTH = 33;
   public static readonly VERSION = 2n;
+
+  private static readonly SIGNATURE_VERIFIER = new Secp256k1SignatureVerifier();
 
   private constructor(
     private readonly _network: number,
@@ -316,6 +325,102 @@ export class RootTrustBaseV2 {
     } else if (this._signatures === null || this._signatures.size === 0) {
       throw new TrustBaseInvalidError('A non-genesis entry has no signatures.');
     }
+  }
+
+  /**
+   * Check that this entry is a structurally valid genesis entry (zero predecessor, null signatures). A genesis is authenticated by a pin on its
+   * entry id, never by signatures; the history compares the pin.
+   *
+   * @throws {TrustBaseInvalidError} If the entry is not a genesis entry.
+   */
+  public verifyGenesis(): void {
+    this.validate();
+    if (!this.isGenesis()) {
+      throw new TrustBaseInvalidError('Not a genesis entry.');
+    }
+  }
+
+  /**
+   * Check the signatures of this entry's members over `data`, strictly: every supplied signature must be from a member and valid (a supplied extra
+   * that is unknown or invalid fails the whole check even if the rest reach quorum), and the weight of the signers must reach the threshold.
+   *
+   * @param {Uint8Array} data Signed bytes.
+   * @param {Map<string, Uint8Array>} signatures Signatures by node id.
+   * @throws {TrustBaseSignatureError} If a signature fails or the quorum is not reached.
+   */
+  public async verifyQuorumSignatures(data: Uint8Array, signatures: Map<string, Uint8Array>): Promise<void> {
+    const weights = await Promise.all(
+      Array.from(signatures.entries(), ([nodeId, signature]) => this.verifySignature(data, signature, nodeId)),
+    );
+    const signed = weights.reduce((total, weight) => total + weight, 0n);
+    if (signed < this.quorumThreshold) {
+      throw new TrustBaseSignatureError(
+        `Quorum not reached, signed weight ${signed}, threshold ${this.quorumThreshold}.`,
+      );
+    }
+  }
+
+  /**
+   * Verify one member's signature and return the member's weight. The signature must be a canonical recoverable signature over SHA-256 of
+   * `data`: exactly 65 bytes (`r || s || recovery`), recovery id 0..3, low-S, recovering to the member's key. The 64-byte compact form is not
+   * accepted. This is the rule of the seal verifier, applied to entries.
+   *
+   * @param {Uint8Array} data Signed bytes.
+   * @param {Uint8Array} signature 65-byte signature.
+   * @param {string} nodeId Signer.
+   * @returns {Promise<bigint>} The signer's weight.
+   * @throws {TrustBaseSignatureError} If the signer is not a member or the signature is not valid.
+   */
+  public async verifySignature(data: Uint8Array, signature: Uint8Array, nodeId: string): Promise<bigint> {
+    const member = this._members.find((candidate) => candidate.nodeId === nodeId);
+    if (member === undefined) {
+      throw new TrustBaseSignatureError(`Signer "${nodeId}" is not a member.`);
+    }
+
+    let decoded: Signature;
+    try {
+      decoded = Signature.decode(signature);
+    } catch (error) {
+      throw new TrustBaseSignatureError(
+        `Signer "${nodeId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const hash = await new DataHasher(HashAlgorithm.SHA256).update(data).digest();
+    if (!(await RootTrustBaseV2.SIGNATURE_VERIFIER.verify(hash, decoded, member.sigKey))) {
+      throw new TrustBaseSignatureError(`Signer "${nodeId}": the signature is not valid.`);
+    }
+
+    return member.weight;
+  }
+
+  /**
+   * Check that this entry extends `previous`: not a genesis, same network, epoch previous + 1, a later start round, the predecessor id equal to
+   * the entry id of `previous`, and a strict quorum of `previous`' members signing {@link sigBytes}.
+   *
+   * @param {RootTrustBaseV2} previous The predecessor.
+   * @throws {TrustBaseChainError} If the entry does not extend the predecessor.
+   * @throws {TrustBaseSignatureError} If the predecessor's members did not sign it.
+   */
+  public async verifySuccessor(previous: RootTrustBaseV2): Promise<void> {
+    if (this.isGenesis()) {
+      throw new TrustBaseChainError('A genesis entry has no predecessor.');
+    }
+    if (this.networkId.id !== previous.networkId.id) {
+      throw new TrustBaseChainError(`Network ${this.networkId.id}, predecessor ${previous.networkId.id}.`);
+    }
+    if (this.epoch !== previous.epoch + 1n) {
+      throw new TrustBaseChainError(`Epoch ${this.epoch}, predecessor ${previous.epoch}.`);
+    }
+    if (this.epochStartRound <= previous.epochStartRound) {
+      throw new TrustBaseChainError(`Epoch start ${this.epochStartRound}, predecessor ${previous.epochStartRound}.`);
+    }
+    if (!areUint8ArraysEqual(this._previousEntryId, await previous.entryId())) {
+      throw new TrustBaseChainError('Previous entry id does not match.');
+    }
+
+    // A decoded non-genesis entry always carries a non-empty signature map (validate).
+    await previous.verifyQuorumSignatures(this.sigBytes(), this._signatures ?? new Map<string, Uint8Array>());
   }
 
   private encodeWithSignatures(signatures: Map<string, Uint8Array> | null): Uint8Array {
