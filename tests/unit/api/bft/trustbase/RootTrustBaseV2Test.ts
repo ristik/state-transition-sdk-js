@@ -292,9 +292,10 @@ describe('RootTrustBaseV2: encoding rules, one at a time', () => {
     expectEncoding(buildEntry({ ...GENESIS(), version: 3n }), /Version 3, expected 2/);
   });
 
-  it('rejects a network identifier of zero or above 16 bits', () => {
-    expectEncoding(buildEntry({ ...GENESIS(), network: 0n }), /Network identifier 0 outside/);
-    expectEncoding(buildEntry({ ...GENESIS(), network: 65536n }), /Network identifier 65536 outside/);
+  it('network identifier 0 is an invalid entry (shared rule), above 16 bits a bad encoding', () => {
+    expectInvalid({ ...GENESIS(), network: 0n }, /Network identifier is zero/);
+    expectEncoding(buildEntry({ ...GENESIS(), network: 65536n }), /Network identifier 65536 above 65535/);
+    expect(() => RootTrustBaseV2.decode(buildEntry({ ...GENESIS(), network: 65535n }))).not.toThrow();
   });
 
   it('rejects an integer that is not in its shortest form', () => {

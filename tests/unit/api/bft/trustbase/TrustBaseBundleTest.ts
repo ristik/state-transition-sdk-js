@@ -163,7 +163,17 @@ describe('TrustBaseBundle: rules, one at a time', () => {
 
   it('rejects a version other than 1 and a network of zero', async () => {
     await rejects({ ...threeEntryBundle(), version: 2n }, TrustBaseEncodingError, /Version 2, expected 1/);
-    await rejects({ ...threeEntryBundle(), network: 0n }, TrustBaseEncodingError, /Network identifier 0 outside/);
+    // A header network of 0 matches no entry (an entry with network 0 is invalid), so it is refused as a mismatch, not as a bad encoding.
+    await rejects(
+      { ...threeEntryBundle(), network: 0n },
+      TrustBaseBundleError,
+      /Entry 0 of network 5 in a bundle for 0/,
+    );
+    await rejects(
+      { ...threeEntryBundle(), network: 65536n },
+      TrustBaseEncodingError,
+      /Network identifier 65536 above 65535/,
+    );
   });
 
   it('rejects an embedded entry that fails its own rules, by that entry class', async () => {

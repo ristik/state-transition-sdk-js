@@ -60,7 +60,7 @@ export class RootTrustBaseV2 {
   public static readonly VERSION = 2n;
 
   private constructor(
-    public readonly networkId: NetworkId,
+    private readonly _network: number,
     public readonly epoch: bigint,
     public readonly epochStartRound: bigint,
     private readonly _members: TrustBaseMember[],
@@ -79,6 +79,11 @@ export class RootTrustBaseV2 {
   /** @returns {TrustBaseMember[]} The members, sorted by node id bytes. */
   public get members(): TrustBaseMember[] {
     return [...this._members];
+  }
+
+  /** @returns {NetworkId} The network of the entry (1..65535 on any entry that passed {@link validate}). */
+  public get networkId(): NetworkId {
+    return NetworkId.fromId(this._network);
   }
 
   /** @returns {Uint8Array} Copy of the predecessor's entry id; 32 zero bytes for the genesis entry. */
@@ -161,8 +166,9 @@ export class RootTrustBaseV2 {
     }
 
     const network = uint64(fields[1]);
-    if (network < 1n || network > 0xffffn) {
-      throw new TrustBaseEncodingError(`Network identifier ${network} outside 1..65535.`);
+    // 0 fits the wire type and is a structure error (validate), as in the Go and Rust references; only a value above 16 bits is a bad encoding.
+    if (network > 0xffffn) {
+      throw new TrustBaseEncodingError(`Network identifier ${network} above 65535.`);
     }
 
     const memberItems = CborDeserializer.decodeArray(fields[4]);
@@ -191,7 +197,7 @@ export class RootTrustBaseV2 {
     }
 
     return new RootTrustBaseV2(
-      NetworkId.fromId(network),
+      Number(network),
       uint64(fields[2]),
       uint64(fields[3]),
       members,
@@ -238,6 +244,9 @@ export class RootTrustBaseV2 {
    * @throws {TrustBaseInvalidError} If a rule fails.
    */
   public validate(): void {
+    if (this._network === 0) {
+      throw new TrustBaseInvalidError('Network identifier is zero.');
+    }
     if (this.epoch === 0n) {
       throw new TrustBaseInvalidError('Epoch is zero.');
     }
@@ -325,7 +334,7 @@ export class RootTrustBaseV2 {
       RootTrustBaseV2.CBOR_TAG,
       CborSerializer.encodeArray(
         CborSerializer.encodeUnsignedInteger(RootTrustBaseV2.VERSION),
-        CborSerializer.encodeUnsignedInteger(this.networkId.id),
+        CborSerializer.encodeUnsignedInteger(this._network),
         CborSerializer.encodeUnsignedInteger(this.epoch),
         CborSerializer.encodeUnsignedInteger(this.epochStartRound),
         CborSerializer.encodeArray(

@@ -165,8 +165,9 @@ export class TrustBaseBundle {
         throw new TrustBaseEncodingError(`Version ${version}, expected ${TrustBaseBundle.VERSION}.`);
       }
       const network = uint64(fields[1]);
-      if (network < 1n || network > 0xffffn) {
-        throw new TrustBaseEncodingError(`Network identifier ${network} outside 1..65535.`);
+      // A header network of 0 is not refused here: no entry has network 0 (validate), so the entries cannot match it and the bundle is refused as such.
+      if (network > 0xffffn) {
+        throw new TrustBaseEncodingError(`Network identifier ${network} above 65535.`);
       }
       const status = uint64(fields[2]);
       if (status >= TrustBaseBundle.STATUS_COUNT) {
