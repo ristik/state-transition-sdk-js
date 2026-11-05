@@ -33,6 +33,20 @@ Mainnet is live. Start with testnet2, for production use the mainnet gateway and
 
 Pass your gateway API key as the second argument to `AggregatorClient`. The shared public testnet2 demo key is `sk_ddc3cfcc001e4a28ac3fad7407f99590` ([source](https://github.com/unicity-sphere/sphere-sdk/blob/main/README.md#api-key)). Shared capacity may be limited; use your own key for sustained testing. Use your own mainnet key obtained from https://sphere.unicity.network/ and keep it secure.
 
+### Local network
+
+To test against your own deployment, take the bundle your aggregator serves (`GET /api/v1/trustbases?from=<genesis epoch>`, the complete answer from the genesis entry to the tip, tag 39015) and pass it as it is; nothing else needs spelling out:
+
+```js
+import { TrustBaseSession } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseSession.js';
+import { MemoryTrustBaseStore } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseStore.js';
+
+const bundle = new Uint8Array(await (await fetch(`${aggregatorUrl}/api/v1/trustbases?from=1`)).arrayBuffer());
+const { session } = await TrustBaseSession.openLocal(bundle, new MemoryTrustBaseStore());
+```
+
+The network, the genesis and tip entries and the digest are taken from the bundle, which you trust because it is yours; it is still checked strictly (every entry signed by a quorum of its predecessor). A bundle that is not complete (a continuation cursor, a refused request, not starting at the genesis entry) is `ReleasePinInvalidError`. The cache of a local network lives under the fixed namespace `local`, apart from the public networks, and later entries are fetched and verified like any other. There is no release table lookup and no lineage check against a public network.
+
 ### First connection
 
 Save this as `connect.mjs` and run `node connect.mjs`:
