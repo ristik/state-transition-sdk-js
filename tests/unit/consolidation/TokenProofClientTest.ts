@@ -652,7 +652,7 @@ describe('TokenProofClient', () => {
       expect(calls).toHaveBeenCalledTimes(sealsOf(token).size + 1);
     });
 
-    it('asks a customized quorum rule about the caller trust base object, for every seal, and never memoizes it', async () => {
+    it('asks a customized quorum rule about the caller trust base entry, for every seal, and never memoizes it', async () => {
       const received: unknown[] = [];
       let calls = 0;
       class Pinned extends UnicitySealQuorumSignaturesVerificationRule {
@@ -668,7 +668,7 @@ describe('TokenProofClient', () => {
         ): ReturnType<UnicitySealQuorumSignaturesVerificationRule['verify']> {
           calls++;
           received.push(args[0]);
-          // a policy keyed on the identity of the trust base object
+          // a policy keyed on the identity of the trust base entry
           return args[0] === this.pinned()
             ? super.verify(...args)
             : Promise.resolve(new VerificationResult('Pinned', VerificationStatus.FAIL));
@@ -679,7 +679,7 @@ describe('TokenProofClient', () => {
         1,
         new UnicityCertificateVerifier(new Pinned(() => pin.trustBase, new Secp256k1SignatureVerifier())),
       );
-      const trustBase = s.context.trustBase;
+      const trustBase = s.context.trustBase.tip;
       pin.trustBase = trustBase;
       const token = await spanning(s, 4, 2);
       await s.world.idle(1);
