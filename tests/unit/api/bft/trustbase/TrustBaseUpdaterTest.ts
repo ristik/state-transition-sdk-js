@@ -352,6 +352,26 @@ describe('TrustBaseUpdater', () => {
       expect(history.tip?.epoch).toBe(3n);
     });
 
+    it('drops the frozen range when the history moved on by other means', async () => {
+      const history = await atGenesis();
+      const f = rangeFields();
+      const a = new FakeSource(async (_request, call) => {
+        if (call === 1) {
+          return buildBundle({ ...f, entries: [f.entries[0]], nextEpoch: 3n });
+        }
+        if (call > 2) {
+          return refusal(TrustBaseStatus.NOT_YET_AVAILABLE, 3n);
+        }
+        // Meanwhile another writer appends the rest.
+        await history.append(RootTrustBaseV2.decode(f.entries[1]));
+        throw new Error('gone');
+      });
+      const b = serve(refusal(TrustBaseStatus.NOT_YET_AVAILABLE, 3n));
+      await expect(TrustBaseUpdater.update(history, [a, b], FAST)).resolves.toBe(1);
+      expect(b.requests[0].fromEpoch).toBe(4n);
+      expect(b.requests[0].snapshot).toBeNull();
+    });
+
     it('starts over after a refused entry', async () => {
       const history = await atGenesis();
       const f = rangeFields();
