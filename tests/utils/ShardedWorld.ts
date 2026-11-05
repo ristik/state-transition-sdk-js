@@ -1,6 +1,6 @@
 import { numberToBytesBE } from '@noble/curves/utils.js';
 
-import { createTrustBaseHistorySync, FIXTURE_EPOCH } from './TrustBaseHistoryFixture.js';
+import { appendNextEpoch, createTrustBaseHistorySync, FIXTURE_EPOCH } from './TrustBaseHistoryFixture.js';
 import { BatchProofError } from '../../src/api/BatchProofError.js';
 import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
@@ -103,13 +103,17 @@ export class ShardedWorld {
 
   public readonly trustBase: TrustBaseHistory;
 
+  private epoch = FIXTURE_EPOCH;
+
   private readonly ready: Promise<void>;
+
+  private readonly secret = SigningService.generatePrivateKey();
 
   private readonly shardRound = new Map<string, bigint>();
 
   private readonly shards = new Map<string, { leaves: Map<string, CertificationData>; smt: SparseMerkleTree }>();
 
-  private readonly signer = SigningService.generate();
+  private readonly signer = new SigningService(this.secret);
 
   private time = BASE_TIME;
 
@@ -200,6 +204,16 @@ export class ShardedWorld {
     return this.bits.find((b) => b === '' || shardIdFromBits(b).isPrefixOf(stateId.data)) as string;
   }
 
+  /**
+   * Start the next epoch (same member) at a root chain round: later rounds are sealed in it, earlier ones keep their epoch.
+   *
+   * @param {bigint} startRound First round of the new epoch.
+   */
+  public async startNextEpoch(startRound: bigint): Promise<void> {
+    await appendNextEpoch(this.trustBase, 'NODE', this.secret, startRound);
+    this.epoch += 1n;
+  }
+
   private async commit(changed: Set<string>): Promise<void> {
     const number = BigInt(this.rounds.length + 1);
     this.time += 1n;
@@ -270,7 +284,7 @@ export class ShardedWorld {
     const seal = await UnicitySeal.create(
       NetworkId.LOCAL,
       number,
-      FIXTURE_EPOCH,
+      this.epoch,
       this.time,
       previous?.seal.hash ?? null,
       sealHash,
