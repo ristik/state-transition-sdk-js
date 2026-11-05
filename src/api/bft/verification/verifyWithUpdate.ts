@@ -8,7 +8,7 @@ import { ITrustBaseUpdateOptions, TrustBaseUpdater } from '../trustbase/TrustBas
 /**
  * Verify, and when the only thing missing is a trust-base entry, update the history from the sources and verify once more.
  *
- * `verify` is run first. A result that is OK, or that fails for any reason other than the typed no-entry failure, is returned as it is: no fetch
+ * `verify` is run first. A result that carries no typed no-entry failure (OK, or any other failure), is returned as it is: no fetch
  * can help it. On the typed no-entry failure the history is updated (see {@link TrustBaseUpdater.update}); if that appended nothing, the first
  * result stands, and otherwise `verify` runs once more and its result is returned, whatever it is. There is no loop: one update, one retry.
  *
@@ -26,7 +26,7 @@ export async function verifyWithUpdate(
   options?: ITrustBaseUpdateOptions,
 ): Promise<VerificationResult<VerificationStatus>> {
   const first = await verify();
-  if (first.status === VerificationStatus.OK || findNoTrustBaseEntry(first) === null) {
+  if (findNoTrustBaseEntry(first) === null) {
     return first;
   }
   if ((await TrustBaseUpdater.update(history, sources, options)) === 0) {
