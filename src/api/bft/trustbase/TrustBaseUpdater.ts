@@ -1,9 +1,24 @@
-import { TrustBaseError, TrustBaseUpdateError } from './TrustBaseError.js';
-import { TrustBaseHistory } from './TrustBaseHistory.js';
+import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
+import {
+  HistoryConflictedError,
+  TrustBaseConflictError,
+  TrustBaseError,
+  TrustBaseUpdateError,
+} from './TrustBaseError.js';
+import { TrustBaseAppendOutcome } from './TrustBaseHistory.js';
 import { ITrustBaseRangeLimits, TRUST_BASE_PAGE_LIMITS, TrustBaseRange, TrustBaseStatus } from './TrustBaseRange.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { ITrustBaseRequest, ITrustBaseSource } from '../../ITrustBaseSource.js';
 import { NetworkId } from '../../NetworkId.js';
+
+/**
+ * What the updater extends: a {@link TrustBaseHistory}, or a session that adds its own rules (an authenticated fork closes it).
+ */
+export interface ITrustBaseUpdateTarget {
+  readonly networkId: NetworkId | null;
+  readonly tip: RootTrustBaseV2 | null;
+  append(entry: RootTrustBaseV2): Promise<TrustBaseAppendOutcome>;
+}
 
 /** Options of {@link TrustBaseUpdater.update}. */
 export interface ITrustBaseUpdateOptions {
@@ -29,7 +44,7 @@ export interface ITrustBaseUpdateOptions {
  */
 export class TrustBaseUpdater {
   /** Updates in flight, so concurrent callers of one history share one fetch. */
-  private static readonly IN_FLIGHT = new WeakMap<TrustBaseHistory, Promise<number>>();
+  private static readonly IN_FLIGHT = new WeakMap<ITrustBaseUpdateTarget, Promise<number>>();
 
   /**
    * Fetch and append the entries after the held tip.
@@ -42,7 +57,7 @@ export class TrustBaseUpdater {
    * @throws {TrustBaseUpdateError} If no source served the range: every source failed, refused, or served an entry the history refuses.
    */
   public static update(
-    history: TrustBaseHistory,
+    history: ITrustBaseUpdateTarget,
     sources: readonly ITrustBaseSource[],
     options: ITrustBaseUpdateOptions = {},
   ): Promise<number> {
@@ -58,7 +73,7 @@ export class TrustBaseUpdater {
   }
 
   private static async run(
-    history: TrustBaseHistory,
+    history: ITrustBaseUpdateTarget,
     sources: readonly ITrustBaseSource[],
     options: ITrustBaseUpdateOptions,
   ): Promise<number> {
@@ -158,7 +173,12 @@ export class TrustBaseUpdater {
                 appended++;
               }
             } catch (error) {
-              if (!(error instanceof TrustBaseError)) {
+              if (
+                !(error instanceof TrustBaseError) ||
+                error instanceof HistoryConflictedError ||
+                (error instanceof TrustBaseConflictError && error.authenticated)
+              ) {
+                // Not a refusal of this source: an authenticated fork is for the application, not for the next source.
                 throw error;
               }
               // The source served an entry the history refuses: keep the authenticated prefix, drop the snapshot, try the next source.
