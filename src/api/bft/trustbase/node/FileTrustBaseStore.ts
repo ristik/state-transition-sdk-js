@@ -45,6 +45,8 @@ export class FileTrustBaseStore implements ITrustBaseStore {
     const file = join(this._directory, `${stem}.cbor`);
     const lock = join(this._directory, `${stem}.lock`);
     try {
+      // The directory may not exist yet (a first run); creating it is not part of the lock.
+      await fs.mkdir(this._directory, { recursive: true });
       await fs.mkdir(lock);
     } catch (error) {
       if (isCode(error, 'EEXIST')) {

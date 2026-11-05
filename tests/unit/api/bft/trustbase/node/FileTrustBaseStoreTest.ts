@@ -59,6 +59,15 @@ describe('FileTrustBaseStore', () => {
     expect(new Uint8Array(readFileSync(file()))).toEqual(B);
   });
 
+  it('creates the directory, parents included, on the first write, and reads an absent one as null', async () => {
+    const nested = join(directory, 'a', 'b');
+    const fresh = new FileTrustBaseStore(nested);
+    await expect(fresh.read(KEY, 100)).resolves.toBeNull();
+    await expect(fresh.compareAndSwap(KEY, null, A)).resolves.toBe('written');
+    expect(new Uint8Array(readFileSync(join(nested, `${stem()}.cbor`)))).toEqual(A);
+    expect(readdirSync(nested)).toEqual([`${stem()}.cbor`]);
+  });
+
   it('leaves no lock and no temporary file behind', async () => {
     await store.compareAndSwap(KEY, null, A);
     await store.compareAndSwap(KEY, trustBaseRevision(A), B);
