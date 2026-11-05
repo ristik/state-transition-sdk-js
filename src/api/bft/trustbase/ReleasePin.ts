@@ -141,6 +141,46 @@ export class VerifiedReleasePin {
 export const RELEASE_PINS: readonly IReleasePin[] = [];
 
 /**
+ * The pin of a local or test network, derived from that deployment's own GetTrustBase bundle (genesis to tip): the network, the genesis and tip
+ * epochs and entry ids and the digest all come from the bundle. This trusts the bundle you pass (you got it from your own deployment); it checks
+ * it strictly all the same, and it is not a release lineage check. Use it with {@link TrustBaseSession.openLocal}, which keeps the cache of a
+ * local network apart from every public one.
+ *
+ * @param {Uint8Array} bundle Complete bundle bytes (tag 39015, status OK, from the genesis entry, no continuation cursor).
+ * @param {ITrustBaseBundleLimits} [limits] Budget of the bundle.
+ * @returns {Promise<IReleasePin>} The pin.
+ * @throws {ReleasePinInvalidError} If the bundle is not a complete, internally valid history.
+ */
+export async function releasePinFromBundle(
+  bundle: Uint8Array,
+  limits: ITrustBaseBundleLimits = TRUST_BASE_BUNDLE_LIMITS,
+): Promise<IReleasePin> {
+  const embeddedBundle = new Uint8Array(bundle);
+  let decoded: TrustBaseBundle;
+  try {
+    decoded = await TrustBaseBundle.decode(embeddedBundle, limits);
+  } catch (error) {
+    if (error instanceof TrustBaseError) {
+      throw new ReleasePinInvalidError(`The bundle is not a complete trust-base history: ${error.message}`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
+  const first = decoded.entries[0];
+  const tip = decoded.entries[decoded.entries.length - 1];
+  return {
+    bundleSha256: sha256(embeddedBundle),
+    embeddedBundle,
+    genesisEntryId: await first.entryId(),
+    genesisEpoch: first.epoch,
+    networkId: decoded.networkId,
+    pinnedEntryId: await tip.entryId(),
+    pinnedEpoch: tip.epoch,
+  };
+}
+
+/**
  * Select and verify the pin of a public network: the table row, optionally replaced by an override that extends it.
  *
  * @param {NetworkId} network Network.

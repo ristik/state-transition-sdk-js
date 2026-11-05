@@ -2,6 +2,7 @@ import { ITrustBaseHistory } from './ITrustBaseHistory.js';
 import {
   IReleasePin,
   RELEASE_PINS,
+  releasePinFromBundle,
   selectPublicPin,
   TRUST_BASE_BUNDLE_LIMITS,
   VerifiedReleasePin,
@@ -19,7 +20,7 @@ import {
 } from './TrustBaseError.js';
 import { TrustBaseAppendOutcome, TrustBaseHistory } from './TrustBaseHistory.js';
 import { parseTrustBaseResponse } from './TrustBaseResponseWire.js';
-import { ITrustBaseStore, PUBLIC_NAMESPACE, trustBaseCacheKey } from './TrustBaseStore.js';
+import { ITrustBaseStore, LOCAL_NAMESPACE, PUBLIC_NAMESPACE, trustBaseCacheKey } from './TrustBaseStore.js';
 import { ITrustBaseUpdateOptions, ITrustBaseUpdateTarget, TrustBaseUpdater } from './TrustBaseUpdater.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { ITrustBaseSource } from '../../ITrustBaseSource.js';
@@ -127,6 +128,26 @@ export class TrustBaseSession implements ITrustBaseUpdateTarget {
   /** @returns {RootTrustBaseV2|null} The latest held entry. */
   public get tip(): RootTrustBaseV2 | null {
     return this._history.tip;
+  }
+
+  /**
+   * Open the session of a local or test network from that deployment's own GetTrustBase bundle (genesis to tip) alone: the pin is derived from the
+   * bundle ({@link releasePinFromBundle}), the namespace is the fixed `local` (never `public`), and there is no release lineage check. Everything
+   * else is as {@link TrustBaseSession.openPrivate}: the bundle and every cached or fetched entry are verified strictly.
+   *
+   * @param {Uint8Array} bundle Bundle bytes from your deployment (tag 39015, complete, from the genesis entry).
+   * @param {ITrustBaseStore} store Store.
+   * @param {ITrustBaseSessionOptions} [options] Options.
+   * @returns {Promise<{session: TrustBaseSession, diagnostics: CacheDiagnostic[]}>} The session and what was found in the cache.
+   * @throws {ReleasePinInvalidError} If the bundle is not a complete valid history.
+   */
+  public static async openLocal(
+    bundle: Uint8Array,
+    store: ITrustBaseStore,
+    options: ITrustBaseSessionOptions = {},
+  ): Promise<{ diagnostics: CacheDiagnostic[]; session: TrustBaseSession }> {
+    const pin = await releasePinFromBundle(bundle, options.limits ?? TRUST_BASE_BUNDLE_LIMITS);
+    return TrustBaseSession.openPrivate(LOCAL_NAMESPACE, pin, store, options);
   }
 
   /**

@@ -42,6 +42,9 @@ export interface ITrustBaseStore {
 /** The trust namespace of the built-in release table. A private or test authority must use another one. */
 export const PUBLIC_NAMESPACE = 'public';
 
+/** Namespace of a local or test network opened from its own bundle ({@link TrustBaseSession.openLocal}): never shared with the public one. */
+export const LOCAL_NAMESPACE = 'local';
+
 /**
  * The key a session stores under: version, network, authenticated genesis entry id and trust namespace. Never the endpoint, the current tip or the
  * SDK version, so a pin bump finds the old cache. The application adds its own user scope.
