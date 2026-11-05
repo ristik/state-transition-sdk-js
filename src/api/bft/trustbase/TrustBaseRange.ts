@@ -1,7 +1,7 @@
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
 import { TrustBaseBundle } from './TrustBaseBundle.js';
 import { TrustBaseBundleError, TrustBaseEncodingError } from './TrustBaseError.js';
-import { parseTrustBaseResponse, STATUS_COUNT } from './TrustBaseResponseWire.js';
+import { parseTrustBaseResponse } from './TrustBaseResponseWire.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
@@ -66,9 +66,6 @@ export class TrustBaseRange {
     }
 
     const header = parseTrustBaseResponse(bytes, limits.maxEntries);
-    if (header.status >= STATUS_COUNT) {
-      throw new TrustBaseEncodingError(`Status ${header.status} is not defined.`);
-    }
     if (header.network !== expectedNetwork.id) {
       throw new TrustBaseBundleError(`A response for network ${header.network}, asked for ${expectedNetwork.id}.`);
     }

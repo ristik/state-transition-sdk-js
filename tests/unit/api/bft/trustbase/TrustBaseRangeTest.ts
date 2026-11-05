@@ -14,6 +14,7 @@ import {
 } from '../../../../../src/api/bft/trustbase/TrustBaseError.js';
 import { TrustBaseRange, TrustBaseStatus } from '../../../../../src/api/bft/trustbase/TrustBaseRange.js';
 import { NetworkId } from '../../../../../src/api/NetworkId.js';
+import { CborSerializer } from '../../../../../src/serialization/cbor/CborSerializer.js';
 import { HexConverter } from '../../../../../src/util/HexConverter.js';
 
 const LIMITS = { maxBytes: 1 << 20, maxEntries: 64 };
@@ -138,6 +139,8 @@ describe('TrustBaseRange: a page of the GetTrustBase protocol', () => {
     const f = rangeFields();
     await rejects({ ...f, entries: [f.entries[0]], nextEpoch: 4n }, TrustBaseBundleError, /Cursor 4/);
     await rejects({ ...f, effectiveEnd: 2n, entries: [f.entries[0]], nextEpoch: 3n }, TrustBaseBundleError, /Cursor 3/);
+    // inside the end, but not the epoch after the last entry
+    await rejects({ ...f, entries: [f.entries[0]], nextEpoch: 2n }, TrustBaseBundleError, /Cursor 2 after epoch 2/);
   });
 
   it('rejects an end entry id that is not the last entry id when the page reaches the end', async () => {
@@ -168,6 +171,14 @@ describe('TrustBaseRange: a page of the GetTrustBase protocol', () => {
     const f = rangeFields();
     const bad = buildEntry({ ...parseEntryFields(f.entries[0]), epoch: 0n });
     await rejects({ ...f, entries: [bad], fromEpoch: 0n }, TrustBaseInvalidError);
+  });
+
+  it('rejects an embedded entry above the per-entry bound before decoding it', async () => {
+    await rejects(
+      { ...rangeFields(), entries: [CborSerializer.encodeByteString(new Uint8Array(70000))] },
+      TrustBaseEncodingError,
+      /Entry 0 of 70005 bytes/,
+    );
   });
 
   it('enforces the budget: bytes first, then entries', async () => {

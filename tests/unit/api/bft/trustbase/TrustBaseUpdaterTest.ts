@@ -213,8 +213,12 @@ describe('TrustBaseUpdater', () => {
 
   it('refuses an empty history without a network, and no sources', async () => {
     const history = TrustBaseHistory.create(new Uint8Array(32));
-    await failure(TrustBaseUpdater.update(history, [fail()], FAST));
-    await failure(TrustBaseUpdater.update(await atGenesis(), [], FAST));
+    const source = serve(buildBundle(threeEntries()));
+    const noNetwork = await failure(TrustBaseUpdater.update(history, [source], FAST));
+    expect(noNetwork.message).toMatch(/no network/);
+    expect(source.requests).toHaveLength(0);
+    const noSource = await failure(TrustBaseUpdater.update(await atGenesis(), [], FAST));
+    expect(noSource.message).toMatch(/No source/);
   });
 
   it('shares one update between concurrent callers of the same history', async () => {
@@ -239,5 +243,77 @@ describe('TrustBaseUpdater', () => {
       'deadline',
     );
     expect(source.requests).toHaveLength(0);
+  });
+
+  it('asks a source that was unavailable again, like a busy one', async () => {
+    const history = await atGenesis();
+    const down = refusal(TrustBaseStatus.UNAVAILABLE);
+    const good = buildBundle(rangeFields());
+    const source = new FakeSource((_request, call) => Promise.resolve(call === 1 ? down : good));
+    await expect(TrustBaseUpdater.update(history, [source], FAST)).resolves.toBe(2);
+  });
+
+  it('pauses between passes over the sources', async () => {
+    const history = await atGenesis();
+    const times: number[] = [];
+    const busy = refusal(TrustBaseStatus.BUSY);
+    const source = new FakeSource(() => {
+      times.push(Date.now());
+      return Promise.resolve(busy);
+    });
+    await failure(TrustBaseUpdater.update(history, [source], { backoffMs: 60, rounds: 2 }));
+    expect(times).toHaveLength(2);
+    expect(times[1] - times[0]).toBeGreaterThanOrEqual(50);
+  });
+
+  it('names the page that does not continue the requested range', async () => {
+    const history = await atGenesis();
+    const f = rangeFields();
+    const skipping = buildBundle({ ...f, entries: [f.entries[1]], fromEpoch: 3n });
+    const error = await failure(TrustBaseUpdater.update(history, [serve(skipping)], { ...FAST, rounds: 1 }));
+    expect((error.causes[0] as Error).message).toMatch(/does not continue the requested range/);
+    expect(history.tip?.epoch).toBe(1n);
+  });
+
+  it('refuses a later page that names another end epoch or another end entry id than the first page announced', async () => {
+    const f = rangeFields();
+    const first = buildBundle({ ...f, entries: [f.entries[0]], nextEpoch: 3n });
+    const otherEnd = buildBundle({ ...f, effectiveEnd: 4n, entries: [f.entries[1]], fromEpoch: 3n, nextEpoch: 4n });
+    const otherId = buildBundle({ ...f, entries: [f.entries[1]], fromEpoch: 3n });
+
+    const announced = parseBundleFields(first);
+    // the first page announces end 3 with an end id that is not the id of epoch 3
+    const wrongId = buildBundle({ ...announced, endEntryId: new Uint8Array(32).fill(0x33) });
+
+    for (const [pages, expected] of [
+      [[first, otherEnd], 1],
+      [[wrongId, otherId], 1],
+    ] as const) {
+      const history = await atGenesis();
+      const source = new FakeSource((_request, call) => Promise.resolve(pages[call - 1]));
+      const error = await failure(TrustBaseUpdater.update(history, [source], { ...FAST, rounds: expected }));
+      expect((error.causes.at(-1) as Error).message).toMatch(/does not continue the requested range/);
+      expect(history.tip?.epoch).toBe(2n);
+    }
+  });
+
+  it('continues from the cursor, which may be more than one entry after the page start', async () => {
+    const f = threeEntries();
+    const history = TrustBaseHistory.create(await RootTrustBaseV2.decode(f.entries[0]).entryId());
+    const pageOne = buildBundle({ ...f, entries: [f.entries[0], f.entries[1]], nextEpoch: 3n });
+    const pageTwo = buildBundle({ ...f, entries: [f.entries[2]], fromEpoch: 3n });
+    const source = new FakeSource((request) => Promise.resolve(request.fromEpoch === 1n ? pageOne : pageTwo));
+
+    await expect(TrustBaseUpdater.update(history, [source], { ...FAST, network: NetworkId.fromId(5) })).resolves.toBe(
+      3,
+    );
+    expect(source.requests.map((request) => request.fromEpoch)).toEqual([1n, 3n]);
+  });
+
+  it('does not wrap an error that is not a trust-base error', async () => {
+    const history = await atGenesis();
+    const boom = new Error('boom');
+    jest.spyOn(history, 'append').mockRejectedValue(boom);
+    await expect(TrustBaseUpdater.update(history, [serve(buildBundle(rangeFields()))], FAST)).rejects.toBe(boom);
   });
 });
