@@ -21,6 +21,7 @@ import {
   TrustBaseSignatureError,
 } from '../../../../../src/api/bft/trustbase/TrustBaseError.js';
 import { TrustBaseHistory } from '../../../../../src/api/bft/trustbase/TrustBaseHistory.js';
+import { SigningService } from '../../../../../src/crypto/secp256k1/SigningService.js';
 import { HexConverter } from '../../../../../src/util/HexConverter.js';
 
 interface IHistoryVector {
@@ -233,6 +234,21 @@ describe('RootTrustBaseV2.verifySuccessor and verifyGenesis, one rule at a time'
     await expect(two.verifySuccessor(decode('genesis'))).rejects.toBeInstanceOf(TrustBaseSignatureError);
   });
 
+  it('is signed by the members of the predecessor, not by its own (a rotation)', async () => {
+    const rotated = Object.fromEntries(
+      ['d', 'e', 'f'].map((name) => [name, new SigningService(testSecret(name)).publicKey]),
+    );
+    const members = Object.entries(rotated).map(([name, key]): [string, Uint8Array, bigint] => [name, key, 1n]);
+    const previousEntryId = await idOf(decode('genesis'));
+    const make = (signers: string[]): RootTrustBaseV2 =>
+      RootTrustBaseV2.decode(signEntry({ ...EPOCH2(), members, previousEntryId, quorum: 3n }, signers));
+
+    await expect(make(['a', 'b', 'c']).verifySuccessor(decode('genesis'))).resolves.toBeUndefined();
+    await expect(make(['d', 'e', 'f']).verifySuccessor(decode('genesis'))).rejects.toBeInstanceOf(
+      TrustBaseSignatureError,
+    );
+  });
+
   it('verifyGenesis: accepts a genesis and refuses a successor', () => {
     expect(() => decode('genesis').verifyGenesis()).not.toThrow();
     expect(() => decode('epoch2-signed-abc').verifyGenesis()).toThrow(/Not a genesis entry/);
@@ -252,6 +268,13 @@ describe('TrustBaseHistory: rules, one at a time', () => {
     await expect(history.append(decode('genesis'))).resolves.toBe('appended');
     expect(history.isEmpty).toBe(false);
     expect(history.tip?.epoch).toBe(1n);
+  });
+
+  it('keeps its own copy of the pin', async () => {
+    const pin = await idOf(decode('genesis'));
+    const history = TrustBaseHistory.create(pin);
+    pin.fill(0);
+    await expect(history.append(decode('genesis'))).resolves.toBe('appended');
   });
 
   it('refuses a genesis that is not the pinned identity, and a pin that is not 32 bytes', async () => {
