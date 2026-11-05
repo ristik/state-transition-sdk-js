@@ -68,6 +68,14 @@ describe('FileTrustBaseStore', () => {
     expect(readdirSync(nested)).toEqual([`${stem()}.cbor`]);
   });
 
+  it('reports a store path that is a file as an I/O error, not as a busy lock', async () => {
+    const path = join(directory, 'a-file');
+    writeFileSync(path, A);
+    const error: unknown = await new FileTrustBaseStore(path).compareAndSwap(KEY, null, A).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(TrustBaseStoreError);
+    expect(error).not.toBeInstanceOf(CacheBusyError);
+  });
+
   it('leaves no lock and no temporary file behind', async () => {
     await store.compareAndSwap(KEY, null, A);
     await store.compareAndSwap(KEY, trustBaseRevision(A), B);
