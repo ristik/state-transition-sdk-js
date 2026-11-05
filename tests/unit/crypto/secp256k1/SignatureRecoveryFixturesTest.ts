@@ -89,17 +89,7 @@ describe('shared O3 signature recovery fixtures', () => {
     );
     const rule = new UnicitySealQuorumSignaturesVerificationRule(verifier);
 
-    /**
-     * Seal acceptance follows the native B1 rule (bft-core b1ref any-age corpus, tests/fixtures/b1-seals/v1), not O3: a swapped 0/1 recovery byte
-     * is ignored (`quorum.sig.v-ignored`), a 64-byte signature is accepted (`quorum.sig.v-present`/compact), a recovery byte above 1 makes the seal
-     * malformed (`quorum.sig.v2`). These O3 cases are overridden with B1's verdict; the other cases agree.
-     */
-    const B1_OVERRIDES: Record<string, boolean> = {
-      'one-dropped-one-v-flipped-quorum-lost': true,
-      'one-v-out-of-range-quorum-met': false,
-      'two-compact-quorum-lost': true,
-      'two-v-flipped-quorum-lost': true,
-    };
+    // Seal acceptance is upstream's O3 rule: every case's `accept` is the expected verdict (the B1 profile no longer overrides any of them).
 
     it('uses the network of the corpus', () => {
       expect(trustBase.networkId.equals(NetworkId.fromId(fixture.seal.networkId))).toBe(true);
@@ -114,7 +104,7 @@ describe('shared O3 signature recovery fixtures', () => {
         // only malformed CBOR may fail here: a malformed witness is zero votes, not a decode failure
         throw new Error(`seal case ${testCase.name} must decode`);
       }
-      expect(accepted).toBe(B1_OVERRIDES[testCase.name] ?? testCase.accept);
+      expect(accepted).toBe(testCase.accept);
     });
 
     it('preserves every carried witness byte and keys the memo on them', async () => {
@@ -135,8 +125,8 @@ describe('shared O3 signature recovery fixtures', () => {
       const validSeal = UnicitySeal.fromCBOR(HexConverter.decode(valid?.sealCbor ?? ''));
       expect((await cached.verify(trustBase, validSeal)).status).toBe(VerificationStatus.OK);
       expect(HexConverter.encode(validSeal.toCBOR())).not.toBe(HexConverter.encode(seal.toCBOR()));
-      // under the B1 rule the out-of-range recovery byte makes this seal malformed, whatever the cache holds
-      expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.FAIL);
+      // the malformed witness counts zero and the quorum is met without it, whatever the cache holds
+      expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.OK);
     });
   });
 });

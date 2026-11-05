@@ -89,7 +89,7 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
     expect(verifySpy).toHaveBeenCalledTimes(1);
 
     expect((await rule.verify(createTrustBase(impostor.publicKey), seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(5); // the impostor's key: every recovery byte is tried
+    expect(verifySpy).toHaveBeenCalledTimes(2); // one recovery per signature: the supplied recovery byte is binding, no other parity is tried
   });
 
   it('keeps separate rules from sharing a memo', async () => {
@@ -111,12 +111,12 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
     const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(impostor);
 
-    // a signature under another key fails for every recovery byte: four recoveries per check
+    // a signature under another key counts zero (one recovery: the carried recovery byte is binding)
     expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(4);
+    expect(verifySpy).toHaveBeenCalledTimes(1);
 
     expect((await rule.verify(trustBase, seal)).status).toEqual(VerificationStatus.FAIL);
-    expect(verifySpy).toHaveBeenCalledTimes(8);
+    expect(verifySpy).toHaveBeenCalledTimes(2);
   });
 
   it('evicts the oldest entry once the cache is full', async () => {

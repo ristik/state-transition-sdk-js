@@ -17,22 +17,22 @@ const HALF_N = CURVE_N >> 1n;
 const TEXT_ENCODER = new TextEncoder();
 
 /**
- * Rule to verify that a unicity seal is authenticated by the trust-base committee of its own epoch, with exactly the native B1 rule (bft-core
- * `b1ref`, the any-age bridge verifier), so that a wallet accepts exactly the seals the chain accepts:
+ * Rule to verify that a unicity seal is authenticated by the trust-base committee of its own epoch, with upstream's seal rule (also the rule of
+ * bft-core `b1ref`, the any-age bridge verifier and the native shard path), so that a wallet accepts exactly the seals the chain accepts:
  *
- * 1. **Format** (B1 refuses the input, `malformed`): at most {@link MAX_SIGNATURES} signatures; signer identifiers of at most
- *    {@link MAX_NODE_ID_BYTES} bytes; every signature 64 bytes `r‖s`, or 65 bytes `r‖s‖v` with `v` 0 or 1.
+ * 1. **Format** (the input is refused, `malformed`): at most {@link MAX_SIGNATURES} signatures and signer identifiers of at most
+ *    {@link MAX_NODE_ID_BYTES} bytes. A signature value of any other width is a well-formed witness, not a format failure.
  * 2. **Authority**: signatures present; the seal's network; the committee of `seal.epoch` (an epoch after the latest held one is
  *    `no_entry_for_epoch`, retryable; one before the first held epoch is invalid); the root round inside the epoch's interval, `start ≤ r` and `r < end`
- *    once the next epoch is held.
- * 3. **Signatures**: every supplied signature is checked, with no early exit; an unknown signer, `r` or `s` out of range (`1 ≤ r < n`,
- *    `1 ≤ s ≤ n/2`) or a signature that does not verify against the member's listed key fails the seal even when the others reach the threshold;
- *    the verified members' weights must reach the committee threshold. The recovery byte is not trusted: a signature is valid when one of the four
- *    recovery bytes recovers the member's key, which is exactly ECDSA validity under that key (the carried byte is tried first).
+ *    once the next epoch is held. An empty signature value is `invalid`: upstream's seal validation refuses it.
+ * 3. **Signatures**: each supplied signature is judged alone. An unknown signer, and a signature that is not exactly 65 bytes `r‖s‖v` with
+ *    `1 ≤ r < n`, `1 ≤ s ≤ n/2`, `v` in 0..3 and recovering (over the seal hash) to the member's listed key, contribute zero and never fail the
+ *    seal. The supplied recovery byte is binding: it is never discarded, normalized or replaced by the other parity. The weights of the valid
+ *    signatures must reach the committee threshold.
  *
- * This is stricter than upstream O3 (which let an unknown or malformed extra signature count zero) and than the native shard path (which lets a known
- * member's invalid signature count zero): for honest seals all agree. Signature work dominates proof verification and every proof of an aggregator
- * round carries the same seal, so successes can be memoised in a caller-supplied {@link VerifiedSealCache}.
+ * A trust-base ENTRY's witnesses are a different object and stay strict (a bad extra refuses a successor entry). Signature work dominates proof
+ * verification and every proof of an aggregator round carries the same seal, so successes can be memoised in a caller-supplied
+ * {@link VerifiedSealCache}; its key covers the complete seal encoding, witnesses included.
  */
 export class UnicitySealQuorumSignaturesVerificationRule {
   public static readonly MAX_NODE_ID_BYTES = 128;
@@ -48,7 +48,7 @@ export class UnicitySealQuorumSignaturesVerificationRule {
   ) {}
 
   /**
-   * The B1 format checks of a seal's signature map, independent of any authority.
+   * The format checks of a seal's signature map (count and identifier length), independent of any authority.
    *
    * @param {UnicitySeal} seal Seal.
    * @returns {string|null} Why the seal is malformed, or null.
@@ -61,15 +61,9 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     if (witnesses.size > UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES) {
       return `${witnesses.size} signatures exceed ${UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES}.`;
     }
-    for (const [signer, witness] of witnesses) {
+    for (const signer of witnesses.keys()) {
       if (TEXT_ENCODER.encode(signer).length > UnicitySealQuorumSignaturesVerificationRule.MAX_NODE_ID_BYTES) {
         return `Signer identifier of more than ${UnicitySealQuorumSignaturesVerificationRule.MAX_NODE_ID_BYTES} bytes.`;
-      }
-      if (witness.length !== 64 && witness.length !== 65) {
-        return `Signature of "${signer}" is ${witness.length} bytes (64 or 65).`;
-      }
-      if (witness.length === 65 && witness[64] > 1) {
-        return `Signature of "${signer}" has recovery byte ${witness[64]} (0 or 1).`;
       }
     }
     return null;
@@ -167,6 +161,11 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     if (!unicitySeal.witnesses?.size) {
       return new CertificateVerificationResult(rule, 'invalid', 'Seal has no signatures.');
     }
+    for (const [signer, witness] of unicitySeal.witnesses) {
+      if (witness.length === 0) {
+        return new CertificateVerificationResult(rule, 'invalid', `Signature of "${signer}" is empty.`);
+      }
+    }
     const committee = UnicitySealQuorumSignaturesVerificationRule.selectCommittee(authority, unicitySeal);
     if (committee instanceof CertificateVerificationResult) {
       return committee;
@@ -189,11 +188,11 @@ export class UnicitySealQuorumSignaturesVerificationRule {
       ),
     );
 
-    if (results.some((r) => r.status !== VerificationStatus.OK)) {
-      return new CertificateVerificationResult(rule, 'invalid', 'A supplied signature does not verify.', results);
-    }
-    const weight = Array.from(unicitySeal.witnesses.keys()).reduce(
-      (sum, nodeId) => sum + (committee.members.get(nodeId)?.weight ?? 0n),
+    // a signature that does not count contributes zero; only the weight of the valid ones is summed
+    const names = Array.from(unicitySeal.witnesses.keys());
+    const weight = names.reduce(
+      (sum, nodeId, i) =>
+        results[i].status === VerificationStatus.OK ? sum + (committee.members.get(nodeId)?.weight ?? 0n) : sum,
       0n,
     );
     if (weight < committee.threshold) {
@@ -228,18 +227,22 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     if (member === null) {
       return new VerificationResult(rule, VerificationStatus.FAIL, 'Signer is not a member of the epoch committee');
     }
+    if (witness.length !== 65 || witness[64] > 3) {
+      return new VerificationResult(
+        rule,
+        VerificationStatus.FAIL,
+        'Signature is not 65 bytes with a recovery ID of 0 to 3',
+      );
+    }
     const r = BigInt(`0x${HexConverter.encode(witness.subarray(0, 32))}`);
     const s = BigInt(`0x${HexConverter.encode(witness.subarray(32, 64))}`);
     if (r === 0n || r >= CURVE_N || s === 0n || s > HALF_N) {
       return new VerificationResult(rule, VerificationStatus.FAIL, 'Signature r or s out of range');
     }
-    const carried = witness.length === 65 ? witness[64] : 0;
-    for (const recovery of [carried, ...[0, 1, 2, 3].filter((v) => v !== carried)]) {
-      if (
-        await this.signatureVerifier.verify(hash, new Signature(witness.subarray(0, 64), recovery), member.signingKey)
-      ) {
-        return new VerificationResult(rule, VerificationStatus.OK);
-      }
+    if (
+      await this.signatureVerifier.verify(hash, new Signature(witness.subarray(0, 64), witness[64]), member.signingKey)
+    ) {
+      return new VerificationResult(rule, VerificationStatus.OK);
     }
     return new VerificationResult(rule, VerificationStatus.FAIL, 'Signature verification failed');
   }
