@@ -86,6 +86,18 @@ describe('FileTrustBaseStore', () => {
     expect(readdirSync(directory).sort()).toEqual([`${stem()}.cbor`, 'unrelated.tmp-1-1'].sort());
   });
 
+  it('refuses a file that grew between the size check and the read', async () => {
+    writeFileSync(file(), A);
+    const real = fsPromises.open.bind(fsPromises);
+    jest.spyOn(fsPromises, 'open').mockImplementation(async (...args: Parameters<typeof real>) => {
+      const handle = await real(...args);
+      jest.spyOn(handle, 'stat').mockResolvedValue({ size: 1 } as Awaited<ReturnType<typeof handle.stat>>);
+      return handle;
+    });
+    const error: unknown = await store.read(KEY, 100).catch((e: unknown) => e);
+    expect((error as TrustBaseStoreError).reason).toBe('oversize');
+  });
+
   it('is busy at once when the lock exists, never waits, never steals, and writes nothing', async () => {
     mkdirSync(join(directory, `${stem()}.lock`));
     await expect(store.compareAndSwap(KEY, null, A)).rejects.toBeInstanceOf(CacheBusyError);
