@@ -1,8 +1,8 @@
 import { AggregatorClient } from '../../src/api/AggregatorClient.js';
-import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
+import { ITrustBaseHistory } from '../../src/api/bft/trustbase/ITrustBaseHistory.js';
 import { IAggregatorClient } from '../../src/api/IAggregatorClient.js';
 import { StateTransitionClient } from '../../src/StateTransitionClient.js';
-import { loadTrustBaseHistorySync } from '../utils/TrustBaseFile.js';
+import { openLocalHistorySync } from '../utils/TrustBaseFile.js';
 
 /**
  * Read a value the stack published, or say why it is missing.
@@ -28,8 +28,9 @@ function fromStack(name: string): string {
  * Build the client and trust base the integration suite runs against.
  *
  * The endpoint and trust base come from the stack Testcontainers started for
- * this run — a fresh chain, and a trust base its BFT root node generated at
- * genesis. Nothing here is configurable: a run that could be pointed elsewhere
+ * this run — a fresh chain, and the trust-base history its aggregator serves, whose genesis
+ * entry the root was started with. The suite derives its pin from that bundle
+ * (the local-network path, `TrustBaseSession.openLocal`). Nothing here is configurable: a run that could be pointed elsewhere
  * would not be testing the compose file it exists to exercise, and pointing the
  * SDK at a deployed network is what the e2e suite does.
  *
@@ -39,13 +40,10 @@ export function createIntegrationContext(): {
   aggregatorClient: IAggregatorClient;
   client: StateTransitionClient;
   ready: Promise<void>;
-  trustBase: TrustBaseHistory;
+  trustBase: ITrustBaseHistory;
 } {
   const aggregatorClient = new AggregatorClient(fromStack('AGGREGATOR_URL'), null);
-  const { history, ready } = loadTrustBaseHistorySync(
-    fromStack('TRUST_BASE_PATH'),
-    fromStack('TRUST_BASE_GENESIS_PIN'),
-  );
+  const { history, ready } = openLocalHistorySync(fromStack('TRUST_BASE_PATH'));
 
   return {
     aggregatorClient,
