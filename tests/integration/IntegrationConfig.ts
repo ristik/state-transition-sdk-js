@@ -43,7 +43,7 @@ export function createIntegrationContext(): {
   trustBase: ITrustBaseHistory;
 } {
   const aggregatorClient = new AggregatorClient(fromStack('AGGREGATOR_URL'), null);
-  const { history, ready } = openLocalHistorySync(fromStack('TRUST_BASE_PATH'));
+  const { history, ready } = openLocalHistorySync(fromStack('TRUST_BASE_PATH'), fromStack('STACK_GENESIS_ID'));
 
   return {
     aggregatorClient,

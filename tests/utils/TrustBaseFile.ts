@@ -101,12 +101,22 @@ class OpenedHistory implements ITrustBaseHistory {
  * `ready` settles.
  *
  * @param {string} path Bundle file (the aggregator's GET /api/v1/trustbases answer from the genesis epoch).
+ * @param {string} [expectedGenesisId] The genesis entry id the deployment's genesis step wrote (hex, `0x` optional); a different derived id fails `ready`.
  * @returns {object} The history and the promise that settles when the session has opened.
  */
-export function openLocalHistorySync(path: string): { history: ITrustBaseHistory; ready: Promise<void> } {
+export function openLocalHistorySync(
+  path: string,
+  expectedGenesisId?: string,
+): { history: ITrustBaseHistory; ready: Promise<void> } {
   const history = new OpenedHistory();
   const ready = TrustBaseSession.openLocal(new Uint8Array(readFileSync(path)), new MemoryTrustBaseStore()).then(
     ({ session }) => {
+      if (
+        expectedGenesisId !== undefined &&
+        HexConverter.encode(session.history.genesisPin) !== expectedGenesisId.replace(/^0x/, '')
+      ) {
+        throw new Error('The genesis id derived from the served bundle differs from the one the genesis step wrote.');
+      }
       history.open(session.history);
     },
   );

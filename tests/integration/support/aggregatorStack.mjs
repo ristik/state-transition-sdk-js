@@ -143,12 +143,15 @@ export async function startAggregatorStack() {
   const url = `http://${aggregator.getHost()}:${aggregator.getMappedPort(AGGREGATOR_PORT)}`;
   await waitForCertification(url);
   await writeFile(TRUST_BASE_PATH, await fetchTrustBaseHistory(url));
+  // the pin the genesis step wrote beside the genesis entry: the suite cross-checks the one it derives from the served bundle against it
+  const genesisId = (await readFile(path.join(DATA_DIR, 'genesis', 'utb', 'genesis.id'), 'utf8')).trim();
 
   return {
     stop: async () => {
       await environment.down({ removeVolumes: true });
       await rm(DATA_DIR, { force: true, recursive: true });
     },
+    genesisId,
     trustBasePath: TRUST_BASE_PATH,
     url,
   };
