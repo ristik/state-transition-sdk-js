@@ -1,6 +1,7 @@
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
 import { TrustBaseEncodingError } from './TrustBaseError.js';
 import { CborDeserializer } from '../../../serialization/cbor/CborDeserializer.js';
+import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
 
 /** CBOR tag of the GetTrustBase response (and of a release bundle, which is the same object). */
 export const RESPONSE_TAG = 39015n;
@@ -85,4 +86,26 @@ export function parseTrustBaseResponse(bytes: Uint8Array, maxEntries: number): I
     }
     throw new TrustBaseEncodingError(error instanceof Error ? error.message : String(error));
   }
+}
+
+/**
+ * Encode a GetTrustBase response, the entries embedded verbatim: the inverse of {@link parseTrustBaseResponse}.
+ *
+ * @param {ITrustBaseResponseFields} fields The fields; `entries` are complete tagged entries.
+ * @returns {Uint8Array} Tagged response.
+ */
+export function encodeTrustBaseResponse(fields: ITrustBaseResponseFields): Uint8Array {
+  return CborSerializer.encodeTag(
+    RESPONSE_TAG,
+    CborSerializer.encodeArray(
+      CborSerializer.encodeUnsignedInteger(RESPONSE_VERSION),
+      CborSerializer.encodeUnsignedInteger(fields.network),
+      CborSerializer.encodeUnsignedInteger(fields.status),
+      CborSerializer.encodeUnsignedInteger(fields.fromEpoch),
+      CborSerializer.encodeUnsignedInteger(fields.effectiveEnd),
+      fields.endEntryId === null ? CborSerializer.encodeNull() : CborSerializer.encodeByteString(fields.endEntryId),
+      CborSerializer.encodeArray(...fields.entries),
+      fields.nextEpoch === null ? CborSerializer.encodeNull() : CborSerializer.encodeUnsignedInteger(fields.nextEpoch),
+    ),
+  );
 }

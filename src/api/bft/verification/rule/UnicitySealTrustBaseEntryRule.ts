@@ -1,5 +1,5 @@
 import { VerificationStatus } from '../../../../verification/VerificationStatus.js';
-import { TrustBaseHistory } from '../../trustbase/TrustBaseHistory.js';
+import { ITrustBaseHistory } from '../../trustbase/ITrustBaseHistory.js';
 import { UnicitySeal } from '../../UnicitySeal.js';
 import { NoTrustBaseEntryResult, TrustBaseEntryResult } from '../TrustBaseEntryResult.js';
 
@@ -9,11 +9,11 @@ import { NoTrustBaseEntryResult, TrustBaseEntryResult } from '../TrustBaseEntryR
  */
 export class UnicitySealTrustBaseEntryRule {
   /**
-   * @param {TrustBaseHistory} history Held trust-base history.
+   * @param {ITrustBaseHistory} history Held trust-base history.
    * @param {UnicitySeal} seal Seal to place.
    * @returns {TrustBaseEntryResult} The entry on success; a {@link NoTrustBaseEntryResult} when the epoch is above the held tip or the history is empty; an ordinary failure for another network or an epoch before the genesis.
    */
-  public static verify(history: TrustBaseHistory, seal: UnicitySeal): TrustBaseEntryResult {
+  public static verify(history: ITrustBaseHistory, seal: UnicitySeal): TrustBaseEntryResult {
     // Network first: a seal of another network is no business of any fetch, whatever its epoch.
     const historyNetwork = history.networkId;
     if (historyNetwork !== null && !historyNetwork.equals(seal.networkId)) {

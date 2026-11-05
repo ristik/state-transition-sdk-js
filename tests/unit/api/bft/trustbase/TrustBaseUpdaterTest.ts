@@ -6,11 +6,17 @@ import {
   parseEntryFields,
   rangeFields,
   signEntry,
+  buildChain,
 } from './TrustBaseTestUtils.js';
 import { RootTrustBaseV2 } from '../../../../../src/api/bft/trustbase/RootTrustBaseV2.js';
-import { TrustBaseUpdateError } from '../../../../../src/api/bft/trustbase/TrustBaseError.js';
+import {
+  HistoryConflictedError,
+  TrustBaseConflictError,
+  TrustBaseUpdateError,
+} from '../../../../../src/api/bft/trustbase/TrustBaseError.js';
 import { TrustBaseHistory } from '../../../../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { TrustBaseStatus } from '../../../../../src/api/bft/trustbase/TrustBaseRange.js';
+import { encodeTrustBaseResponse } from '../../../../../src/api/bft/trustbase/TrustBaseResponseWire.js';
 import { TrustBaseUpdater } from '../../../../../src/api/bft/trustbase/TrustBaseUpdater.js';
 import { ITrustBaseRequest, ITrustBaseSource } from '../../../../../src/api/ITrustBaseSource.js';
 import { NetworkId } from '../../../../../src/api/NetworkId.js';
@@ -317,6 +323,46 @@ describe('TrustBaseUpdater', () => {
     await expect(TrustBaseUpdater.update(history, [serve(buildBundle(rangeFields()))], FAST)).rejects.toBe(boom);
   });
 
+  describe('an authenticated fork', () => {
+    it('is rethrown, not counted as a refusal of the source: no other source is tried', async () => {
+      const history = await atGenesis();
+      const entries = threeEntries().entries;
+      const fork = new TrustBaseConflictError(2n, 'fork', {
+        authenticated: true,
+        epoch: 2n,
+        heldEntry: null,
+        heldEntryId: new Uint8Array(32),
+        network: 1,
+        offeredEntry: null,
+        offeredEntryId: new Uint8Array(32).fill(1),
+      });
+      const target = {
+        append: (): Promise<'appended'> => Promise.reject(fork),
+        networkId: history.networkId,
+        tip: history.tip,
+      };
+      const first = serve(buildBundle({ ...rangeFields(), entries: entries.slice(1), fromEpoch: 2n }));
+      const second = serve(buildBundle({ ...rangeFields(), entries: entries.slice(1), fromEpoch: 2n }));
+      await expect(TrustBaseUpdater.update(target, [first, second], FAST)).rejects.toBe(fork);
+      expect(second.requests).toHaveLength(0);
+    });
+
+    it('is rethrown when the target says it is closed', async () => {
+      const history = await atGenesis();
+      const entries = threeEntries().entries;
+      const closed = new HistoryConflictedError(new TrustBaseConflictError(2n, 'fork'));
+      const target = {
+        append: (): Promise<'appended'> => Promise.reject(closed),
+        networkId: history.networkId,
+        tip: history.tip,
+      };
+      const first = serve(buildBundle({ ...rangeFields(), entries: entries.slice(1), fromEpoch: 2n }));
+      const second = serve(buildBundle({ ...rangeFields(), entries: entries.slice(1), fromEpoch: 2n }));
+      await expect(TrustBaseUpdater.update(target, [first, second], FAST)).rejects.toBe(closed);
+      expect(second.requests).toHaveLength(0);
+    });
+  });
+
   describe('the frozen range belongs to the whole call', () => {
     // A announces the end 3, serves epoch 2, then fails. Afterwards A and a lagging B both say there is nothing newer than 2.
     const scenario = async (): Promise<{ a: FakeSource; b: FakeSource; history: TrustBaseHistory }> => {
@@ -380,6 +426,40 @@ describe('TrustBaseUpdater', () => {
       await expect(TrustBaseUpdater.update(history, [bad, good], FAST)).resolves.toBe(2);
       expect(good.requests[0].fromEpoch).toBe(2n);
       expect(good.requests[0].snapshot).toBeNull();
+    });
+
+    it('drops the announced range when a later page has an entry the history refuses, and the next source starts from the tip', async () => {
+      const chain = await buildChain(5);
+      const forged = await buildChain(5, { forkAt: 2, signers: ['a'], tag: 0xd5 });
+      const history = TrustBaseHistory.create(await chain[0].entryId());
+      await history.append(chain[0]);
+      const lastId = await chain[4].entryId();
+      const response = (
+        entries: RootTrustBaseV2[],
+        from: bigint,
+        end: RootTrustBaseV2,
+        next: bigint | null,
+      ): Uint8Array =>
+        encodeTrustBaseResponse({
+          effectiveEnd: end.epoch,
+          endEntryId: lastId,
+          entries: entries.map((entry) => entry.encode()),
+          fromEpoch: from,
+          network: chain[0].networkId.id,
+          nextEpoch: next,
+          status: 0n,
+        });
+      const liar = new FakeSource((request) =>
+        Promise.resolve(
+          request.snapshot === null
+            ? response([chain[1]], 2n, chain[4], 3n)
+            : response([forged[2], forged[3]], 3n, chain[4], 5n),
+        ),
+      );
+      const honest = new FakeSource(() => Promise.resolve(response(chain.slice(2), 3n, chain[4], null)));
+      await expect(TrustBaseUpdater.update(history, [liar, honest], FAST)).resolves.toBe(4);
+      expect(honest.requests[0].fromEpoch).toBe(3n);
+      expect(honest.requests[0].snapshot).toBeNull();
     });
   });
 });
