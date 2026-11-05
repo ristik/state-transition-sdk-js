@@ -1,12 +1,12 @@
 import { numberToBytesBE } from '@noble/curves/utils.js';
 
-import { createRootTrustBase } from './RootTrustBaseFixture.js';
+import { createTrustBaseHistorySync, FIXTURE_EPOCH } from './TrustBaseHistoryFixture.js';
 import { BatchProofError } from '../../src/api/BatchProofError.js';
 import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
 import { PartitionView, PartitionViewLeaf } from '../../src/api/bft/PartitionView.js';
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
 import { ShardId } from '../../src/api/bft/ShardId.js';
+import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { UnicityCertificate } from '../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../src/api/bft/UnicitySeal.js';
 import { HashStep, UnicityTreeCertificate } from '../../src/api/bft/UnicityTreeCertificate.js';
@@ -101,7 +101,9 @@ export class ShardedWorld {
 
   public readonly rounds: IRound[] = [];
 
-  public readonly trustBase: RootTrustBase;
+  public readonly trustBase: TrustBaseHistory;
+
+  private readonly ready: Promise<void>;
 
   private readonly shardRound = new Map<string, bigint>();
 
@@ -112,7 +114,9 @@ export class ShardedWorld {
   private time = BASE_TIME;
 
   private constructor(public readonly bits: string[]) {
-    this.trustBase = createRootTrustBase(this.signer.publicKey);
+    const fixture = createTrustBaseHistorySync(this.signer.publicKey);
+    this.trustBase = fixture.history;
+    this.ready = fixture.ready;
     for (const b of bits) {
       this.shards.set(b, {
         leaves: new Map(),
@@ -148,6 +152,7 @@ export class ShardedWorld {
 
   public static async create(shardBits: number): Promise<ShardedWorld> {
     const world = new ShardedWorld(schemeOf(shardBits));
+    await world.ready;
     await world.commit(new Set(world.bits));
     return world;
   }
@@ -265,7 +270,7 @@ export class ShardedWorld {
     const seal = await UnicitySeal.create(
       NetworkId.LOCAL,
       number,
-      0n,
+      FIXTURE_EPOCH,
       this.time,
       previous?.seal.hash ?? null,
       sealHash,
