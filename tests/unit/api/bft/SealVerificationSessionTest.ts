@@ -234,20 +234,16 @@ describe('SealVerificationSession', () => {
     expect(new Set([a.identity, b.identity, c.identity]).size).toEqual(3);
   });
 
-  it('serves the ordinary quorum path from the same memo as the strict path, without the authority context', async () => {
+  it('shares the quorum memo between the strict path and the operation verifier, which already placed the seal', async () => {
     const s = await seal(node);
+    const entry = history.tip as NonNullable<TrustBaseHistory['tip']>;
     expect((await session.authenticate(s)).status).toEqual(VerificationStatus.OK);
-    expect((await session.verifyQuorumSignaturesOnly(s)).status).toEqual(VerificationStatus.OK);
+    expect((await session.verifyQuorum(entry, s)).status).toEqual(VerificationStatus.OK);
     expect(session.stats).toMatchObject({ memoHits: 1, quorumChecks: 1 });
-    // the ordinary path skips the structure and round checks (original proofs may be older, fixtures have no timestamp) but not the entry of
-    // the seal's epoch: an epoch the history does not hold is the typed no-entry failure on both paths
-    const early = await seal(node, { timestamp: 1n });
-    expect((await session.verifyQuorumSignaturesOnly(early)).status).toEqual(VerificationStatus.OK);
-    expect((await session.authenticate(early)).status).toEqual(VerificationStatus.FAIL);
-    const unknown = await seal(node, { epoch: 7n });
-    const ordinary = await session.verifyQuorumSignaturesOnly(unknown);
-    expect(ordinary.status).toEqual(VerificationStatus.FAIL);
-    expect(findNoTrustBaseEntry(ordinary)).not.toBeNull();
+    // an epoch the history does not hold is the typed no-entry failure
+    const unknown = await session.authenticate(await seal(node, { epoch: 7n }));
+    expect(unknown.status).toEqual(VerificationStatus.FAIL);
+    expect(findNoTrustBaseEntry(unknown)).not.toBeNull();
   });
 
   it('rejects an invalid memo size', () => {
