@@ -497,7 +497,8 @@ export class ProofConsolidator {
       if (best !== null && !seal.networkId.equals(best.network)) {
         throw integrity('incompatible_lineage', `Evidence ${i}: seal of another network than earlier evidence.`);
       }
-      if (!seal.networkId.equals(this.session.trustBaseNetwork)) {
+      const authorityNetwork = this.session.trustBaseNetwork;
+      if (authorityNetwork === null || !seal.networkId.equals(authorityNetwork)) {
         throw integrity('unauthenticated', `Evidence ${i}: seal of another network than the trusted authority.`);
       }
       const quorum = await this.session.verifyQuorumSignaturesOnly(seal);
