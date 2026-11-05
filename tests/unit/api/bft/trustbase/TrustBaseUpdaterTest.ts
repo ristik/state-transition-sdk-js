@@ -316,4 +316,50 @@ describe('TrustBaseUpdater', () => {
     jest.spyOn(history, 'append').mockRejectedValue(boom);
     await expect(TrustBaseUpdater.update(history, [serve(buildBundle(rangeFields()))], FAST)).rejects.toBe(boom);
   });
+
+  describe('the frozen range belongs to the whole call', () => {
+    // A announces the end 3, serves epoch 2, then fails. Afterwards A and a lagging B both say there is nothing newer than 2.
+    const scenario = async (): Promise<{ a: FakeSource; b: FakeSource; history: TrustBaseHistory }> => {
+      const history = await atGenesis();
+      const f = rangeFields();
+      const a = new FakeSource((request, call) => {
+        if (call === 1) {
+          return Promise.resolve(buildBundle({ ...f, entries: [f.entries[0]], nextEpoch: 3n }));
+        }
+        return call === 2
+          ? Promise.reject(new Error('gone'))
+          : Promise.resolve(refusal(TrustBaseStatus.NOT_YET_AVAILABLE, 2n));
+      });
+      const b = serve(refusal(TrustBaseStatus.NOT_YET_AVAILABLE, 2n));
+      return { a, b, history };
+    };
+
+    it('does not count a source that only knows the older tip as "current" once an end was announced', async () => {
+      const { a, b, history } = await scenario();
+      const error = await failure(TrustBaseUpdater.update(history, [a, b], FAST));
+      expect(error.appended).toBe(1);
+      expect(history.tip?.epoch).toBe(2n);
+      // B was asked to continue the announced range, not to start a new one.
+      expect(b.requests[0].fromEpoch).toBe(3n);
+      expect(b.requests[0].snapshot?.end).toBe(3n);
+    });
+
+    it('control: a source that serves the rest completes the call', async () => {
+      const { a, history } = await scenario();
+      const f = rangeFields();
+      const rest = serve(buildBundle({ ...f, entries: [f.entries[1]], fromEpoch: 3n }));
+      await expect(TrustBaseUpdater.update(history, [a, rest], FAST)).resolves.toBe(2);
+      expect(history.tip?.epoch).toBe(3n);
+    });
+
+    it('starts over after a refused entry', async () => {
+      const history = await atGenesis();
+      const f = rangeFields();
+      const bad = serve(buildBundle({ ...f, entries: [f.entries[1]], fromEpoch: 2n }));
+      const good = serve(buildBundle(f));
+      await expect(TrustBaseUpdater.update(history, [bad, good], FAST)).resolves.toBe(2);
+      expect(good.requests[0].fromEpoch).toBe(2n);
+      expect(good.requests[0].snapshot).toBeNull();
+    });
+  });
 });
