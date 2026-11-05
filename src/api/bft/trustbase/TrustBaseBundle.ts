@@ -1,6 +1,6 @@
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
 import { TrustBaseBundleError, TrustBaseEncodingError } from './TrustBaseError.js';
-import { CborDeserializer } from '../../../serialization/cbor/CborDeserializer.js';
+import { parseTrustBaseResponse, RESPONSE_TAG, RESPONSE_VERSION } from './TrustBaseResponseWire.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
@@ -26,12 +26,10 @@ export interface ITrustBaseBundleLimits {
  * genesis, and the genesis against a pinned entry id.
  */
 export class TrustBaseBundle {
-  public static readonly CBOR_TAG = 39015n;
+  public static readonly CBOR_TAG = RESPONSE_TAG;
   /** Bound of one embedded entry in bytes. */
   public static readonly MAX_ENTRY_BYTES = 64 * 1024;
-  public static readonly VERSION = 1n;
-  /** Number of defined response statuses; the response carries the status of a refused request, a bundle never does. */
-  private static readonly STATUS_COUNT = 8n;
+  public static readonly VERSION = RESPONSE_VERSION;
   private static readonly STATUS_OK = 0n;
 
   private constructor(
@@ -70,7 +68,7 @@ export class TrustBaseBundle {
       throw new TrustBaseEncodingError(`${bytes.length} bytes exceed the budget of ${limits.maxBytes}.`);
     }
 
-    const header = TrustBaseBundle.parse(bytes, limits.maxEntries);
+    const header = parseTrustBaseResponse(bytes, limits.maxEntries);
 
     if (header.status !== TrustBaseBundle.STATUS_OK) {
       throw new TrustBaseBundleError(`Status ${header.status}: not a complete bundle.`);
@@ -131,72 +129,5 @@ export class TrustBaseBundle {
     }
 
     return new TrustBaseBundle(entries[0].networkId, entries, header.entries);
-  }
-
-  private static parse(
-    bytes: Uint8Array,
-    maxEntries: number,
-  ): {
-    effectiveEnd: bigint;
-    endEntryId: Uint8Array | null;
-    entries: Uint8Array[];
-    fromEpoch: bigint;
-    network: number;
-    nextEpoch: bigint | null;
-    status: bigint;
-  } {
-    try {
-      const tagged = CborDeserializer.decodeTag(bytes);
-      if (tagged.tag !== TrustBaseBundle.CBOR_TAG) {
-        throw new TrustBaseEncodingError(`Tag ${tagged.tag}, expected ${TrustBaseBundle.CBOR_TAG}.`);
-      }
-
-      const fields = CborDeserializer.decodeArray(tagged.data);
-      if (fields.length !== 8) {
-        throw new TrustBaseEncodingError(`Expected 8 fields, got ${fields.length}.`);
-      }
-
-      const uint64 = (data: Uint8Array): bigint => {
-        return CborDeserializer.decodeUnsignedInteger(data);
-      };
-
-      const version = uint64(fields[0]);
-      if (version !== TrustBaseBundle.VERSION) {
-        throw new TrustBaseEncodingError(`Version ${version}, expected ${TrustBaseBundle.VERSION}.`);
-      }
-      const network = uint64(fields[1]);
-      // A header network of 0 is not refused here: no entry has network 0 (validate), so the entries cannot match it and the bundle is refused as such.
-      if (network > 0xffffn) {
-        throw new TrustBaseEncodingError(`Network identifier ${network} above 65535.`);
-      }
-      const status = uint64(fields[2]);
-      if (status >= TrustBaseBundle.STATUS_COUNT) {
-        throw new TrustBaseEncodingError(`Status ${status} is not defined.`);
-      }
-      const endEntryId = CborDeserializer.decodeNullable(fields[5], (item) => CborDeserializer.decodeByteString(item));
-      if (endEntryId !== null && endEntryId.length !== RootTrustBaseV2.ID_LENGTH) {
-        throw new TrustBaseEncodingError(`End id of ${endEntryId.length} bytes.`);
-      }
-      const entries = CborDeserializer.decodeArray(fields[6]);
-      if (entries.length > maxEntries) {
-        throw new TrustBaseEncodingError(`${entries.length} entries exceed ${maxEntries}.`);
-      }
-      const nextEpoch = CborDeserializer.decodeNullable(fields[7], uint64);
-
-      return {
-        effectiveEnd: uint64(fields[4]),
-        endEntryId,
-        entries,
-        fromEpoch: uint64(fields[3]),
-        network: Number(network),
-        nextEpoch,
-        status,
-      };
-    } catch (error) {
-      if (error instanceof TrustBaseEncodingError) {
-        throw error;
-      }
-      throw new TrustBaseEncodingError(error instanceof Error ? error.message : String(error));
-    }
   }
 }
