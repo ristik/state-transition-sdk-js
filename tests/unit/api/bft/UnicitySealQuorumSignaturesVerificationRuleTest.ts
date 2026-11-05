@@ -92,6 +92,37 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
     expect(verifySpy).toHaveBeenCalledTimes(2); // one recovery per signature: the supplied recovery byte is binding, no other parity is tried
   });
 
+  // upstream's seal validation refuses an empty signature value, even beside a quorum; every other width is a zero-weight witness
+  it('refuses an empty signature value and counts any other width as zero', async () => {
+    const trustBase = createTrustBase(rootNode.publicKey);
+    const genuine = await sealSignedBy(rootNode);
+    const bytes = genuine.toCBOR();
+    // the witness map is the last item: { "NODE": h'<65 bytes>' }; replace the byte string (0x58 0x41 + 65 bytes)
+    const withWitness = (witness: Uint8Array): UnicitySeal => {
+      const head = bytes.subarray(0, bytes.length - 67);
+      const header = witness.length < 24 ? [0x40 + witness.length] : [0x58, witness.length];
+      return UnicitySeal.fromCBOR(new Uint8Array([...head, ...header, ...witness]));
+    };
+    expect((await rule.verify(trustBase, withWitness(bytes.subarray(bytes.length - 65)))).status).toEqual(
+      VerificationStatus.OK,
+    );
+    expect((await rule.verify(trustBase, withWitness(new Uint8Array(0)))).status).toEqual(VerificationStatus.FAIL);
+    // an empty value of an unknown signer beside the genuine quorum is refused too (not a zero-weight extra); a 3-byte one is a zero-weight extra
+    const withExtra = (extra: number[]): UnicitySeal => {
+      const mapStart = bytes.length - 73; // 0xa1, "NODE" (5 bytes), the 67-byte witness
+      const tail = bytes.subarray(mapStart + 1);
+      return UnicitySeal.fromCBOR(
+        new Uint8Array([...bytes.subarray(0, mapStart), 0xa2, ...tail, 0x64, 0x5a, 0x5a, 0x5a, 0x5a, ...extra]),
+      );
+    };
+    expect((await rule.verify(trustBase, withExtra([0x43, 1, 2, 3]))).status).toEqual(VerificationStatus.OK);
+    expect((await rule.verify(trustBase, withExtra([0x40]))).status).toEqual(VerificationStatus.FAIL);
+    for (const width of [1, 63, 64, 66]) {
+      const odd = new Uint8Array(width).fill(7);
+      expect((await rule.verify(trustBase, withWitness(odd))).status).toEqual(VerificationStatus.FAIL); // no weight: the quorum is short
+    }
+  });
+
   it('keeps separate rules from sharing a memo', async () => {
     const trustBase = createTrustBase(rootNode.publicKey);
     const seal = await sealSignedBy(rootNode);
