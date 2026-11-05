@@ -77,6 +77,41 @@ describe('verifyWithUpdate', () => {
     expect(calls).toBe(2);
   });
 
+  describe('when a later page fails', () => {
+    // Page 1 serves epoch 2 and announces the end 3; the next request fails.
+    const failingAfterFirstPage = (): { calls: () => number; source: ITrustBaseSource } => {
+      let calls = 0;
+      const f = rangeFields();
+      const source: ITrustBaseSource = {
+        getTrustBasePage: (): Promise<Uint8Array> => {
+          calls++;
+          return calls > 1
+            ? Promise.reject(new Error('gone'))
+            : Promise.resolve(buildBundle({ ...f, entries: [f.entries[0]], nextEpoch: 3n }));
+        },
+      };
+      return { calls: () => calls, source };
+    };
+
+    it('verifies again when the needed entry arrived before the failure', async () => {
+      const history = await atGenesis();
+      const { source } = failingAfterFirstPage();
+      const result = await verifyWithUpdate(history, [source], verifySeal(history, 2n), FAST);
+      expect(result.status).toBe(VerificationStatus.OK);
+      expect(history.tip?.epoch).toBe(2n);
+    });
+
+    it('still throws when the needed entry is not among those that arrived', async () => {
+      const history = await atGenesis();
+      const { source } = failingAfterFirstPage();
+      const error: unknown = await verifyWithUpdate(history, [source], verifySeal(history, 3n), FAST).catch(
+        (e: unknown) => e,
+      );
+      expect(error).toBeInstanceOf(TrustBaseUpdateError);
+      expect((error as TrustBaseUpdateError).appended).toBe(1);
+    });
+  });
+
   it('does not fetch for a failure that no fetch can help (another network, a round outside the epoch)', async () => {
     const history = await atGenesis();
     const source = new Counting(buildBundle(rangeFields()));

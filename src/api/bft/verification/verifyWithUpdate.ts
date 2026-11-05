@@ -2,6 +2,7 @@ import { findNoTrustBaseEntry } from './TrustBaseEntryResult.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { ITrustBaseSource } from '../../ITrustBaseSource.js';
+import { TrustBaseUpdateError } from '../trustbase/TrustBaseError.js';
 import { TrustBaseHistory } from '../trustbase/TrustBaseHistory.js';
 import { ITrustBaseUpdateOptions, TrustBaseUpdater } from '../trustbase/TrustBaseUpdater.js';
 
@@ -17,7 +18,8 @@ import { ITrustBaseUpdateOptions, TrustBaseUpdater } from '../trustbase/TrustBas
  * @param {() => Promise<VerificationResult<VerificationStatus>>} verify The verification, run against `history`.
  * @param {ITrustBaseUpdateOptions} [options] Update options.
  * @returns {Promise<VerificationResult<VerificationStatus>>} The result of the last verification.
- * @throws {TrustBaseUpdateError} If the update failed (as opposed to finding nothing newer).
+ * @throws {TrustBaseUpdateError} If the update failed (as opposed to finding nothing newer) and the entries it did append do not make the
+ * verification possible.
  */
 export async function verifyWithUpdate(
   history: TrustBaseHistory,
@@ -29,8 +31,19 @@ export async function verifyWithUpdate(
   if (findNoTrustBaseEntry(first) === null) {
     return first;
   }
-  if ((await TrustBaseUpdater.update(history, sources, options)) === 0) {
-    return first;
+  let appended: number;
+  try {
+    appended = await TrustBaseUpdater.update(history, sources, options);
+  } catch (error) {
+    // A later page may have failed after the entry that was needed arrived: the prefix is held, so verify again, and fail only if it still
+    // lacks the entry.
+    if (error instanceof TrustBaseUpdateError && error.appended > 0) {
+      const retried = await verify();
+      if (findNoTrustBaseEntry(retried) === null) {
+        return retried;
+      }
+    }
+    throw error;
   }
-  return verify();
+  return appended === 0 ? first : verify();
 }

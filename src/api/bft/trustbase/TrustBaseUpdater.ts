@@ -75,6 +75,10 @@ export class TrustBaseUpdater {
     const nextFrom = (): bigint => (history.tip === null ? (options.genesisEpoch ?? 1n) : history.tip.epoch + 1n);
     const final = new Set<number>();
     let appended = 0;
+    // The cursor and the frozen snapshot belong to the whole call, not to a source: the next source continues where the last stopped, and a source
+    // that only knows the older tip cannot end the call as "current" once any source announced a higher end. Both reset when an entry is refused.
+    let from = nextFrom();
+    let snapshot: ITrustBaseRequest['snapshot'] = null;
 
     for (let round = 0; round < rounds; round++) {
       if (round > 0) {
@@ -85,10 +89,13 @@ export class TrustBaseUpdater {
         if (final.has(index)) {
           continue;
         }
-        let from = nextFrom();
-        let snapshot: ITrustBaseRequest['snapshot'] = null;
         for (;;) {
           options.signal?.throwIfAborted();
+          if (nextFrom() > from) {
+            // The history moved on by other means: the frozen range no longer applies.
+            from = nextFrom();
+            snapshot = null;
+          }
           const request: ITrustBaseRequest = {
             fromEpoch: from,
             maxEntries: limits.maxEntries,
@@ -149,6 +156,8 @@ export class TrustBaseUpdater {
               // The source served an entry the history refuses: keep the authenticated prefix, drop the snapshot, try the next source.
               causes.push(error);
               refused = true;
+              snapshot = null;
+              from = nextFrom();
               break;
             }
           }
@@ -167,7 +176,7 @@ export class TrustBaseUpdater {
       }
     }
 
-    throw new TrustBaseUpdateError('No source served the range.', causes);
+    throw new TrustBaseUpdateError('No source served the range.', causes, appended);
   }
 
   private static sleep(ms: number, signal?: AbortSignal): Promise<void> {
