@@ -90,20 +90,6 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     );
   }
 
-  private static versionHeaderValue(option: boolean | string | undefined): string | null {
-    if (typeof option === 'string') {
-      if (option === '' || !/^[\x20-\x7e]+$/.test(option)) {
-        throw new Error('sdkVersionHeader must be printable ASCII.');
-      }
-      return option;
-    }
-    // Default on only where the runtime is known to have no CORS (Node, Bun, Deno). Browsers, web/shared/service
-    // workers and any unknown runtime stay off: a refused preflight would fail every request, with no fallback.
-    const g = globalThis as { Deno?: unknown; process?: { versions?: { node?: string } } };
-    const noCors = g.process?.versions?.node !== undefined || g.Deno !== undefined;
-    return (option ?? noCors) ? `js/${SDK_VERSION}` : null;
-  }
-
   private static batchFailure(e: unknown, options: IBatchRequestOptions | undefined, sent: IBatchSend): unknown {
     if (e instanceof BatchProofError) {
       return e;
@@ -306,6 +292,20 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
     const indexesByClass = AggregatorClient.offendingIndexes(data);
     const own = indexesByClass?.[detail.replace(/^state_/, '') as BatchIndexClass];
     return { ...(indexesByClass ? { indexesByClass } : {}), ...(own ? { indexes: own } : {}) };
+  }
+
+  private static versionHeaderValue(option: boolean | string | undefined): string | null {
+    if (typeof option === 'string') {
+      if (option === '' || !/^[\x20-\x7e]+$/.test(option)) {
+        throw new Error('sdkVersionHeader must be printable ASCII.');
+      }
+      return option;
+    }
+    // Default on only where the runtime is known to have no CORS (Node, Bun, Deno). Browsers, web/shared/service
+    // workers and any unknown runtime stay off: a refused preflight would fail every request, with no fallback.
+    const g = globalThis as { Deno?: unknown; process?: { versions?: { node?: string } } };
+    const noCors = g.process?.versions?.node !== undefined || g.Deno !== undefined;
+    return (option ?? noCors) ? `js/${SDK_VERSION}` : null;
   }
 
   /**
