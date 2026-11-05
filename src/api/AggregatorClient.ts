@@ -97,8 +97,11 @@ export class AggregatorClient implements IAggregatorClient, IBatchAggregatorClie
       }
       return option;
     }
-    const inBrowser = typeof window !== 'undefined' && typeof window.document !== 'undefined';
-    return (option ?? !inBrowser) ? `js/${SDK_VERSION}` : null;
+    // Default on only where the runtime is known to have no CORS (Node, Bun, Deno). Browsers, web/shared/service
+    // workers and any unknown runtime stay off: a refused preflight would fail every request, with no fallback.
+    const g = globalThis as { Deno?: unknown; process?: { versions?: { node?: string } } };
+    const noCors = g.process?.versions?.node !== undefined || g.Deno !== undefined;
+    return (option ?? noCors) ? `js/${SDK_VERSION}` : null;
   }
 
   private static batchFailure(e: unknown, options: IBatchRequestOptions | undefined, sent: IBatchSend): unknown {

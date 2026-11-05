@@ -101,8 +101,38 @@ describe('AggregatorClient', () => {
       );
     });
 
+    it('is off by default in a worker (no window, no Node or Deno globals) and on when asked', async () => {
+      const g = globalThis as unknown as { process?: unknown };
+      const saved = g.process;
+      g.process = undefined;
+      try {
+        expect((await sentHeaders(new AggregatorClient('https://example.com'))).has(SDK_VERSION_HEADER)).toBe(false);
+        const on = await sentHeaders(
+          new AggregatorClient('https://example.com', null, false, { sdkVersionHeader: true }),
+        );
+        expect(on.get(SDK_VERSION_HEADER)).toBe(`js/${SDK_VERSION}`);
+      } finally {
+        g.process = saved;
+      }
+    });
+
+    it('is on by default under Deno', async () => {
+      const g = globalThis as unknown as { Deno?: unknown; process?: unknown };
+      const saved = g.process;
+      g.process = undefined;
+      g.Deno = {};
+      try {
+        expect((await sentHeaders(new AggregatorClient('https://example.com'))).has(SDK_VERSION_HEADER)).toBe(true);
+      } finally {
+        g.process = saved;
+        delete g.Deno;
+      }
+    });
+
     it('is off by default in a browser and on when asked', async () => {
-      const g = globalThis as unknown as { window?: unknown };
+      const g = globalThis as unknown as { process?: unknown; window?: unknown };
+      const saved = g.process;
+      g.process = undefined;
       g.window = { document: {} };
       try {
         expect((await sentHeaders(new AggregatorClient('https://example.com'))).has(SDK_VERSION_HEADER)).toBe(false);
@@ -111,6 +141,7 @@ describe('AggregatorClient', () => {
         );
         expect(on.get(SDK_VERSION_HEADER)).toBe(`js/${SDK_VERSION}`);
       } finally {
+        g.process = saved;
         delete g.window;
       }
     });
