@@ -2,7 +2,7 @@
 
 `vectors.json` is vendored byte for byte, not generated here:
 
-- source: `ristik/bft-core` PR #928, branch `dev2/gettrustbase-vectors`, commit `6296cb63ee12c060c8d2b48bb76dfea1f102dd03`, `gettrustbase/testdata/v1/vectors.json` (reference codec: `gettrustbase/codec.go`). Not merged at the time of vendoring.
+- source: `ristik/bft-core`, branch `integration/enshrined-evm`, squash commit `5d9a8eaa211b480fc37227d41eebd912ef1440c5` (PR #928), `gettrustbase/testdata/v1/vectors.json`, 45 cases (reference codec: `gettrustbase/codec.go`). The PR head `6296cb63` I first copied from has the identical file.
 - sha256: `3f9732fa5d5bed202d326f452f732d625040dbfac81857e19574df25bde3734c`
 - never edit this copy; regenerate at the source.
 
