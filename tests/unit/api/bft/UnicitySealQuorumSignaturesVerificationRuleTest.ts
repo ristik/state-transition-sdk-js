@@ -117,6 +117,14 @@ describe('UnicitySealQuorumSignaturesVerificationRule', () => {
     };
     expect((await rule.verify(trustBase, withExtra([0x43, 1, 2, 3]))).status).toEqual(VerificationStatus.OK);
     expect((await rule.verify(trustBase, withExtra([0x40]))).status).toEqual(VerificationStatus.FAIL);
+    // a real signature under an EMPTY signer identifier beside the genuine quorum is refused as well (key "" sorts before "NODE")
+    const withEmptyId = (): UnicitySeal => {
+      const mapStart = bytes.length - 73;
+      const tail = bytes.subarray(mapStart + 1);
+      const real = bytes.subarray(bytes.length - 67);
+      return UnicitySeal.fromCBOR(new Uint8Array([...bytes.subarray(0, mapStart), 0xa2, 0x60, ...real, ...tail]));
+    };
+    expect((await rule.verify(trustBase, withEmptyId())).status).toEqual(VerificationStatus.FAIL);
     for (const width of [1, 63, 64, 66]) {
       const odd = new Uint8Array(width).fill(7);
       expect((await rule.verify(trustBase, withWitness(odd))).status).toEqual(VerificationStatus.FAIL); // no weight: the quorum is short

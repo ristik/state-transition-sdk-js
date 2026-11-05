@@ -24,7 +24,7 @@ const TEXT_ENCODER = new TextEncoder();
  *    {@link MAX_NODE_ID_BYTES} bytes. A signature value of any other width is a well-formed witness, not a format failure.
  * 2. **Authority**: signatures present; the seal's network; the committee of `seal.epoch` (an epoch after the latest held one is
  *    `no_entry_for_epoch`, retryable; one before the first held epoch is invalid); the root round inside the epoch's interval, `start ≤ r` and `r < end`
- *    once the next epoch is held. An empty signature value is `invalid`: upstream's seal validation refuses it.
+ *    once the next epoch is held. An empty signature value or an empty signer identifier is `invalid`: upstream's seal validation refuses it.
  * 3. **Signatures**: each supplied signature is judged alone. An unknown signer, and a signature that is not exactly 65 bytes `r‖s‖v` with
  *    `1 ≤ r < n`, `1 ≤ s ≤ n/2`, `v` in 0..3 and recovering (over the seal hash) to the member's listed key, contribute zero and never fail the
  *    seal. The supplied recovery byte is binding: it is never discarded, normalized or replaced by the other parity. The weights of the valid
@@ -164,6 +164,9 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     for (const [signer, witness] of unicitySeal.witnesses) {
       if (witness.length === 0) {
         return new CertificateVerificationResult(rule, 'invalid', `Signature of "${signer}" is empty.`);
+      }
+      if (signer.length === 0) {
+        return new CertificateVerificationResult(rule, 'invalid', 'Signer identifier is empty.');
       }
     }
     const committee = UnicitySealQuorumSignaturesVerificationRule.selectCommittee(authority, unicitySeal);
