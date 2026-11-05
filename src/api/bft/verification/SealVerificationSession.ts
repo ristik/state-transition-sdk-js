@@ -251,32 +251,6 @@ export class SealVerificationSession implements ISealAuthenticator {
     return check;
   }
 
-  /**
-   * **Weaker than {@link SealVerificationSession.authenticate}; use that one.** Checks only the quorum signatures of
-   * the seal against the history entry of the seal's epoch: no structure, network or round checks. Ordinary token
-   * verification needs exactly this, because it has always accepted original proofs' seals on signatures alone
-   * (including seals of earlier epochs and fixtures without a timestamp). Results are memoized and in-flight
-   * deduplicated like `authenticate`'s, in a memo shared with it, so a distinct complete seal is checked once.
-   * The structure check is deliberately not applied here, as it would reject seals the SDK has always accepted; the
-   * shared memo is still safe because `authenticate` runs its structure and authority checks before every memo lookup,
-   * so a quorum-only success can never admit a seal through the strict path.
-   *
-   * @internal
-   * @param {UnicitySeal} seal Seal.
-   * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
-   */
-  public verifyQuorumSignaturesOnly(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
-    const entry = this.history.entryForEpoch(seal.epoch);
-    if (entry === null) {
-      // the typed failure (no entry for an epoch above the tip, an ordinary failure below the genesis)
-      const placed = UnicitySealTrustBaseEntryRule.verify(this.history, seal);
-      return Promise.resolve(
-        new VerificationResult('SealAuthority', VerificationStatus.FAIL, placed.message, [placed]),
-      );
-    }
-    return this.verifyQuorum(entry, seal);
-  }
-
   private async keyFor(entry: RootTrustBaseV2, seal: UnicitySeal): Promise<string> {
     let authorityId = this.authorityIds.get(entry);
     if (authorityId === undefined) {

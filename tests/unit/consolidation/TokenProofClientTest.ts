@@ -3,7 +3,10 @@ import { PartitionView } from '../../../src/api/bft/PartitionView.js';
 import { UnicityCertificate } from '../../../src/api/bft/UnicityCertificate.js';
 import { UnicitySeal } from '../../../src/api/bft/UnicitySeal.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
-import { UnicityCertificateVerifier } from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
+import {
+  UnicityCertificateVerificationResult,
+  UnicityCertificateVerifier,
+} from '../../../src/api/bft/verification/UnicityCertificateVerifier.js';
 import { CertificationData } from '../../../src/api/CertificationData.js';
 import { CertificationResponse } from '../../../src/api/CertificationResponse.js';
 import { InclusionProofBatch } from '../../../src/api/IBatchAggregatorClient.js';
@@ -24,6 +27,17 @@ import { IScenario, scenario, NestedTokenJustification } from '../../utils/Conso
 import { shardIdFromBits } from '../../utils/ShardedWorld.js';
 
 jest.setTimeout(120_000);
+
+/** A certificate verifier that accepts every proof: the placement of evidence is then decided by the consolidator's own authentication alone. */
+class AcceptingVerifier extends UnicityCertificateVerifier {
+  public constructor() {
+    super(new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()));
+  }
+
+  public override verify(): ReturnType<UnicityCertificateVerifier['verify']> {
+    return Promise.resolve(UnicityCertificateVerificationResult.ok([]));
+  }
+}
 
 function routingOf(s: IScenario): ShardRouting {
   return new ShardRouting({
@@ -458,6 +472,34 @@ describe('TokenProofClient', () => {
       });
       const error = await expectError(clientOf(s).consolidate(token), 'integrity');
       expect(error.outcome).toEqual('unauthenticated');
+    });
+
+    describe.each([0, 1])('evidence of a past epoch (%i shard bits)', (bits) => {
+      const roundsOf = (token: Token): bigint[] =>
+        [token.genesis, ...token.transactions].map(
+          (t) => t.inclusionProof.unicityCertificate.unicitySeal.rootChainRoundNumber,
+        );
+
+      it('is placed in that epoch: a round at or past the start of the next epoch is not authentic', async () => {
+        // the token's own verification is left to the caller's verifier here (it accepts), so the evidence path decides alone
+        const s = await scenario(bits, new AcceptingVerifier());
+        const token = await s.history(2);
+        // the next epoch starts at the round of the newest original proof, later rounds (the master's) are sealed in it
+        await s.world.startNextEpoch(roundsOf(token).reduce((a, b) => (a > b ? a : b)));
+        await s.world.idle(1);
+        const error = await expectError(clientOf(s).consolidate(token), 'integrity');
+        expect(error.outcome).toEqual('unauthenticated');
+      });
+
+      it('is accepted when every original proof lies inside its epoch', async () => {
+        const s = await scenario(bits);
+        const token = await s.history(2);
+        await s.world.idle(1);
+        await s.world.startNextEpoch(s.world.latest.number + 1n);
+        await s.world.idle(1);
+        const result = await clientOf(s).consolidate(token);
+        expect(result.status).toEqual('consolidated');
+      });
     });
 
     it('a peer answering at another root than the view commits to', async () => {
