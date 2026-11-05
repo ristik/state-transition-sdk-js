@@ -80,7 +80,7 @@ describe('real seals of the existing networks verify through the V2 bundle', () 
       expect(result.verdict).toBe('authority_rejected');
     });
 
-    it('damaged signatures: all four, and three of four, no longer reach the quorum; none damaged still verifies', async () => {
+    it('damaged signatures: none or one damaged (three of four valid) still verifies; three or all four damaged do not reach the quorum', async () => {
       const history = await historyOf('testnet2', TESTNET2_ID);
       const raw = HexConverter.decode(read('testnet2.non-inclusion.hex'));
       const signatures = Array.from(proofOf('testnet2').unicityCertificate.unicitySeal.witnesses?.values() ?? []);
@@ -97,6 +97,8 @@ describe('real seals of the existing networks verify through the V2 bundle', () 
       };
 
       expect(await damaged(0)).toBe('absent_at_snapshot');
+      // three of four valid is the quorum
+      expect(await damaged(1)).toBe('absent_at_snapshot');
       expect(await damaged(signatures.length)).toBe('authority_rejected');
       expect(await damaged(signatures.length - 1)).toBe('authority_rejected');
     });
