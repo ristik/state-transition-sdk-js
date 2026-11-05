@@ -41,7 +41,7 @@ const NETWORK = NetworkId.fromId(vectors.network);
 const accepts = vectors.cases.filter((c): c is IAccept => !('error' in c));
 const rejects = vectors.cases.filter((c): c is IReject => 'error' in c);
 
-describe('GetTrustBase response: shared vectors (bft-core#928)', () => {
+describe('GetTrustBase response: shared vectors (bft-core 5d9a8eaa)', () => {
   it.each(accepts)('accepts: $name', async (vector) => {
     const range = await TrustBaseRange.decode(HexConverter.decode(vector.hex), LIMITS, NETWORK);
     expect(range.status).toBe(vector.status);
