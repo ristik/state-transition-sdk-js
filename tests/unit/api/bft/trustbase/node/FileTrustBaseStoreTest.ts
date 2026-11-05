@@ -160,7 +160,7 @@ describe('FileTrustBaseStore', () => {
       const first = await TrustBaseSession.openPrivate('file-test', pin, store);
       await first.session.append(chain[3]);
       await first.session.append(chain[4]);
-      await expect(first.session.flush()).resolves.toEqual({ status: 'saved' });
+      await expect(first.session.flush()).resolves.toMatchObject({ status: 'saved', wrote: true });
 
       const second = await TrustBaseSession.openPrivate('file-test', pin, new FileTrustBaseStore(directory));
       expect(second.diagnostics).toEqual([]);
