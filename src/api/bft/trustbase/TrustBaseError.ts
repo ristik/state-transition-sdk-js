@@ -95,6 +95,8 @@ export class TrustBaseUpdateError extends TrustBaseError {
   public constructor(
     message: string,
     public readonly causes: readonly unknown[],
+    /** Entries appended before the call failed: a valid prefix stays held, and may be all the caller needed. */
+    public readonly appended: number = 0,
   ) {
     super('update', message);
   }
