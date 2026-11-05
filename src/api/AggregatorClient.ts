@@ -411,38 +411,6 @@ export class AggregatorClient
   }
 
   /**
-   * Fetch one page of signed trust-base entries: `GET /api/v1/trustbases?from=E[&snapshotEnd=E&snapshotEntryId=0x..]&maxEntries=N` on the
-   * aggregator's origin, answered with the GetTrustBase response (tag 39015, `application/cbor`), whatever its status. The bytes are returned
-   * undecoded: the aggregator is untrusted transport, the caller decodes them and appends each entry through the authenticated history.
-   *
-   * @param {ITrustBaseRequest} request The request.
-   * @param {IRequestOptions} [options] Request options.
-   * @returns {Promise<Uint8Array>} The encoded response.
-   * @throws {JsonRpcNetworkError} On a non-success HTTP status (a malformed query is 400).
-   * @throws {JsonRpcResponseError} When the body exceeds {@link AggregatorClient.MAX_TRUST_BASE_RESPONSE_BYTES}.
-   */
-  public async getTrustBasePage(request: ITrustBaseRequest, options?: IRequestOptions): Promise<Uint8Array> {
-    // The trust-base endpoint is on the aggregator's origin, whatever path the JSON-RPC endpoint has.
-    const url = new URL('/api/v1/trustbases', this.url);
-    url.searchParams.set('from', request.fromEpoch.toString());
-    url.searchParams.set('maxEntries', String(request.maxEntries));
-    if (request.snapshot !== null) {
-      url.searchParams.set('snapshotEnd', request.snapshot.end.toString());
-      url.searchParams.set('snapshotEntryId', `0x${HexConverter.encode(request.snapshot.entryId)}`);
-    }
-    const headers = new Headers({ Accept: 'application/cbor' });
-    if (this.#key) {
-      headers.set('X-API-Key', this.#key);
-    }
-    const response = await fetch(url, { headers, method: 'GET', redirect: 'error', signal: options?.signal });
-    const body = await readBoundedBytes(response, AggregatorClient.MAX_TRUST_BASE_RESPONSE_BYTES);
-    if (!response.ok) {
-      throw new JsonRpcNetworkError(response.status, new TextDecoder().decode(body));
-    }
-    return body;
-  }
-
-  /**
    * @inheritDoc
    */
   public async getNonInclusionProof(stateId: StateId, options?: IRequestOptions): Promise<NonInclusionProofResponse> {
@@ -474,6 +442,38 @@ export class AggregatorClient
         { cause: e },
       );
     }
+  }
+
+  /**
+   * Fetch one page of signed trust-base entries: `GET /api/v1/trustbases?from=E[&snapshotEnd=E&snapshotEntryId=0x..]&maxEntries=N` on the
+   * aggregator's origin, answered with the GetTrustBase response (tag 39015, `application/cbor`), whatever its status. The bytes are returned
+   * undecoded: the aggregator is untrusted transport, the caller decodes them and appends each entry through the authenticated history.
+   *
+   * @param {ITrustBaseRequest} request The request.
+   * @param {IRequestOptions} [options] Request options.
+   * @returns {Promise<Uint8Array>} The encoded response.
+   * @throws {JsonRpcNetworkError} On a non-success HTTP status (a malformed query is 400).
+   * @throws {JsonRpcResponseError} When the body exceeds {@link AggregatorClient.MAX_TRUST_BASE_RESPONSE_BYTES}.
+   */
+  public async getTrustBasePage(request: ITrustBaseRequest, options?: IRequestOptions): Promise<Uint8Array> {
+    // The trust-base endpoint is on the aggregator's origin, whatever path the JSON-RPC endpoint has.
+    const url = new URL('/api/v1/trustbases', this.url);
+    url.searchParams.set('from', request.fromEpoch.toString());
+    url.searchParams.set('maxEntries', String(request.maxEntries));
+    if (request.snapshot !== null) {
+      url.searchParams.set('snapshotEnd', request.snapshot.end.toString());
+      url.searchParams.set('snapshotEntryId', `0x${HexConverter.encode(request.snapshot.entryId)}`);
+    }
+    const headers = new Headers({ Accept: 'application/cbor' });
+    if (this.#key) {
+      headers.set('X-API-Key', this.#key);
+    }
+    const response = await fetch(url, { headers, method: 'GET', redirect: 'error', signal: options?.signal });
+    const body = await readBoundedBytes(response, AggregatorClient.MAX_TRUST_BASE_RESPONSE_BYTES);
+    if (!response.ok) {
+      throw new JsonRpcNetworkError(response.status, new TextDecoder().decode(body));
+    }
+    return body;
   }
 
   /**
