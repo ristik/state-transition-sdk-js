@@ -66,7 +66,7 @@ const aggregator = new AggregatorClient(
 );
 const client = new StateTransitionClient(aggregator);
 
-const networkId = NetworkId.fromId(4); // testnet2
+const networkId = NetworkId.TESTNET2; // network ID 4
 
 // Prepare a fresh state to query; no transaction is submitted.
 const recipient = SignaturePredicate.fromSigningService(SigningService.generate());
@@ -79,7 +79,7 @@ console.log('State certified:', response.inclusionProof !== null);
 
 This read-only probe should print `State certified: false` for the fresh state. It checks connectivity; it does not verify a token.
 
-The trust-base history identifies the Consensus Layer (BFT Core) instance. Pin the genesis entry id in your application for production. Use the network id of your gateway when creating tokens (`trustBase.networkId` once the history holds an entry); testnet2 is network ID `4` (`NetworkId.TESTNET` is `2`). For offline construction, use `NetworkId.fromId(4)`.
+The trust-base history identifies the Consensus Layer (BFT Core) instance. Pin the genesis entry id in your application for production. Use the network id of your gateway when creating tokens (`trustBase.networkId` once the history holds an entry); testnet2 is network ID `4`, `NetworkId.TESTNET2` (mainnet is `NetworkId.MAINNET`, `1`). The old testnet, network 2, has no constant any more.
 
 ## Work with tokens
 
