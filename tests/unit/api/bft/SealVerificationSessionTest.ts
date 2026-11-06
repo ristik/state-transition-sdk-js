@@ -113,7 +113,7 @@ describe('SealVerificationSession', () => {
 
     const sameKeys = async (options: Parameters<typeof trustBase>[1]): Promise<SealVerificationSession> =>
       new SealVerificationSession(await trustBase(node.publicKey, options), rule);
-    expect((await (await sameKeys({ networkId: NetworkId.TESTNET.id })).authenticate(s)).status).toEqual(
+    expect((await (await sameKeys({ networkId: NetworkId.MAINNET.id })).authenticate(s)).status).toEqual(
       VerificationStatus.FAIL,
     );
     expect((await (await sameKeys({ epoch: '2' })).authenticate(s)).status).toEqual(VerificationStatus.FAIL);

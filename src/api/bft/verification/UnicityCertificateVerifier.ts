@@ -10,7 +10,7 @@ import { HexConverter } from '../../../util/HexConverter.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { InclusionProof } from '../../InclusionProof.js';
-import { TrustBaseHistory } from '../trustbase/TrustBaseHistory.js';
+import { ITrustBaseHistory } from '../trustbase/ITrustBaseHistory.js';
 import { UnicityCertificate } from '../UnicityCertificate.js';
 
 const OPERATION_CAPABILITY = Symbol('beginOperation');
@@ -107,12 +107,12 @@ export class UnicityCertificateVerifier {
    * Verify the unicity certificate in an inclusion proof against the trust-base history: the entry of the seal's epoch checks the seal. When
    * the history has no entry for that epoch the failure carries a {@link NoTrustBaseEntryResult} (see {@link findNoTrustBaseEntry}).
    *
-   * @param {TrustBaseHistory} trustBase Trust-base history.
+   * @param {ITrustBaseHistory} trustBase Trust-base history.
    * @param {InclusionProof} inclusionProof Inclusion proof carrying the unicity certificate.
    * @returns {Promise<UnicityCertificateVerificationResult>} Verification outcome.
    */
   public async verify(
-    trustBase: TrustBaseHistory,
+    trustBase: ITrustBaseHistory,
     inclusionProof: InclusionProof,
   ): Promise<UnicityCertificateVerificationResult> {
     const results: VerificationResult<VerificationStatus>[] = [];
@@ -176,7 +176,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
 
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
 
-  private readonly sessions = new Map<TrustBaseHistory, SealVerificationSession>();
+  private readonly sessions = new Map<ITrustBaseHistory, SealVerificationSession>();
 
   /**
    * Not constructible by applications: obtain it with {@link UnicityCertificateVerifier.beginOperation}, so that an
@@ -224,10 +224,10 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
    * The operation's seal session for a trust base (created on first use): whoever authenticates seals strictly in this
    * operation, e.g. `verifyNonInclusion`, shares the quorum checks of the proofs verified through this verifier.
    *
-   * @param {TrustBaseHistory} trustBase Trusted authority.
+   * @param {ITrustBaseHistory} trustBase Trusted authority.
    * @returns {SealVerificationSession} The session.
    */
-  public sessionFor(trustBase: TrustBaseHistory): SealVerificationSession {
+  public sessionFor(trustBase: ITrustBaseHistory): SealVerificationSession {
     return this.session(trustBase);
   }
 
@@ -235,7 +235,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
    * @inheritDoc
    */
   public override async verify(
-    trustBase: TrustBaseHistory,
+    trustBase: ITrustBaseHistory,
     inclusionProof: InclusionProof,
   ): Promise<UnicityCertificateVerificationResult> {
     const results: VerificationResult<VerificationStatus>[] = [];
@@ -314,7 +314,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
     return check;
   }
 
-  private session(trustBase: TrustBaseHistory): SealVerificationSession {
+  private session(trustBase: ITrustBaseHistory): SealVerificationSession {
     let session = this.sessions.get(trustBase);
     if (!session) {
       session = new SealVerificationSession(trustBase, this.quorumSignaturesRule);

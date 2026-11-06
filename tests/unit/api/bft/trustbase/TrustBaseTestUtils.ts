@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { secp256k1 } from '@noble/curves/secp256k1.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 
+import { IReleasePin } from '../../../../../src/api/bft/trustbase/ReleasePin.js';
+import { RootTrustBaseV2 } from '../../../../../src/api/bft/trustbase/RootTrustBaseV2.js';
+import { TrustBaseBundle } from '../../../../../src/api/bft/trustbase/TrustBaseBundle.js';
 import { CborDeserializer } from '../../../../../src/serialization/cbor/CborDeserializer.js';
 import { CborMap } from '../../../../../src/serialization/cbor/CborMap.js';
 import { CborMapEntry } from '../../../../../src/serialization/cbor/CborMapEntry.js';
@@ -225,4 +229,62 @@ export function rangeFields(): IBundleFields {
   }
   const f = parseBundleFields(HexConverter.decode(vector.hex));
   return { ...f, entries: f.entries.slice(1), fromEpoch: 2n };
+}
+
+/**
+ * Options of {@link buildChain}: `forkAt`/`tag` give every entry from that index on another state hash (another valid history sharing the prefix
+ * before it); `network` builds another network; `signers` names who signs each entry (default a, b, c).
+ */
+export interface IChainOptions {
+  forkAt?: number;
+  network?: bigint;
+  signers?: string[] | ((index: number) => string[]);
+  tag?: number;
+}
+
+/**
+ * A signed chain of `length` entries from the vectors' genesis, each signed by members of its predecessor (same committee throughout).
+ */
+export async function buildChain(length: number, options: IChainOptions = {}): Promise<RootTrustBaseV2[]> {
+  const genesis = parseEntryFields(vectorEntry('genesis'));
+  const template = parseEntryFields(vectorEntry('epoch2-signed-abc'));
+  const network = options.network ?? genesis.network;
+  const hashOf = (index: number): Uint8Array | null =>
+    options.forkAt !== undefined && index >= options.forkAt
+      ? new Uint8Array(32).fill(options.tag ?? 0xee)
+      : template.stateHash;
+  const entries: RootTrustBaseV2[] = [
+    RootTrustBaseV2.decode(
+      buildEntry({ ...genesis, network, stateHash: options.forkAt === 0 ? hashOf(0) : genesis.stateHash }),
+    ),
+  ];
+  for (let index = 1; index < length; index++) {
+    const fields: IEntryFields = {
+      ...template,
+      epoch: genesis.epoch + BigInt(index),
+      epochStart: genesis.epochStart + BigInt(index) * 10n,
+      network,
+      previousEntryId: await entries[index - 1].entryId(),
+      stateHash: hashOf(index),
+    };
+    const signers =
+      typeof options.signers === 'function' ? options.signers(index) : (options.signers ?? ['a', 'b', 'c']);
+    entries.push(RootTrustBaseV2.decode(signEntry(fields, signers)));
+  }
+  return entries;
+}
+
+/** A release pin whose embedded bundle is the first `pinnedLength` entries of the chain. */
+export async function buildPin(chain: RootTrustBaseV2[], pinnedLength: number): Promise<IReleasePin> {
+  const embedded = chain.slice(0, pinnedLength);
+  const bundle = await TrustBaseBundle.encode(embedded);
+  return {
+    bundleSha256: sha256(bundle),
+    embeddedBundle: bundle,
+    genesisEntryId: await embedded[0].entryId(),
+    genesisEpoch: embedded[0].epoch,
+    networkId: embedded[0].networkId,
+    pinnedEntryId: await embedded[embedded.length - 1].entryId(),
+    pinnedEpoch: embedded[embedded.length - 1].epoch,
+  };
 }

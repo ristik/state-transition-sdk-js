@@ -1,6 +1,11 @@
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
 import { TrustBaseBundleError, TrustBaseEncodingError } from './TrustBaseError.js';
-import { parseTrustBaseResponse, RESPONSE_TAG, RESPONSE_VERSION } from './TrustBaseResponseWire.js';
+import {
+  encodeTrustBaseResponse,
+  parseTrustBaseResponse,
+  RESPONSE_TAG,
+  RESPONSE_VERSION,
+} from './TrustBaseResponseWire.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
@@ -12,6 +17,8 @@ import { NetworkId } from '../../NetworkId.js';
 export interface ITrustBaseBundleLimits {
   readonly maxBytes: number;
   readonly maxEntries: number;
+  /** Bytes of one entry. Default {@link TrustBaseBundle.MAX_ENTRY_BYTES}. */
+  readonly maxEntryBytes?: number;
 }
 
 /**
@@ -86,7 +93,7 @@ export class TrustBaseBundle {
     const entries: RootTrustBaseV2[] = [];
     let previousId: Uint8Array | null = null;
     for (const [index, raw] of header.entries.entries()) {
-      if (raw.length > TrustBaseBundle.MAX_ENTRY_BYTES) {
+      if (raw.length > (limits.maxEntryBytes ?? TrustBaseBundle.MAX_ENTRY_BYTES)) {
         throw new TrustBaseEncodingError(`Entry ${index} of ${raw.length} bytes.`);
       }
 
@@ -129,5 +136,40 @@ export class TrustBaseBundle {
     }
 
     return new TrustBaseBundle(entries[0].networkId, entries, header.entries);
+  }
+
+  /**
+   * Encode entries as a complete bundle (status OK, no cursor, end entry id of the last entry). The inverse of {@link decode}: a decoded bundle
+   * re-encodes to the same bytes. The entries are not authenticated here; a bundle that does not link is not produced.
+   *
+   * @param {RootTrustBaseV2[]} entries Consecutive entries ascending from the genesis, at least one.
+   * @returns {Promise<Uint8Array>} Tagged bundle.
+   * @throws {TrustBaseBundleError} If the list is empty or the entries do not form one linked chain of one network.
+   */
+  public static async encode(entries: readonly RootTrustBaseV2[]): Promise<Uint8Array> {
+    if (entries.length === 0) {
+      throw new TrustBaseBundleError('A bundle needs at least one entry.');
+    }
+    let previousId: Uint8Array | null = null;
+    for (const [index, entry] of entries.entries()) {
+      const previous: RootTrustBaseV2 | undefined = entries[index - 1];
+      if (previous === undefined ? !entry.isGenesis() : entry.epoch !== previous.epoch + 1n) {
+        throw new TrustBaseBundleError(`Entry ${index} does not continue the chain.`);
+      }
+      if (previousId !== null && !areUint8ArraysEqual(entry.previousEntryId, previousId)) {
+        throw new TrustBaseBundleError(`Entry ${index} does not link to its predecessor.`);
+      }
+      previousId = await entry.entryId();
+    }
+    const tip = entries[entries.length - 1];
+    return encodeTrustBaseResponse({
+      effectiveEnd: tip.epoch,
+      endEntryId: previousId,
+      entries: entries.map((entry) => entry.encode()),
+      fromEpoch: entries[0].epoch,
+      network: tip.networkId.id,
+      nextEpoch: null,
+      status: 0n,
+    });
   }
 }
