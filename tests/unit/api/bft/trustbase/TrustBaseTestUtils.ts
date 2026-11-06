@@ -216,3 +216,13 @@ export function signEntry(fields: IEntryFields, signers: string[]): Uint8Array {
     signatures: signers.map((name): [string, Uint8Array] => [name, signRecoverable(unsigned, testSecret(name))]),
   });
 }
+
+/** The three-entry vector as a page of epochs 2 and 3 (from epoch 2, no cursor). */
+export function rangeFields(): IBundleFields {
+  const vector = loadVectors().bundles.find((candidate) => candidate.name.startsWith('three'));
+  if (!vector) {
+    throw new Error('No three-entry bundle vector');
+  }
+  const f = parseBundleFields(HexConverter.decode(vector.hex));
+  return { ...f, entries: f.entries.slice(1), fromEpoch: 2n };
+}
