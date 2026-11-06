@@ -418,6 +418,38 @@ describe('TrustBaseUpdater', () => {
       expect(b.requests[0].snapshot).toBeNull();
     });
 
+    it('a history mismatch on an echoed snapshot drops the snapshot and does not end the honest source', async () => {
+      const history = await atGenesis();
+      const f = rangeFields();
+      // The hostile source announces a fake end entry id after one genuine entry, then is gone.
+      const hostile = new FakeSource((_request, call) =>
+        call === 1
+          ? Promise.resolve(
+              buildBundle({ ...f, endEntryId: new Uint8Array(32).fill(7), entries: [f.entries[0]], nextEpoch: 3n }),
+            )
+          : Promise.reject(new Error('gone')),
+      );
+      // The honest source refuses the fake snapshot, as bft-core does, and serves from the tip without one.
+      const honest = new FakeSource((request) =>
+        Promise.resolve(
+          request.snapshot === null
+            ? buildBundle({ ...f, entries: [f.entries[1]], fromEpoch: 3n })
+            : refusal(TrustBaseStatus.HISTORY_MISMATCH, 3n),
+        ),
+      );
+      await expect(TrustBaseUpdater.update(history, [hostile, honest], FAST)).resolves.toBe(2);
+      expect(history.tip?.epoch).toBe(3n);
+      expect(honest.requests.map((r) => r.snapshot === null)).toEqual([false, true]);
+      expect(honest.requests[1].fromEpoch).toBe(3n);
+    });
+
+    it('control: a mismatch on a request without a snapshot is still final', async () => {
+      const history = await atGenesis();
+      const source = serve(refusal(TrustBaseStatus.HISTORY_MISMATCH));
+      await failure(TrustBaseUpdater.update(history, [source], FAST));
+      expect(source.requests).toHaveLength(1);
+    });
+
     it('starts over after a refused entry', async () => {
       const history = await atGenesis();
       const f = rangeFields();
