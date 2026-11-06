@@ -124,6 +124,14 @@ export class TrustBaseUpdater {
           }
           if (page.status !== TrustBaseStatus.OK) {
             causes.push(new TrustBaseUpdateError(`Source ${index}: ${TrustBaseStatus[page.status]}.`, []));
+            if (page.status === TrustBaseStatus.HISTORY_MISMATCH && snapshot !== null) {
+              // The snapshot was announced by some source's first page and is unauthenticated: a hostile source can announce a fake one, and then
+              // every honest source refuses the echo. That refusal says nothing about this source's own history, so drop the snapshot, restart
+              // from the held tip and ask this source again without it. The next mismatch carries no snapshot and is final, so this ends.
+              snapshot = null;
+              from = nextFrom();
+              continue;
+            }
             // Busy and unavailable may pass; the other refusals will not.
             if (page.status !== TrustBaseStatus.BUSY && page.status !== TrustBaseStatus.UNAVAILABLE) {
               final.add(index);
