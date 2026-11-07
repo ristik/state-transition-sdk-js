@@ -14,13 +14,13 @@ import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
 /**
- * Initial load budget of a bundle (a release's, a cache's): 16 MiB, 4,096 entries, and the 64 KiB per entry of {@link TrustBaseBundle}. It is
+ * Initial load budget of a bundle (a release's, a cache's): 16 MiB, 4,096 entries, and the 128 KiB per entry of {@link TrustBaseBundle}. It is
  * resource policy, not a trust rule: an application may configure more or less, and nothing is pruned to fit.
  */
 export const TRUST_BASE_BUNDLE_LIMITS: ITrustBaseBundleLimits = {
   maxBytes: 16 * 1024 * 1024,
   maxEntries: 4096,
-  maxEntryBytes: 64 * 1024,
+  maxEntryBytes: 128 * 1024,
 };
 
 /**
