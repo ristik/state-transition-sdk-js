@@ -78,6 +78,14 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     entry: RootTrustBaseV2,
     unicitySeal: UnicitySeal,
   ): Promise<VerificationResult<VerificationStatus>> {
+    // A resource bound before anything is encoded, hashed, keyed or verified: unknown signers and bad values count like any other witness.
+    if ((unicitySeal.witnesses?.size ?? 0) > UnicitySeal.MAX_WITNESSES) {
+      return new VerificationResult(
+        'UnicitySealQuorumSignaturesVerificationRule',
+        VerificationStatus.FAIL,
+        `${unicitySeal.witnesses?.size} signatures exceed ${UnicitySeal.MAX_WITNESSES}.`,
+      );
+    }
     const cacheKey = this.cache
       ? await UnicitySealQuorumSignaturesVerificationRule.cacheKeyFor(entry, unicitySeal)
       : null;
