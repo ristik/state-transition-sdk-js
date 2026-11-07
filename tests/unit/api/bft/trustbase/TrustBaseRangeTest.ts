@@ -175,9 +175,9 @@ describe('TrustBaseRange: a page of the GetTrustBase protocol', () => {
 
   it('rejects an embedded entry above the per-entry bound before decoding it', async () => {
     await rejects(
-      { ...rangeFields(), entries: [CborSerializer.encodeByteString(new Uint8Array(70000))] },
+      { ...rangeFields(), entries: [CborSerializer.encodeByteString(new Uint8Array(131072))] },
       TrustBaseEncodingError,
-      /Entry 0 of 70005 bytes/,
+      /Entry 0 of 131077 bytes/,
     );
   });
 
