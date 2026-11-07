@@ -173,7 +173,10 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @returns {Promise<VerificationResult<VerificationStatus>>} Outcome.
    */
   public authenticate(seal: UnicitySeal): Promise<VerificationResult<VerificationStatus>> {
-    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(seal);
+    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(
+      seal,
+      this.quorumRule.maxSignatures,
+    );
     if (malformed !== null) {
       return Promise.resolve(new CertificateVerificationResult('SealAuthority', 'malformed', malformed));
     }

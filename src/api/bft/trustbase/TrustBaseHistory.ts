@@ -105,9 +105,6 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
   public static async fromGenesis(genesis: Uint8Array, pin: Uint8Array): Promise<TrustBaseHistory> {
     const entry = RootTrustBaseV2.fromCBOR(genesis);
     entry.verifyGenesis();
-    if (entry.rootNodes.length > RootTrustBaseV2.MAX_ADMITTED_MEMBERS) {
-      throw new TrustBaseError('genesis', `The genesis has ${entry.rootNodes.length} members.`);
-    }
     const id = await entry.entryId();
     if (!areUint8ArraysEqual(id, pin)) {
       throw new TrustBaseError('genesis', 'The genesis entry does not match the pin.');
@@ -252,9 +249,6 @@ export class TrustBaseHistory implements ITrustBaseAuthority {
     }
     if (entry.epoch !== tip.epoch + 1n) {
       throw new TrustBaseError('gap', `Epoch ${entry.epoch} does not directly follow the held tip ${tip.epoch}.`);
-    }
-    if (entry.rootNodes.length > RootTrustBaseV2.MAX_ADMITTED_MEMBERS) {
-      throw new TrustBaseError('invalid', `Epoch ${entry.epoch} has ${entry.rootNodes.length} members.`);
     }
     await entry.verifySuccessor(tip);
     // everything awaited before the first mutation: the three lists change together or not at all

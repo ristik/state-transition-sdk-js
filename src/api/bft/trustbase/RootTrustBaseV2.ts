@@ -42,11 +42,15 @@ const VERIFIER = new Secp256k1SignatureVerifier();
  */
 export class RootTrustBaseV2 {
   public static readonly ID_LENGTH = 32;
-  /** The admitted committee size: entries with more members are never stored (bft-core utb.MaxMembers). */
-  public static readonly MAX_ADMITTED_MEMBERS = 16;
-  /** Largest encoded entry accepted anywhere (bft-core utbstore / GetTrustBase). */
-  public static readonly MAX_ENCODED_LENGTH = 64 * 1024;
-  /** Member-list bound while decoding; deployments admit far fewer (see {@link MAX_ADMITTED_MEMBERS}). */
+  /**
+   * Largest encoded entry accepted anywhere (bft-core utbstore / GetTrustBase, bft-go-base MaxTrustBaseEntryBytes): 128 KiB. The largest valid entry
+   * (256 members, 128-byte node ids, signatures of all 256 predecessor members) is 95,365 bytes.
+   */
+  public static readonly MAX_ENCODED_LENGTH = 128 * 1024;
+  /**
+   * The committee size, for decoding and for admission alike (§49): one format ceiling of 256 members, which also bounds the signatures an entry
+   * supplies. The 16-member limit of the B1 bridge registry is a gas bound of that registry and is not a bound of the trust base.
+   */
   public static readonly MAX_MEMBERS = 256;
   public static readonly MAX_NODE_ID_LENGTH = 128;
   public static readonly MAX_WEIGHT = 1n << 40n;
