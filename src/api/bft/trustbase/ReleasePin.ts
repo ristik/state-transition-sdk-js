@@ -1,5 +1,6 @@
 import { sha256 } from '@noble/hashes/sha2.js';
 
+import { RELEASE_PIN_ROWS } from './ReleasePins.generated.js';
 import { ITrustBaseBundleLimits, TrustBaseBundle } from './TrustBaseBundle.js';
 import {
   ReleasePinInvalidError,
@@ -8,6 +9,7 @@ import {
   UnknownNetworkError,
 } from './TrustBaseError.js';
 import { TrustBaseHistory } from './TrustBaseHistory.js';
+import { HexConverter } from '../../../util/HexConverter.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
@@ -135,10 +137,19 @@ export class VerifiedReleasePin {
 }
 
 /**
- * The release table of this SDK build, one row per public network. It ships EMPTY: no public pin is released until the owner approves the bundles.
- * The generated rows will replace this list at a release.
+ * The release table of this SDK build, one row per public network: mainnet (1) and testnet2 (4), each the complete history from its genesis to the
+ * pinned release tip. The rows are generated (`scripts/release-pins/generate.mjs`, from `release-pins/manifest.json` and the bundles it names, with
+ * a CI check that regeneration leaves no diff) and are verified again, strictly, when a session opens. The network of the old testnet 2 has no row.
  */
-export const RELEASE_PINS: readonly IReleasePin[] = [];
+export const RELEASE_PINS: readonly IReleasePin[] = RELEASE_PIN_ROWS.map((row) => ({
+  bundleSha256: HexConverter.decode(row.bundleSha256),
+  embeddedBundle: HexConverter.decode(row.bundleHex),
+  genesisEntryId: HexConverter.decode(row.genesisEntryId),
+  genesisEpoch: BigInt(row.genesisEpoch),
+  networkId: NetworkId.fromId(row.networkId),
+  pinnedEntryId: HexConverter.decode(row.pinnedEntryId),
+  pinnedEpoch: BigInt(row.pinnedEpoch),
+}));
 
 /**
  * The pin of a local or test network, derived from that deployment's own GetTrustBase bundle (genesis to tip): the network, the genesis and tip
