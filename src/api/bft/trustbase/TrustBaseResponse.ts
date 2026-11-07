@@ -199,9 +199,6 @@ export class TrustBaseResponse {
     }
     for (let i = 1; i < bundle.entries.length; i++) {
       const entry = bundle.entries[i];
-      if (entry.rootNodes.length > RootTrustBaseV2.MAX_ADMITTED_MEMBERS) {
-        throw new TrustBaseError('invalid', `Epoch ${entry.epoch} has ${entry.rootNodes.length} members.`);
-      }
       await entry.verifySuccessor(bundle.entries[i - 1]);
     }
   }

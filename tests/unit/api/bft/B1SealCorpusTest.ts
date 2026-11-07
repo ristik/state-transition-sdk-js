@@ -29,7 +29,9 @@ const corpus = JSON.parse(
 
 describe('B1 seal corpus: certificate acceptance equals the native any-age verifier', () => {
   const verifier = new UnicityCertificateVerifier(
-    new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier()),
+    // The B1 profile: its registry bounds a seal at 16 signatures (a gas bound that stays, §49), so this verifier refuses what B1 refuses. A
+    // wallet's default is 256 (see CommitteeLimitsTest).
+    new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), undefined, { maxSignatures: 16 }),
   );
 
   it('has the expected format', () => {

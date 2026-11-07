@@ -36,30 +36,44 @@ const TEXT_ENCODER = new TextEncoder();
  */
 export class UnicitySealQuorumSignaturesVerificationRule {
   public static readonly MAX_NODE_ID_BYTES = 128;
-  public static readonly MAX_SIGNATURES = 16;
+  /** Supplied signatures of one seal, counted whoever signed (unknown signers and bad values included): a resource bound, 256 as the committee ceiling (§49). */
+  public static readonly MAX_SIGNATURES = 256;
+
+  /** The signature count this rule refuses above ({@link MAX_SIGNATURES} unless configured). */
+  public readonly maxSignatures: number;
 
   /**
    * @param {ISignatureVerifier<Signature>} signatureVerifier Recovering secp256k1 verifier for the root-node signatures.
    * @param {VerifiedSealCache} [cache] Memo for verified seals; omit to verify every seal afresh.
+   * @param {object} [options] Options.
+   * @param {number} [options.maxSignatures] Most supplied signatures per seal, default {@link MAX_SIGNATURES} (256). The B1 bridge profile keeps 16,
+   *   a gas bound of its registry; a verifier that must refuse exactly what B1 refuses passes 16.
    */
   public constructor(
     private readonly signatureVerifier: ISignatureVerifier<Signature>,
     private readonly cache?: VerifiedSealCache,
-  ) {}
+    options: { readonly maxSignatures?: number } = {},
+  ) {
+    this.maxSignatures = options.maxSignatures ?? UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES;
+  }
 
   /**
    * The format checks of a seal's signature map (count and identifier length), independent of any authority.
    *
    * @param {UnicitySeal} seal Seal.
+   * @param {number} [maxSignatures] Signature ceiling, default {@link MAX_SIGNATURES}.
    * @returns {string|null} Why the seal is malformed, or null.
    */
-  public static checkSignatureFormat(seal: UnicitySeal): string | null {
+  public static checkSignatureFormat(
+    seal: UnicitySeal,
+    maxSignatures: number = UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES,
+  ): string | null {
     const witnesses = seal.witnesses;
     if (witnesses === null) {
       return null;
     }
-    if (witnesses.size > UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES) {
-      return `${witnesses.size} signatures exceed ${UnicitySealQuorumSignaturesVerificationRule.MAX_SIGNATURES}.`;
+    if (witnesses.size > maxSignatures) {
+      return `${witnesses.size} signatures exceed ${maxSignatures}.`;
     }
     for (const signer of witnesses.keys()) {
       if (TEXT_ENCODER.encode(signer).length > UnicitySealQuorumSignaturesVerificationRule.MAX_NODE_ID_BYTES) {
@@ -154,7 +168,7 @@ export class UnicitySealQuorumSignaturesVerificationRule {
     unicitySeal: UnicitySeal,
   ): Promise<CertificateVerificationResult> {
     const rule = 'UnicitySealQuorumSignaturesVerificationRule';
-    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(unicitySeal);
+    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(unicitySeal, this.maxSignatures);
     if (malformed !== null) {
       return new CertificateVerificationResult(rule, 'malformed', malformed);
     }
