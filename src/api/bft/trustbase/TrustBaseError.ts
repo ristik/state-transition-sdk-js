@@ -86,3 +86,18 @@ export class TrustBaseGapError extends TrustBaseError {
     super('gap', message);
   }
 }
+
+/**
+ * No source served the entries that were wanted: every source failed, answered with a refusal status, or served an entry the history refuses. The
+ * causes are kept, in the order they happened. Not the same as "nothing newer": that is a result (no entries appended), not an error.
+ */
+export class TrustBaseUpdateError extends TrustBaseError {
+  public constructor(
+    message: string,
+    public readonly causes: readonly unknown[],
+    /** Entries appended before the call failed: a valid prefix stays held, and may be all the caller needed. */
+    public readonly appended: number = 0,
+  ) {
+    super('update', message);
+  }
+}
