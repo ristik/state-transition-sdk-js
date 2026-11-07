@@ -195,3 +195,10 @@ export class TrustBaseUpdateError extends TrustBaseError {
     super('update', message);
   }
 }
+
+/** Another writer holds the cache lock. Immediate, never waited on and never stolen: a lock left by a crash is for the application to clear. */
+export class CacheBusyError extends TrustBaseError {
+  public constructor(message: string) {
+    super('cacheBusy', message);
+  }
+}
