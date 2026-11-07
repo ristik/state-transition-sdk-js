@@ -27,8 +27,11 @@ export interface ITrustBaseBundleLimits {
  */
 export class TrustBaseBundle {
   public static readonly CBOR_TAG = 39015n;
-  /** Bound of one embedded entry in bytes. */
-  public static readonly MAX_ENTRY_BYTES = 64 * 1024;
+  /**
+   * Bound of one embedded entry in bytes: 128 KiB. A full entry (256 members, 128-byte node ids, 256 predecessor signatures) is about 95,400 bytes;
+   * sixteen members need at most about 6 KiB.
+   */
+  public static readonly MAX_ENTRY_BYTES = 128 * 1024;
   public static readonly VERSION = 1n;
   /** Number of defined response statuses; the response carries the status of a refused request, a bundle never does. */
   private static readonly STATUS_COUNT = 8n;

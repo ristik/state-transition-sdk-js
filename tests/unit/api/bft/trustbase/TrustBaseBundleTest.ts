@@ -112,9 +112,29 @@ describe('TrustBaseBundle: rules, one at a time', () => {
   it('rejects an embedded entry above the per-entry bound before decoding it', async () => {
     const f = threeEntryBundle();
     await rejects(
-      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(70000))] },
+      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(131072))] },
       TrustBaseEncodingError,
-      /Entry 0 of 70005 bytes/,
+      /Entry 0 of 131077 bytes/,
+    );
+  });
+
+  it('the per-entry bound is 128 KiB: an entry of exactly that size passes the size check, one byte more does not', async () => {
+    expect(TrustBaseBundle.MAX_ENTRY_BYTES).toBe(131072);
+    const f = threeEntryBundle();
+    // The byte string header of a payload above 64 KiB is five bytes, so 131067 bytes of payload make an entry of exactly the bound.
+    const atBound = CborSerializer.encodeByteString(new Uint8Array(131067));
+    expect(atBound.length).toBe(131072);
+    // It is refused later, as not an entry, never for its size.
+    const error = await TrustBaseBundle.decode(buildBundle({ ...f, entries: [atBound] }), LIMITS).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toMatch(/Entry 0 of \d+ bytes/);
+    await rejects(
+      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(131068))] },
+      TrustBaseEncodingError,
+      /Entry 0 of 131073 bytes/,
     );
   });
 
@@ -132,9 +152,29 @@ describe('TrustBaseBundle: rules, one at a time', () => {
   it('rejects an embedded entry above the per-entry bound before decoding it', async () => {
     const f = threeEntryBundle();
     await rejects(
-      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(70000))] },
+      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(131072))] },
       TrustBaseEncodingError,
-      /Entry 0 of 70005 bytes/,
+      /Entry 0 of 131077 bytes/,
+    );
+  });
+
+  it('the per-entry bound is 128 KiB: an entry of exactly that size passes the size check, one byte more does not', async () => {
+    expect(TrustBaseBundle.MAX_ENTRY_BYTES).toBe(131072);
+    const f = threeEntryBundle();
+    // The byte string header of a payload above 64 KiB is five bytes, so 131067 bytes of payload make an entry of exactly the bound.
+    const atBound = CborSerializer.encodeByteString(new Uint8Array(131067));
+    expect(atBound.length).toBe(131072);
+    // It is refused later, as not an entry, never for its size.
+    const error = await TrustBaseBundle.decode(buildBundle({ ...f, entries: [atBound] }), LIMITS).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toMatch(/Entry 0 of \d+ bytes/);
+    await rejects(
+      { ...f, entries: [CborSerializer.encodeByteString(new Uint8Array(131068))] },
+      TrustBaseEncodingError,
+      /Entry 0 of 131073 bytes/,
     );
   });
 
