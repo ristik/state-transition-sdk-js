@@ -7,6 +7,7 @@ import {
   TrustBaseInvalidError,
 } from './TrustBaseError.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
+import { NetworkId } from '../../NetworkId.js';
 
 /**
  * What {@link TrustBaseHistory.append} did with an entry that passed: it was added, or it was already held (nothing changed).
@@ -41,6 +42,11 @@ export class TrustBaseHistory {
   /** @returns {boolean} Whether no entry is held yet. */
   public get isEmpty(): boolean {
     return this._entries.length === 0;
+  }
+
+  /** @returns {NetworkId|null} The network of the held entries, or null when empty. */
+  public get networkId(): NetworkId | null {
+    return this._entries[0]?.networkId ?? null;
   }
 
   /** @returns {RootTrustBaseV2|null} The latest held entry, or null when empty. */
@@ -95,6 +101,30 @@ export class TrustBaseHistory {
     // A failed append must not stop the next one.
     this._queue = result.catch(() => undefined);
     return result;
+  }
+
+  /**
+   * The held entry of an epoch.
+   *
+   * @param {bigint} epoch Epoch.
+   * @returns {RootTrustBaseV2|null} The entry, or null when the epoch is before the genesis or after the tip (the caller may fetch and append).
+   */
+  public entryForEpoch(epoch: bigint): RootTrustBaseV2 | null {
+    const first = this._entries[0];
+    if (first === undefined || epoch < first.epoch) {
+      return null;
+    }
+    return this._entries[Number(epoch - first.epoch)] ?? null;
+  }
+
+  /**
+   * The round at which the held successor of an epoch starts, which ends the epoch's interval.
+   *
+   * @param {bigint} epoch Epoch.
+   * @returns {bigint|null} Start round of the entry for `epoch + 1`, or null when none is held (the epoch is open-ended as far as this history knows).
+   */
+  public epochEndRound(epoch: bigint): bigint | null {
+    return this.entryForEpoch(epoch + 1n)?.epochStartRound ?? null;
   }
 
   private async appendNow(entry: RootTrustBaseV2): Promise<TrustBaseAppendOutcome> {
