@@ -167,6 +167,9 @@ export class SealVerificationSession implements ISealAuthenticator {
     if (!signatures?.size) {
       return 'Seal has no signatures.';
     }
+    if (signatures.size > UnicitySeal.MAX_WITNESSES) {
+      return `Seal has ${signatures.size} signatures, more than ${UnicitySeal.MAX_WITNESSES}.`;
+    }
     for (const [signer, signature] of signatures) {
       if (signer === '') {
         return 'Seal has a signature without signer ID.';
@@ -213,6 +216,14 @@ export class SealVerificationSession implements ISealAuthenticator {
     entry: RootTrustBaseV2,
     seal: UnicitySeal,
   ): Promise<VerificationResult<VerificationStatus>> {
+    // Before the memo key is built (which encodes and hashes the whole seal) and before any signature work.
+    if ((seal.witnesses?.size ?? 0) > UnicitySeal.MAX_WITNESSES) {
+      return new VerificationResult(
+        'SealAuthority',
+        VerificationStatus.FAIL,
+        `Seal has ${seal.witnesses?.size} signatures, more than ${UnicitySeal.MAX_WITNESSES}.`,
+      );
+    }
     if (this.customRule) {
       this.counters.quorumChecks++;
       return this.quorumRule.verify(entry, seal);
