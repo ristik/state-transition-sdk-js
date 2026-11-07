@@ -219,7 +219,7 @@ describe('UTB cache: shared vectors', () => {
       casAttempts: 4,
       maxBundleBytes: 16 * 1024 * 1024,
       maxEntries: 4096,
-      maxEntryBytes: 65536,
+      maxEntryBytes: 131072,
     });
   });
 
