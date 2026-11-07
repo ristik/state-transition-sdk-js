@@ -4,7 +4,7 @@ import { startAggregatorStack } from './aggregatorStack.mjs';
  * Start the aggregator stack once for the whole integration run and publish
  * where it lives.
  *
- * The suites read AGGREGATOR_URL and TRUST_BASE_PATH; Jest copies the
+ * The suites read AGGREGATOR_URL, TRUST_BASE_PATH and TRUST_BASE_GENESIS_PIN; Jest copies the
  * environment into its workers, so setting them here is what reaches the tests.
  *
  * @returns {Promise<void>} Resolves once the stack is certifying.
@@ -17,4 +17,5 @@ export default async function globalSetup() {
   globalThis.__AGGREGATOR_STACK__ = stack;
   process.env.AGGREGATOR_URL = stack.url;
   process.env.TRUST_BASE_PATH = stack.trustBasePath;
+  process.env.TRUST_BASE_GENESIS_PIN = stack.genesisId.replace(/^0x/, '');
 }
