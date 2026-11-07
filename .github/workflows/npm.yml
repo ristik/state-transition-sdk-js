@@ -38,6 +38,9 @@ jobs:
       - name: Type check (src + tests)
         run: npm run build:check
 
+      - name: Release pins are generated from the manifest
+        run: node scripts/release-pins/generate.mjs --check
+
       - name: Lint code
         run: npm run lint
 
