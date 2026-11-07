@@ -9,7 +9,7 @@ import { DockerComposeEnvironment, Wait } from 'testcontainers';
 const COMPOSE_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'docker');
 const DATA_DIR = path.join(COMPOSE_DIR, 'data');
 const SUPPORT_DIR = path.dirname(fileURLToPath(import.meta.url));
-/** The trust-base history the aggregator serves, as fetched once the stack certifies: the bundle the suite verifies against. */
+/** The trust-base history the aggregator serves, as fetched once the stack certifies: the bundle the suite derives its pin from. */
 const TRUST_BASE_PATH = path.join(DATA_DIR, 'trust-base-history.cbor');
 
 /** The aggregator's own port inside the container; the host port is ephemeral. */
@@ -143,7 +143,7 @@ export async function startAggregatorStack() {
   const url = `http://${aggregator.getHost()}:${aggregator.getMappedPort(AGGREGATOR_PORT)}`;
   await waitForCertification(url);
   await writeFile(TRUST_BASE_PATH, await fetchTrustBaseHistory(url));
-  // the pin the genesis step wrote beside the genesis entry: the suite pins the served history's genesis to it
+  // the pin the genesis step wrote beside the genesis entry: the suite cross-checks the one it derives from the served bundle against it
   const genesisId = (await readFile(path.join(DATA_DIR, 'genesis', 'utb', 'genesis.id'), 'utf8')).trim();
 
   return {
