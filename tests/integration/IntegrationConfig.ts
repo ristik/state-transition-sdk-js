@@ -1,9 +1,8 @@
-import { readFileSync } from 'node:fs';
-
 import { AggregatorClient } from '../../src/api/AggregatorClient.js';
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { TrustBaseHistory } from '../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { IAggregatorClient } from '../../src/api/IAggregatorClient.js';
 import { StateTransitionClient } from '../../src/StateTransitionClient.js';
+import { loadTrustBaseHistorySync } from '../utils/TrustBaseFile.js';
 
 /**
  * Read a value the stack published, or say why it is missing.
@@ -39,13 +38,19 @@ function fromStack(name: string): string {
 export function createIntegrationContext(): {
   aggregatorClient: IAggregatorClient;
   client: StateTransitionClient;
-  trustBase: RootTrustBase;
+  ready: Promise<void>;
+  trustBase: TrustBaseHistory;
 } {
   const aggregatorClient = new AggregatorClient(fromStack('AGGREGATOR_URL'), null);
+  const { history, ready } = loadTrustBaseHistorySync(
+    fromStack('TRUST_BASE_PATH'),
+    fromStack('TRUST_BASE_GENESIS_PIN'),
+  );
 
   return {
     aggregatorClient,
     client: new StateTransitionClient(aggregatorClient),
-    trustBase: RootTrustBase.fromJSON(JSON.parse(readFileSync(fromStack('TRUST_BASE_PATH'), 'utf-8'))),
+    ready,
+    trustBase: history,
   };
 }
