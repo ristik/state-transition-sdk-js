@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { secp256k1 } from '@noble/curves/secp256k1.js';
+
 import { CborDeserializer } from '../../../../../src/serialization/cbor/CborDeserializer.js';
 import { CborMap } from '../../../../../src/serialization/cbor/CborMap.js';
 import { CborMapEntry } from '../../../../../src/serialization/cbor/CborMapEntry.js';
@@ -175,4 +177,42 @@ export function replaceBytes(data: Uint8Array, from: string, to: string): Uint8A
     throw new Error(`Pattern ${from} must occur exactly once`);
   }
   return HexConverter.decode(hex.slice(0, index) + to + hex.slice(index + from.length));
+}
+
+/**
+ * Test keys of the shared vectors: member "a".."d" has the private key of 32 bytes of value 1..4. They sign nothing real.
+ *
+ * @param {string} name Member name, a..d.
+ * @returns {Uint8Array} Private key.
+ */
+export function testSecret(name: string): Uint8Array {
+  return new Uint8Array(32).fill(name.charCodeAt(0) - 'a'.charCodeAt(0) + 1);
+}
+
+/**
+ * A recoverable signature in the wire form `r || s || recovery` over SHA-256 of `data` (deterministic, RFC 6979).
+ */
+export function signRecoverable(data: Uint8Array, secret: Uint8Array): Uint8Array {
+  const signature = secp256k1.sign(data, secret, { format: 'recovered' });
+  return new Uint8Array([...signature.slice(1), signature[0]]);
+}
+
+/**
+ * The same signature with its s replaced by N - s and the recovery id flipped: it still recovers the signer's key but is high-S.
+ */
+export function toHighS(signature: Uint8Array): Uint8Array {
+  const s = BigInt('0x' + HexConverter.encode(signature.slice(32, 64)));
+  const flipped = (secp256k1.Point.Fn.ORDER - s).toString(16).padStart(64, '0');
+  return new Uint8Array([...signature.slice(0, 32), ...HexConverter.decode(flipped), signature[64] ^ 1]);
+}
+
+/**
+ * An entry signed by the named test members over its own sigBytes.
+ */
+export function signEntry(fields: IEntryFields, signers: string[]): Uint8Array {
+  const unsigned = buildEntry({ ...fields, signatures: null });
+  return buildEntry({
+    ...fields,
+    signatures: signers.map((name): [string, Uint8Array] => [name, signRecoverable(unsigned, testSecret(name))]),
+  });
 }
