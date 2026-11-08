@@ -10,8 +10,8 @@ import { VerificationResult } from '../../../verification/VerificationResult.js'
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { NetworkId } from '../../NetworkId.js';
 import { SdkError } from '../../SdkError.js';
+import { ITrustBaseHistory } from '../trustbase/ITrustBaseHistory.js';
 import { RootTrustBaseV2 } from '../trustbase/RootTrustBaseV2.js';
-import { TrustBaseHistory } from '../trustbase/TrustBaseHistory.js';
 import { UnicitySeal } from '../UnicitySeal.js';
 
 /**
@@ -66,12 +66,12 @@ export class SealVerificationSession implements ISealAuthenticator {
   private readonly completed = new Map<string, VerificationResult<VerificationStatus>>();
   private readonly counters = { inFlightJoins: 0, memoHits: 0, quorumChecks: 0 };
   private readonly customRule: boolean;
-  private readonly history: TrustBaseHistory;
+  private readonly history: ITrustBaseHistory;
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
   private readonly policy: string;
 
   /**
-   * @param {TrustBaseHistory} history Trusted authority the seals are authenticated against: the held trust-base history.
+   * @param {ITrustBaseHistory} history Trusted authority the seals are authenticated against: the held trust-base history.
    * @param {UnicitySealQuorumSignaturesVerificationRule} quorumRule Quorum rule, runs on every distinct miss.
    * @param {object} [options] Options.
    * @param {number} [options.maxEntries] Upper bound on retained successful checks, the oldest is evicted first.
@@ -80,7 +80,7 @@ export class SealVerificationSession implements ISealAuthenticator {
    * @throws {Error} If `maxEntries` is not a positive integer.
    */
   public constructor(
-    history: TrustBaseHistory,
+    history: ITrustBaseHistory,
     private readonly quorumRule: UnicitySealQuorumSignaturesVerificationRule,
     private readonly options: {
       readonly maxEntries?: number;
@@ -124,9 +124,9 @@ export class SealVerificationSession implements ISealAuthenticator {
   }
 
   /**
-   * @returns {TrustBaseHistory} The trust-base history this session was created for.
+   * @returns {ITrustBaseHistory} The trust-base history this session was created for.
    */
-  public get sourceTrustBase(): TrustBaseHistory {
+  public get sourceTrustBase(): ITrustBaseHistory {
     return this.history;
   }
 

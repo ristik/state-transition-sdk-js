@@ -102,7 +102,7 @@ describe('UnicitySealTrustBaseEntryRule', () => {
   });
 
   it('checks the network before the epoch lookup: another network past the tip is not a no-entry', async () => {
-    const result = UnicitySealTrustBaseEntryRule.verify(await twoEpochs(), await seal(9n, 0n, [], NetworkId.TESTNET));
+    const result = UnicitySealTrustBaseEntryRule.verify(await twoEpochs(), await seal(9n, 0n, [], NetworkId.MAINNET));
     expect(result.status).toBe(VerificationStatus.FAIL);
     expect(result).not.toBeInstanceOf(NoTrustBaseEntryResult);
     expect(result.message).toMatch(/another network/);
@@ -123,7 +123,7 @@ describe('UnicitySealTrustBaseEntryRule', () => {
   });
 
   it('fails a seal of another network', async () => {
-    const result = UnicitySealTrustBaseEntryRule.verify(await twoEpochs(), await seal(1n, 0n, [], NetworkId.TESTNET));
+    const result = UnicitySealTrustBaseEntryRule.verify(await twoEpochs(), await seal(1n, 0n, [], NetworkId.MAINNET));
 
     expect(result.status).toBe(VerificationStatus.FAIL);
     expect(result).not.toBeInstanceOf(NoTrustBaseEntryResult);
