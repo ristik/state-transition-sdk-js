@@ -1,6 +1,7 @@
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
 import { TrustBaseBundle } from './TrustBaseBundle.js';
 import {
+  TrustBaseBeforeGenesisError,
   TrustBaseChainError,
   TrustBaseConflictError,
   TrustBaseGapError,
@@ -127,6 +128,17 @@ export class TrustBaseHistory {
     return this.entryForEpoch(epoch + 1n)?.epochStartRound ?? null;
   }
 
+  /**
+   * The held entries as one complete bundle (tag 39015), the form a cache stores. Round-trips through {@link TrustBaseBundle.decode}.
+   *
+   * @returns {Promise<Uint8Array>} Tagged bundle.
+   * @throws {TrustBaseBundleError} If the history is empty.
+   */
+  public toBundle(): Promise<Uint8Array> {
+    // A copy: appends may run while the entry ids are computed.
+    return TrustBaseBundle.encode(this.entries);
+  }
+
   private async appendNow(entry: RootTrustBaseV2): Promise<TrustBaseAppendOutcome> {
     const first = this._entries[0];
     const tip = this._entries[this._entries.length - 1];
@@ -141,11 +153,22 @@ export class TrustBaseHistory {
 
     if (entry.epoch <= tip.epoch) {
       if (entry.epoch < first.epoch) {
-        throw new TrustBaseChainError(`Epoch ${entry.epoch} is before the genesis epoch ${first.epoch}.`);
+        throw new TrustBaseBeforeGenesisError(`Epoch ${entry.epoch} is before the genesis epoch ${first.epoch}.`);
       }
       const index = Number(entry.epoch - first.epoch);
-      if (!areUint8ArraysEqual(await this._entries[index].entryId(), await entry.entryId())) {
-        throw new TrustBaseConflictError(entry.epoch, `A different entry is held for epoch ${entry.epoch}.`);
+      const heldId = await this._entries[index].entryId();
+      const offeredId = await entry.entryId();
+      if (!areUint8ArraysEqual(heldId, offeredId)) {
+        // Different, but not authenticated: the caller that wants to know whether it is a fork verifies the entry against the predecessor.
+        throw new TrustBaseConflictError(entry.epoch, `A different entry is held for epoch ${entry.epoch}.`, {
+          authenticated: false,
+          epoch: entry.epoch,
+          heldEntry: null,
+          heldEntryId: heldId,
+          network: entry.networkId.id,
+          offeredEntry: null,
+          offeredEntryId: offeredId,
+        });
       }
       if (index > 0) {
         await entry.verifySuccessor(this._entries[index - 1]);

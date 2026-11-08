@@ -38,6 +38,9 @@ jobs:
       - name: Type check (src + tests)
         run: npm run build:check
 
+      - name: Release pins are generated from the manifest
+        run: node scripts/release-pins/generate.mjs --check
+
       - name: Lint code
         run: npm run lint
 
@@ -75,10 +78,10 @@ jobs:
       # Testcontainers starts the stack in tests/integration/docker — a BFT root
       # node, mongodb, redis and the aggregator built above — waits for
       # consensus to certify a round, fetches the trust-base history the
-      # aggregator serves (the suite pins its genesis to the entry id the
-      # genesis step wrote) and tears it down afterwards. Nothing external is
-      # involved, and the aggregator is published on an ephemeral port, so
-      # concurrent jobs on a runner cannot collide.
+      # aggregator serves (the suite derives its pin from it) and tears it down
+      # afterwards. Nothing external is involved, and the aggregator is
+      # published on an ephemeral port, so concurrent jobs on a runner cannot
+      # collide.
       - name: Run integration tests
         run: npm run test:integration
 

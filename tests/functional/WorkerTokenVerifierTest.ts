@@ -260,7 +260,7 @@ describe('WorkerTokenVerifier', () => {
       createContext(),
       SignaturePredicate.create(SigningService.generate().publicKey),
       null,
-      NetworkId.TESTNET,
+      NetworkId.MAINNET,
     ).then(
       () => null,
       (error: unknown) => error,
