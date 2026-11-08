@@ -1,7 +1,7 @@
 import { IVerificationContext } from './IVerificationContext.js';
 import { MintJustificationVerifierService } from './MintJustificationVerifierService.js';
 import { TokenIssuanceVerifierService } from './TokenIssuanceVerifierService.js';
-import { TrustBaseHistory } from '../../api/bft/trustbase/TrustBaseHistory.js';
+import { ITrustBaseHistory } from '../../api/bft/trustbase/ITrustBaseHistory.js';
 import { UnicityCertificateVerifier } from '../../api/bft/verification/UnicityCertificateVerifier.js';
 import { PredicateVerifierService } from '../../predicate/verification/PredicateVerifierService.js';
 
@@ -13,14 +13,14 @@ import { PredicateVerifierService } from '../../predicate/verification/Predicate
  */
 export class VerificationContext implements IVerificationContext {
   /**
-   * @param {TrustBaseHistory} trustBase Trust-base history of the network.
+   * @param {ITrustBaseHistory} trustBase Trust-base history of the network.
    * @param {PredicateVerifierService} predicateVerifier Predicate verifier.
    * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
    * @param {MintJustificationVerifierService} mintJustificationVerifier Mint justification registry.
    * @param {TokenIssuanceVerifierService} tokenIssuanceVerifier Token issuance registry.
    */
   public constructor(
-    public readonly trustBase: TrustBaseHistory,
+    public readonly trustBase: ITrustBaseHistory,
     public readonly predicateVerifier: PredicateVerifierService,
     public readonly unicityCertificateVerifier: UnicityCertificateVerifier,
     public readonly mintJustificationVerifier: MintJustificationVerifierService,
