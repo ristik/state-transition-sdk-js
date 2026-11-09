@@ -47,7 +47,7 @@ describe('B1 verdict classes under the registry variants', () => {
     const c = byId(id);
     const registries: [string, ITestEpoch[], number][] = [
       ['as is', c.epochs, c.network],
-      ['the seal epoch above the tip', [{ ...c.epochs[0], epoch: 3, start: 1, end: null }], c.network],
+      ['the seal epoch above the tip', [{ ...c.epochs[0], end: null, epoch: 3, start: 1 }], c.network],
       ['an empty registry', [], c.network],
       ['another network', c.epochs, c.network + 1],
       ['a round before the epoch start', [{ ...c.epochs[0], start: 1_000_000_000 }], c.network],
@@ -67,7 +67,7 @@ describe('B1 verdict classes under the registry variants', () => {
     });
 
     it('reports the missing epoch and the latest held one for a seal above the tip', async () => {
-      const held = [{ ...c.epochs[0], epoch: 3, start: 1, end: null }];
+      const held = [{ ...c.epochs[0], end: null, epoch: 3, start: 1 }];
       const result = await verify(c, held);
       expect(result.verdict).toBe('no_entry_for_epoch');
       expect(result.missing).toEqual({ epoch: 7n, latest: 3n });
