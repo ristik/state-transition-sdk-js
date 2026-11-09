@@ -1,273 +1,187 @@
-import { RootTrustBase } from '../RootTrustBase.js';
 import { RootTrustBaseV2 } from './RootTrustBaseV2.js';
-import { IEpochCommittee, IEpochCommitteeMember, ITrustBaseAuthority } from './TrustBaseAuthority.js';
-import { TrustBaseError } from './TrustBaseError.js';
-import { ITrustBaseResponseLimits, TrustBaseResponse } from './TrustBaseResponse.js';
-import { HexConverter } from '../../../util/HexConverter.js';
+import { TrustBaseBundle } from './TrustBaseBundle.js';
+import {
+  TrustBaseBeforeGenesisError,
+  TrustBaseChainError,
+  TrustBaseConflictError,
+  TrustBaseGapError,
+  TrustBaseInvalidError,
+} from './TrustBaseError.js';
 import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
 import { NetworkId } from '../../NetworkId.js';
 
-/** The latest held entry. */
-export interface ITrustBaseTip {
-  readonly entryId: Uint8Array;
-  readonly epoch: bigint;
-}
-
-/** Budget for loading a shipped bundle (a release artifact, not a network page). */
-export const DEFAULT_BUNDLE_LIMITS: ITrustBaseResponseLimits = { maxBytes: 64 << 20, maxEntries: 1 << 16 };
+/**
+ * What {@link TrustBaseHistory.append} did with an entry that passed: it was added, or it was already held (nothing changed).
+ */
+export type TrustBaseAppendOutcome = 'appended' | 'noop';
 
 /**
- * The held Unicity Trust Base history: every entry from the pinned genesis forward, append-only.
+ * The append-only Unicity Trust Base history a verifier holds: consecutive entries from a genesis entry pinned out of band by its entry id, each
+ * authenticated by a strict quorum of its predecessor's members. The reference is the shared vectors' history model (bft-go-base
+ * `types/root_trust_base_v2_vectors_test.go`) and bft-core `utbstore`.
  *
- * The latest held entry is effectively the pin (owner §29): a release ships the complete history known at release time, and every later entry is
- * verified from the latest held one and then anchors the next. {@link append} is the single way in, with exactly the rules of bft-core `utbstore`:
- *
- * - the next epoch is verified strictly from the held predecessor ({@link RootTrustBaseV2.verifySuccessor}) and the admitted member limit;
- * - an entry of a held epoch with the same unsigned bytes (same EntryID) and a valid witness is a no-op that keeps the held bytes; a different valid
- *   signature subset is not a fork;
- * - an entry of a held epoch with different unsigned bytes is a `conflict`; held entries are never replaced;
- * - an entry that does not directly follow the tip is a `gap`; nothing is skipped.
+ * `append` is the only way in, for the genesis and for every later entry, including those of a loaded bundle. An entry of a held epoch changes
+ * nothing: the same entry id is a `noop` (its signature set must still verify, so a bad witness is an error), a different one is a conflict. An
+ * entry more than one epoch ahead is a gap. Appends are serialised, so concurrent callers see one consistent chain.
  */
-export class TrustBaseHistory implements ITrustBaseAuthority {
-  private readonly committees: (IEpochCommittee | undefined)[] = [];
-  private readonly entries: RootTrustBaseV2[];
-  private readonly ids: Uint8Array[];
-  private readonly raw: Uint8Array[];
-  /** Serialises every mutation: each append runs its check, verification and push without another one interleaving at an `await`. */
-  private writes: Promise<unknown> = Promise.resolve();
+export class TrustBaseHistory {
+  private readonly _entries: RootTrustBaseV2[] = [];
+  private _queue: Promise<unknown> = Promise.resolve();
 
-  private constructor(entries: RootTrustBaseV2[], raw: Uint8Array[], ids: Uint8Array[]) {
-    this.entries = entries;
-    this.raw = raw;
-    this.ids = ids;
+  private constructor(private readonly _genesisPin: Uint8Array) {}
+
+  /** @returns {RootTrustBaseV2[]} The held entries, ascending from the genesis. */
+  public get entries(): RootTrustBaseV2[] {
+    return [...this._entries];
   }
 
-  /** @returns {bigint} The genesis epoch. */
-  public get genesisEpoch(): bigint {
-    return this.entries[0].epoch;
+  /** @returns {Uint8Array} Copy of the pinned entry id of the genesis. */
+  public get genesisPin(): Uint8Array {
+    return new Uint8Array(this._genesisPin);
   }
 
-  /** @returns {string} Network, genesis EntryID and latest EntryID: the held history in a cache or session key. */
-  public get identity(): string {
-    return JSON.stringify([
-      this.entries[0].networkId,
-      HexConverter.encode(this.ids[0]),
-      HexConverter.encode(this.ids[this.ids.length - 1]),
-    ]);
+  /** @returns {boolean} Whether no entry is held yet. */
+  public get isEmpty(): boolean {
+    return this._entries.length === 0;
   }
 
-  /** @returns {NetworkId} The network. */
-  public get networkId(): NetworkId {
-    return NetworkId.fromId(this.entries[0].networkId);
+  /** @returns {NetworkId|null} The network of the held entries, or null when empty. */
+  public get networkId(): NetworkId | null {
+    return this._entries[0]?.networkId ?? null;
   }
 
-  /** @returns {ITrustBaseTip} The latest held entry. */
-  public get tip(): ITrustBaseTip {
-    const last = this.entries.length - 1;
-    return { entryId: new Uint8Array(this.ids[last]), epoch: this.entries[last].epoch };
-  }
-
-  /** @returns {bigint} The latest held epoch. */
-  public get tipEpoch(): bigint {
-    return this.entries[this.entries.length - 1].epoch;
+  /** @returns {RootTrustBaseV2|null} The latest held entry, or null when empty. */
+  public get tip(): RootTrustBaseV2 | null {
+    return this._entries[this._entries.length - 1] ?? null;
   }
 
   /**
-   * A history loaded from a shipped bundle (tag 39015): the bundle's genesis must be the pinned one and every entry is appended through
-   * {@link append}.
+   * An empty history bound to the genesis it will accept.
    *
-   * @param {Uint8Array} bundle The bundle bytes.
-   * @param {Uint8Array} pin The genesis EntryID.
-   * @param {ITrustBaseResponseLimits} limits File budget.
-   * @returns {Promise<TrustBaseHistory>} The history.
-   * @throws {TrustBaseError} The first refusal.
+   * @param {Uint8Array} genesisPin Entry id of the genesis entry, from outside the history (a release pin).
+   * @returns {TrustBaseHistory} Empty history.
+   * @throws {TrustBaseInvalidError} If the pin is not a 32-byte entry id.
    */
-  public static async fromBundle(
-    bundle: Uint8Array,
-    pin: Uint8Array,
-    limits: ITrustBaseResponseLimits = DEFAULT_BUNDLE_LIMITS,
-  ): Promise<TrustBaseHistory> {
-    const decoded = await TrustBaseResponse.decodeBundle(bundle, limits);
-    const raw = decoded.rawEntries;
-    const history = await TrustBaseHistory.fromGenesis(raw[0], pin);
-    await history.installBundle(decoded);
+  public static create(genesisPin: Uint8Array): TrustBaseHistory {
+    if (genesisPin.length !== RootTrustBaseV2.ID_LENGTH) {
+      throw new TrustBaseInvalidError(`Genesis pin of ${genesisPin.length} bytes.`);
+    }
+    return new TrustBaseHistory(new Uint8Array(genesisPin));
+  }
+
+  /**
+   * Load a complete bundle through {@link append}, like every later entry.
+   *
+   * @param {TrustBaseBundle} bundle Decoded bundle.
+   * @param {Uint8Array} genesisPin Entry id of the genesis entry.
+   * @returns {Promise<TrustBaseHistory>} History holding every entry of the bundle.
+   * @throws {TrustBaseChainError} If the genesis is not the pinned one or an entry does not extend its predecessor.
+   * @throws {TrustBaseSignatureError} If an entry is not signed by a quorum of its predecessor.
+   */
+  public static async fromBundle(bundle: TrustBaseBundle, genesisPin: Uint8Array): Promise<TrustBaseHistory> {
+    const history = TrustBaseHistory.create(genesisPin);
+    for (const entry of bundle.entries) {
+      await history.append(entry);
+    }
     return history;
   }
 
   /**
-   * A history holding the pinned genesis alone.
+   * Add an entry.
    *
-   * @param {Uint8Array} genesis Canonical bytes of the genesis entry.
-   * @param {Uint8Array} pin Its EntryID, the deployment's authenticated genesis identity.
-   * @returns {Promise<TrustBaseHistory>} The history.
-   * @throws {TrustBaseError} `malformed`, `invalid` or `genesis`.
+   * @param {RootTrustBaseV2} entry Decoded entry.
+   * @returns {Promise<TrustBaseAppendOutcome>} `appended`, or `noop` when the entry is already held.
+   * @throws {TrustBaseInvalidError} If the first entry is not a genesis entry.
+   * @throws {TrustBaseChainError} If the first entry is not the pinned genesis, or the entry does not extend the tip (or its held predecessor).
+   * @throws {TrustBaseSignatureError} If the predecessor's members did not sign it with a quorum.
+   * @throws {TrustBaseConflictError} If a different entry is held for the epoch.
+   * @throws {TrustBaseGapError} If the entry is more than one epoch ahead of the tip.
    */
-  public static async fromGenesis(genesis: Uint8Array, pin: Uint8Array): Promise<TrustBaseHistory> {
-    const entry = RootTrustBaseV2.fromCBOR(genesis);
-    entry.verifyGenesis();
-    const id = await entry.entryId();
-    if (!areUint8ArraysEqual(id, pin)) {
-      throw new TrustBaseError('genesis', 'The genesis entry does not match the pin.');
-    }
-    return new TrustBaseHistory([entry], [new Uint8Array(genesis)], [id]);
+  public append(entry: RootTrustBaseV2): Promise<TrustBaseAppendOutcome> {
+    const result = this._queue.then(() => this.appendNow(entry));
+    // A failed append must not stop the next one.
+    this._queue = result.catch(() => undefined);
+    return result;
   }
 
   /**
-   * A history holding the version-2 genesis of an on-disk JSON (version 1) genesis trust base (owner D6), see
-   * {@link RootTrustBaseV2.genesisFromLegacy}. The pin must come from the deployment's authenticated configuration, never from the file itself.
+   * The held entry of an epoch.
    *
-   * @param {RootTrustBase} legacy The JSON genesis trust base.
-   * @param {Uint8Array} pin EntryID of its version-2 genesis entry.
-   * @returns {Promise<TrustBaseHistory>} The history.
-   * @throws {TrustBaseError} `invalid` or `genesis`.
-   */
-  public static fromLegacyGenesis(legacy: RootTrustBase, pin: Uint8Array): Promise<TrustBaseHistory> {
-    return TrustBaseHistory.fromGenesis(RootTrustBaseV2.genesisFromLegacy(legacy).toCBOR(), pin);
-  }
-
-  /**
-   * Append one entry given as its canonical bytes. Appends are serialised: concurrent calls (a piggybacked entry and a fetch, or two
-   * verifications that both miss an epoch) take effect one after another, so an epoch is never stored twice.
-   *
-   * @param {Uint8Array} bytes Tagged entry.
-   * @returns {Promise<boolean>} True when the entry was new; false for a no-op replay of a held entry.
-   * @throws {TrustBaseError} `malformed` or `invalid` (refused), `gap`, or `conflict`.
-   */
-  public append(bytes: Uint8Array): Promise<boolean> {
-    return this.exclusive(() => this.appendExclusive(bytes));
-  }
-
-  /**
    * @param {bigint} epoch Epoch.
-   * @returns {Uint8Array|null} The held canonical bytes of the epoch (a replay with another witness never replaces them), or null.
+   * @returns {RootTrustBaseV2|null} The entry, or null when the epoch is before the genesis or after the tip (the caller may fetch and append).
    */
-  public bytes(epoch: bigint): Uint8Array | null {
-    const index = epoch - this.genesisEpoch;
-    return index >= 0n && index < BigInt(this.raw.length) ? new Uint8Array(this.raw[Number(index)]) : null;
-  }
-
-  /**
-   * @param {bigint} epoch Epoch.
-   * @returns {IEpochCommittee|null} The committee of a held epoch, with its round interval, or null.
-   */
-  public committee(epoch: bigint): IEpochCommittee | null {
-    const index = epoch - this.genesisEpoch;
-    if (index < 0n || index >= BigInt(this.entries.length)) {
+  public entryForEpoch(epoch: bigint): RootTrustBaseV2 | null {
+    const first = this._entries[0];
+    if (first === undefined || epoch < first.epoch) {
       return null;
     }
-    const i = Number(index);
-    const end = i + 1 < this.entries.length ? this.entries[i + 1].epochStartRound : null;
-    const cached = this.committees[i];
-    if (cached && cached.end === end) {
-      return cached;
-    }
-    const entry = this.entries[i];
-    const committee: IEpochCommittee = {
-      end,
-      epoch: entry.epoch,
-      id: HexConverter.encode(this.ids[i]),
-      members: new Map<string, IEpochCommitteeMember>(
-        entry.rootNodes.map((m) => [m.nodeId, { signingKey: m.signingKey, weight: m.weight }]),
-      ),
-      networkId: NetworkId.fromId(entry.networkId),
-      start: entry.epochStartRound,
-      threshold: entry.quorumThreshold,
-    };
-    this.committees[i] = committee;
-    return committee;
+    return this._entries[Number(epoch - first.epoch)] ?? null;
   }
 
   /**
+   * The round at which the held successor of an epoch starts, which ends the epoch's interval.
+   *
    * @param {bigint} epoch Epoch.
-   * @returns {RootTrustBaseV2|null} The held entry of the epoch, or null when it is not held.
+   * @returns {bigint|null} Start round of the entry for `epoch + 1`, or null when none is held (the epoch is open-ended as far as this history knows).
    */
-  public entry(epoch: bigint): RootTrustBaseV2 | null {
-    const index = epoch - this.genesisEpoch;
-    return index >= 0n && index < BigInt(this.entries.length) ? this.entries[Number(index)] : null;
+  public epochEndRound(epoch: bigint): bigint | null {
+    return this.entryForEpoch(epoch + 1n)?.epochStartRound ?? null;
   }
 
   /**
-   * @returns {Promise<Uint8Array>} The whole held history as one bundle (tag 39015), to persist or ship.
-   */
-  public exportBundle(): Promise<Uint8Array> {
-    return TrustBaseResponse.encodeBundle(this.raw);
-  }
-
-  /**
-   * Append the entries of a decoded bundle (or page) in order, as one serialised mutation (no other append interleaves); a refusal leaves the
-   * history at the last good entry. An older bundle neither truncates nor rolls back the history.
+   * The held entries as one complete bundle (tag 39015), the form a cache stores. Round-trips through {@link TrustBaseBundle.decode}.
    *
-   * @param {TrustBaseResponse} bundle Decoded bundle or OK page.
-   * @returns {Promise<number>} The number of new entries.
-   * @throws {TrustBaseError} The first refusal.
+   * @returns {Promise<Uint8Array>} Tagged bundle.
+   * @throws {TrustBaseBundleError} If the history is empty.
    */
-  public installBundle(bundle: TrustBaseResponse): Promise<number> {
-    return this.exclusive(async () => {
-      let added = 0;
-      for (const raw of bundle.rawEntries) {
-        if (await this.appendExclusive(raw)) {
-          added++;
-        }
+  public toBundle(): Promise<Uint8Array> {
+    // A copy: appends may run while the entry ids are computed.
+    return TrustBaseBundle.encode(this.entries);
+  }
+
+  private async appendNow(entry: RootTrustBaseV2): Promise<TrustBaseAppendOutcome> {
+    const first = this._entries[0];
+    const tip = this._entries[this._entries.length - 1];
+    if (first === undefined || tip === undefined) {
+      entry.verifyGenesis();
+      if (!areUint8ArraysEqual(await entry.entryId(), this._genesisPin)) {
+        throw new TrustBaseChainError('The genesis is not the pinned identity.');
       }
-      return added;
-    });
-  }
-
-  /**
-   * @returns {TrustBaseHistory} An immutable view of the held history: later appends to this history do not change it.
-   */
-  public snapshot(): TrustBaseHistory {
-    return new TrustBaseHistory([...this.entries], [...this.raw], [...this.ids]);
-  }
-
-  /** {@link append} while holding the write chain. */
-  private async appendExclusive(bytes: Uint8Array): Promise<boolean> {
-    const entry = RootTrustBaseV2.fromCBOR(bytes);
-    const first = this.genesisEpoch;
-    const tip = this.entries[this.entries.length - 1];
-    if (entry.epoch < first) {
-      throw new TrustBaseError('gap', `Epoch ${entry.epoch} precedes the genesis ${first}.`);
+      this._entries.push(entry);
+      return 'appended';
     }
+
     if (entry.epoch <= tip.epoch) {
-      const index = Number(entry.epoch - first);
-      if (!areUint8ArraysEqual(await entry.entryId(), this.ids[index])) {
-        throw new TrustBaseError(
-          'conflict',
-          `An entry of epoch ${entry.epoch} with different unsigned bytes is already held.`,
-        );
+      if (entry.epoch < first.epoch) {
+        throw new TrustBaseBeforeGenesisError(`Epoch ${entry.epoch} is before the genesis epoch ${first.epoch}.`);
       }
-      if (index === 0) {
-        // the genesis is authenticated by the pin; it has no witness
-        if (entry.signatures !== null) {
-          throw new TrustBaseError('invalid', 'A genesis entry carrying signatures.');
-        }
-        return false;
+      const index = Number(entry.epoch - first.epoch);
+      const heldId = await this._entries[index].entryId();
+      const offeredId = await entry.entryId();
+      if (!areUint8ArraysEqual(heldId, offeredId)) {
+        // Different, but not authenticated: the caller that wants to know whether it is a fork verifies the entry against the predecessor.
+        throw new TrustBaseConflictError(entry.epoch, `A different entry is held for epoch ${entry.epoch}.`, {
+          authenticated: false,
+          epoch: entry.epoch,
+          heldEntry: null,
+          heldEntryId: heldId,
+          network: entry.networkId.id,
+          offeredEntry: null,
+          offeredEntryId: offeredId,
+        });
       }
-      // the supplied witness must itself be valid; the first held witness is kept
-      await entry.verifySuccessor(this.entries[index - 1]);
-      return false;
+      if (index > 0) {
+        await entry.verifySuccessor(this._entries[index - 1]);
+      }
+      return 'noop';
     }
-    if (entry.epoch !== tip.epoch + 1n) {
-      throw new TrustBaseError('gap', `Epoch ${entry.epoch} does not directly follow the held tip ${tip.epoch}.`);
-    }
-    await entry.verifySuccessor(tip);
-    // everything awaited before the first mutation: the three lists change together or not at all
-    const id = await entry.entryId();
-    this.entries.push(entry);
-    this.raw.push(new Uint8Array(bytes));
-    this.ids.push(id);
-    return true;
-  }
 
-  /**
-   * Run a mutation after every earlier one has settled, whatever its outcome.
-   *
-   * @param {Function} task The mutation.
-   * @returns {Promise<T>} Its result.
-   */
-  private exclusive<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.writes.then(task, task);
-    this.writes = run.catch(() => undefined);
-    return run;
+    if (entry.epoch > tip.epoch + 1n) {
+      throw new TrustBaseGapError(entry.epoch, tip.epoch, `Epoch ${entry.epoch} is ahead of the tip ${tip.epoch}.`);
+    }
+
+    await entry.verifySuccessor(tip);
+    this._entries.push(entry);
+    return 'appended';
   }
 }

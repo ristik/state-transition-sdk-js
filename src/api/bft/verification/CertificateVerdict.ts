@@ -1,3 +1,4 @@
+import { findNoTrustBaseEntry } from './TrustBaseEntryResult.js';
 import { VerificationResult } from '../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 
@@ -13,7 +14,8 @@ import { VerificationStatus } from '../../../verification/VerificationStatus.js'
 export type CertificateVerdict = 'invalid' | 'malformed' | 'no_entry_for_epoch' | 'ok';
 
 /**
- * A verification result that carries its {@link CertificateVerdict}, and for `no_entry_for_epoch` the missing epoch and the latest held epoch.
+ * A verification result that carries its {@link CertificateVerdict}, and for `no_entry_for_epoch` the missing epoch and the latest held epoch (null
+ * for an empty history).
  */
 export class CertificateVerificationResult extends VerificationResult<VerificationStatus> {
   /**
@@ -23,44 +25,42 @@ export class CertificateVerificationResult extends VerificationResult<Verificati
    * @param {VerificationResult<unknown>[]} [results] Child results.
    * @param {object} [missing] For `no_entry_for_epoch`.
    * @param {bigint} missing.epoch The seal's epoch.
-   * @param {bigint} missing.latest The latest held epoch.
+   * @param {bigint|null} missing.latest The latest held epoch.
    */
   public constructor(
     rule: string,
     public readonly verdict: CertificateVerdict,
     message: string = '',
     results: VerificationResult<unknown>[] = [],
-    public readonly missing: { readonly epoch: bigint; readonly latest: bigint } | null = null,
+    public readonly missing: { readonly epoch: bigint; readonly latest: bigint | null } | null = null,
   ) {
     super(rule, verdict === 'ok' ? VerificationStatus.OK : VerificationStatus.FAIL, message, results);
   }
 
   /**
-   * Find the first `no_entry_for_epoch` result in a verification trace (for example a token's).
+   * Find the first missing-entry failure in a verification trace (for example a token's): the typed {@link NoTrustBaseEntryResult}.
    *
    * @param {VerificationResult<unknown>} result Root of the trace.
-   * @returns {CertificateVerificationResult|null} The result naming the missing epoch, or null.
+   * @returns {object|null} The missing epoch and the latest held epoch, or null.
    */
-  public static findMissingEpoch(result: VerificationResult<unknown>): CertificateVerificationResult | null {
-    if (result instanceof CertificateVerificationResult && result.verdict === 'no_entry_for_epoch') {
-      return result;
-    }
-    for (const child of result.results) {
-      const found = CertificateVerificationResult.findMissingEpoch(child);
-      if (found) {
-        return found;
-      }
-    }
-    return null;
+  public static findMissingEpoch(
+    result: VerificationResult<unknown>,
+  ): { readonly epoch: bigint; readonly latest: bigint | null } | null {
+    const found = findNoTrustBaseEntry(result);
+    return found === null ? null : { epoch: found.epoch, latest: found.tipEpoch };
   }
 
   /**
    * @param {VerificationResult<unknown>} result Any result.
-   * @returns {CertificateVerdict} Its class: the own verdict of a classified result, otherwise `ok`/`invalid` by status.
+   * @returns {CertificateVerdict} Its class: the own verdict of a classified result, `no_entry_for_epoch` for the typed missing-entry failure,
+   *   otherwise `ok`/`invalid` by status.
    */
   public static verdictOf(result: VerificationResult<unknown>): CertificateVerdict {
     if (result instanceof CertificateVerificationResult) {
       return result.verdict;
+    }
+    if (findNoTrustBaseEntry(result) !== null) {
+      return 'no_entry_for_epoch';
     }
     return result.status === VerificationStatus.OK ? 'ok' : 'invalid';
   }

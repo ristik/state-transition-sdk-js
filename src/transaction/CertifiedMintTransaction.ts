@@ -4,7 +4,7 @@ import { StateMask } from './StateMask.js';
 import { TokenId } from './TokenId.js';
 import { TokenSalt } from './TokenSalt.js';
 import { TokenType } from './TokenType.js';
-import { ITrustBaseAuthority } from '../api/bft/trustbase/TrustBaseAuthority.js';
+import { ITrustBaseHistory } from '../api/bft/trustbase/ITrustBaseHistory.js';
 import { UnicityCertificateInterner } from '../api/bft/UnicityCertificateInterner.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { InclusionProof } from '../api/InclusionProof.js';
@@ -150,7 +150,7 @@ export class CertifiedMintTransaction implements ITransaction {
   /**
    * Create CertifiedMintTransaction from mint transaction and inclusion proof.
    *
-   * @param {ITrustBaseAuthority} trustBase Held trust-base history (verifies each certificate against its own epoch's committee).
+   * @param {ITrustBaseHistory} trustBase Trust-base history used to verify the inclusion certificate.
    * @param {PredicateVerifierService} predicateVerifier Verifier for any embedded predicates.
    * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
    * @param {MintTransaction} transaction Transaction to certify.
@@ -159,7 +159,7 @@ export class CertifiedMintTransaction implements ITransaction {
    * @throws {VerificationError} If the inclusion proof does not verify.
    */
   public static async fromTransaction(
-    trustBase: ITrustBaseAuthority,
+    trustBase: ITrustBaseHistory,
     predicateVerifier: PredicateVerifierService,
     unicityCertificateVerifier: UnicityCertificateVerifier,
     transaction: MintTransaction,

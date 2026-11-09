@@ -27,6 +27,9 @@ const corpus = JSON.parse(
   readFileSync(join(process.cwd(), 'tests/fixtures/b1-seals/v1/b1-seal-vectors-v1.json'), 'utf8'),
 ) as ICorpus;
 
+// the B1 profile's native any-age decoder accepts a seal whose signature map is null (such a certificate is then invalid, not malformed)
+const B1_DECODING = { allowNullSignatures: true };
+
 describe('B1 seal corpus: certificate acceptance equals the native any-age verifier', () => {
   const verifier = new UnicityCertificateVerifier(
     // The B1 profile: its registry bounds a seal at 16 signatures (a gas bound that stays, §49), so this verifier refuses what B1 refuses. A
@@ -41,7 +44,9 @@ describe('B1 seal corpus: certificate acceptance equals the native any-age verif
   // B1 requires the certificate to re-encode byte for byte (b1ref decodeUC, ErrReencode): every certificate that decodes must do so here too,
   // including a null path collection, which stays null
   it.each(corpus.cases.filter((c) => c.verdict !== 'malformed'))('$id re-encodes byte for byte', (c) => {
-    expect(HexConverter.encode(UnicityCertificate.fromCBOR(HexConverter.decode(c.uc)).toCBOR())).toBe(c.uc);
+    expect(
+      HexConverter.encode(UnicityCertificate.decodeWithOptions(HexConverter.decode(c.uc), B1_DECODING).toCBOR()),
+    ).toBe(c.uc);
   });
 
   it.each(corpus.cases)('$id ($verdict $b1Sentinel)', async (c) => {
@@ -49,7 +54,7 @@ describe('B1 seal corpus: certificate acceptance equals the native any-age verif
     let detail = '';
     let certificate: UnicityCertificate | null = null;
     try {
-      certificate = UnicityCertificate.fromCBOR(HexConverter.decode(c.uc));
+      certificate = UnicityCertificate.decodeWithOptions(HexConverter.decode(c.uc), B1_DECODING);
     } catch (error) {
       verdict = 'malformed';
       detail = String(error);

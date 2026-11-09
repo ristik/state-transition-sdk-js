@@ -24,28 +24,36 @@ Import SDK classes from their `lib/...` paths, as shown below; the package has n
 
 Mainnet is live. Start with testnet2, for production use the mainnet gateway and matching trust base.
 
-| Network | Gateway | Network ID | Trust base |
-| --- | --- | --- | --- |
-| Mainnet | `https://gateway.mainnet.unicity.network` | `1` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.mainnet.json) |
-| Testnet2 | `https://gateway.testnet2.unicity.network` | `4` | [JSON](https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.testnet2.json) |
+| Network | Gateway | Network ID |
+| --- | --- | --- |
+| Mainnet | `https://gateway.mainnet.unicity.network` | `1` |
+| Testnet2 | `https://gateway.testnet2.unicity.network` | `4` |
+
+**Trust base.** Verification now runs against a `TrustBaseHistory`: the Unicity Trust Base entries (tag 39000, loaded from a one-entry or complete bundle, tag 39015) from a genesis entry whose entry id you pin, each later entry signed by a quorum of its predecessor. The single-record JSON trust base (`RootTrustBase`, `bft-trustbase.*.json`) is no longer read, and there is no compatibility wrapper. This release carries the genesis trust base of mainnet (network 1) and testnet2 (network 4) as its release table (`RELEASE_PINS`, generated from `release-pins/manifest.json` and the bundles beside it, which are the files of unicitynetwork/unicity-ids PR 11); `TrustBaseSession.openPublic(network, store)` opens either, verifies the embedded history strictly and extends it from the aggregator. Any other network needs a bundle of your own deployment (below). The table is regenerated, never edited: `node scripts/release-pins/generate.mjs` after `npm run build`, and CI fails when the generated file differs. A verification whose seal is from an epoch the history lacks fails with the typed `NoTrustBaseEntryResult` (find it in the result with `findNoTrustBaseEntry`).
 
 Pass your gateway API key as the second argument to `AggregatorClient`. The shared public testnet2 demo key is `sk_ddc3cfcc001e4a28ac3fad7407f99590` ([source](https://github.com/unicity-sphere/sphere-sdk/blob/main/README.md#api-key)). Shared capacity may be limited; use your own key for sustained testing. Use your own mainnet key obtained from https://sphere.unicity.network/ and keep it secure.
 
-### First connection
+### Local network
 
-Download the testnet2 trust base once into your working directory:
+To test against your own deployment, take the bundle your aggregator serves (`GET /api/v1/trustbases?from=<genesis epoch>`, the complete answer from the genesis entry to the tip, tag 39015) and pass it as it is; nothing else needs spelling out:
 
-```bash
-curl --fail --location --output bft-trustbase.testnet2.json \
-  https://raw.githubusercontent.com/unicitynetwork/unicity-ids/main/bft-trustbase.testnet2.json
+```js
+import { TrustBaseSession } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseSession.js';
+import { MemoryTrustBaseStore } from '@unicitylabs/state-transition-sdk/lib/api/bft/trustbase/TrustBaseStore.js';
+
+const bundle = new Uint8Array(await (await fetch(`${aggregatorUrl}/api/v1/trustbases?from=1`)).arrayBuffer());
+const { session } = await TrustBaseSession.openLocal(bundle, new MemoryTrustBaseStore());
 ```
+
+The network, the genesis and tip entries and the digest are taken from the bundle, which you trust because it is yours; it is still checked strictly (every entry signed by a quorum of its predecessor). A bundle that is not complete (a continuation cursor, a refused request, not starting at the genesis entry) is `ReleasePinInvalidError`. The cache of a local network lives under the fixed namespace `local`, apart from the public networks, and later entries are fetched and verified like any other. There is no release table lookup and no lineage check against a public network.
+
+### First connection
 
 Save this as `connect.mjs` and run `node connect.mjs`:
 
 ```js
-import { readFile } from 'node:fs/promises';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
-import { RootTrustBase } from '@unicitylabs/state-transition-sdk/lib/api/bft/RootTrustBase.js';
+import { NetworkId } from '@unicitylabs/state-transition-sdk/lib/api/NetworkId.js';
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
 import { SigningService } from '@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/SigningService.js';
 import { SignaturePredicate } from '@unicitylabs/state-transition-sdk/lib/predicate/builtin/SignaturePredicate.js';
@@ -58,48 +66,20 @@ const aggregator = new AggregatorClient(
 );
 const client = new StateTransitionClient(aggregator);
 
-const trustBase = RootTrustBase.fromJSON(
-  JSON.parse(await readFile('bft-trustbase.testnet2.json', 'utf8')),
-);
+const networkId = NetworkId.TESTNET2; // network ID 4
 
 // Prepare a fresh state to query; no transaction is submitted.
 const recipient = SignaturePredicate.fromSigningService(SigningService.generate());
-const transaction = await MintTransaction.create(trustBase.networkId, recipient);
+const transaction = await MintTransaction.create(networkId, recipient);
 const response = await client.getInclusionProof(await StateId.fromTransaction(transaction));
 
-console.log('Network ID:', trustBase.networkId.id);
+console.log('Network ID:', networkId.id);
 console.log('State certified:', response.inclusionProof !== null);
 ```
 
 This read-only probe should print `State certified: false` for the fresh state. It checks connectivity; it does not verify a token.
 
-The trust base identifies the Consensus Layer (BFT Core) instance. Use `trustBase.networkId` when creating tokens so they match your gateway; testnet2 is network ID `4` (`NetworkId.TESTNET`).
-
-### Trust-base history
-
-Verification uses the held **Unicity Trust Base history** (`TrustBaseHistory`): the root committee of every epoch, each entry signed by the previous epoch's committee. Each certificate is verified against the committee of its own epoch.
-
-**Loading it:**
-- Ship the complete history with your application as one bundle, and load it with `TrustBaseHistory.fromBundle(bytes, genesisPin)`.
-- Alternatively, start from the JSON genesis file with `TrustBaseHistory.fromLegacyGenesis(RootTrustBase.fromJSON(json), genesisPin)`.
-
-`genesisPin` is the EntryID of the network's version-2 genesis entry, taken from your release configuration, never from the file itself.
-
-**Keeping it current.** When the committee changes after your release, verification reports `NO_ENTRY_FOR_EPOCH` for certificates of the newer epoch. Fetch, authenticate and append the newer entries, then verify again:
-
-```js
-import { verifyWithTrustBaseUpdate } from '@unicitylabs/state-transition-sdk/lib/util/TrustBaseUtils.js';
-
-// the aggregator client is the source of newer entries; every entry is authenticated by the previous committee
-const result = await verifyWithTrustBaseUpdate((history) => token.verify(contextWith(history)), history, aggregator);
-```
-
-`waitInclusionProof(..., { trustBaseSource: aggregator })` does the same for a freshly certified proof.
-
-**Rules:**
-- Held entries are never replaced.
-- The loop is bounded: 2 s between fetches, 5 fetches, 10 s overall, 64 entries per fetch.
-- Persist the grown history with `history.exportBundle()`.
+The trust-base history identifies the Consensus Layer (BFT Core) instance. Pin the genesis entry id in your application for production. Use the network id of your gateway when creating tokens (`trustBase.networkId` once the history holds an entry); testnet2 is network ID `4`, `NetworkId.TESTNET2` (mainnet is `NetworkId.MAINNET`, `1`). The old testnet, network 2, has no constant any more.
 
 ## Work with tokens
 
@@ -119,7 +99,7 @@ For minting and transfers, create the transaction, submit its `CertificationData
 The linked examples are tests in a repository checkout, not files shipped in the npm package. Their helper imports and permissive issuance policies are for demonstrations. To adapt them:
 
 - Change the gateway to the network's HTTPS URL and pass the key as the second argument to `new AggregatorClient(...)` in the example source; `config.json` has no API-key field. Do not add a key while keeping the local HTTP URL.
-- Load the matching trust base and replace `NetworkId.LOCAL` with `trustBase.networkId`.
+- Load the matching trust-base history and replace `NetworkId.LOCAL` with `trustBase.networkId`.
 - Replace `new TokenIssuanceVerifierService(false)` with `new TokenIssuanceVerifierService()` and register your application's issuance verifier for each accepted token type. The demo setting accepts unregistered types without an issuance-policy check.
 
 For transfers, obtain the recipient's ownership predicate through your application's address or delivery channel before creating the transaction.

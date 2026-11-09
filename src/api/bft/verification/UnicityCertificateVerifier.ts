@@ -3,6 +3,7 @@ import { UnicityCertificateFormatRule } from './rule/UnicityCertificateFormatRul
 import { UnicityCertificateStructureRule } from './rule/UnicityCertificateStructureRule.js';
 import { UnicitySealHashMatchesWithRootHashRule } from './rule/UnicitySealHashMatchesWithRootHashRule.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from './rule/UnicitySealQuorumSignaturesVerificationRule.js';
+import { UnicitySealTrustBaseEntryRule } from './rule/UnicitySealTrustBaseEntryRule.js';
 import { SealVerificationSession } from './SealVerificationSession.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
@@ -12,7 +13,7 @@ import { VerificationResult } from '../../../verification/VerificationResult.js'
 import { VerificationStatus } from '../../../verification/VerificationStatus.js';
 import { InclusionProof } from '../../InclusionProof.js';
 import { AGGREGATION_PARTITION_ID } from '../AggregationPartition.js';
-import { ITrustBaseAuthority } from '../trustbase/TrustBaseAuthority.js';
+import { ITrustBaseHistory } from '../trustbase/ITrustBaseHistory.js';
 import { UnicityCertificate } from '../UnicityCertificate.js';
 
 const OPERATION_CAPABILITY = Symbol('beginOperation');
@@ -31,7 +32,7 @@ export class UnicityCertificateVerificationResult extends CertificateVerificatio
   private constructor(
     verdict: CertificateVerdict,
     results: VerificationResult<unknown>[],
-    missing: { readonly epoch: bigint; readonly latest: bigint } | null = null,
+    missing: { readonly epoch: bigint; readonly latest: bigint | null } | null = null,
   ) {
     super('UnicityCertificateVerification', verdict, '', results, missing);
   }
@@ -45,7 +46,7 @@ export class UnicityCertificateVerificationResult extends CertificateVerificatio
   public static fail(results: VerificationResult<unknown>[]): UnicityCertificateVerificationResult {
     const last = results[results.length - 1];
     const verdict = last ? CertificateVerificationResult.verdictOf(last) : 'invalid';
-    const missing = last instanceof CertificateVerificationResult ? last.missing : null;
+    const missing = last ? CertificateVerificationResult.findMissingEpoch(last) : null;
     return new UnicityCertificateVerificationResult(verdict === 'ok' ? 'invalid' : verdict, results, missing);
   }
 
@@ -120,33 +121,61 @@ export class UnicityCertificateVerifier {
   }
 
   /**
-   * Verify the unicity certificate in an inclusion proof against the held trust-base history.
+   * Verify the unicity certificate in an inclusion proof against the trust-base history: the entry of the seal's epoch checks the seal. When
+   * the history has no entry for that epoch the failure carries a {@link NoTrustBaseEntryResult} (see {@link findNoTrustBaseEntry}).
    *
-   * @param {ITrustBaseAuthority} trustBase Held trust-base history.
+   * @param {ITrustBaseHistory} trustBase Trust-base history.
    * @param {InclusionProof} inclusionProof Inclusion proof carrying the unicity certificate.
-   * @param {IUnicityCertificateVerificationOptions} [options] Options.
-   * @returns {Promise<UnicityCertificateVerificationResult>} Verification outcome with its class.
+   * @returns {Promise<UnicityCertificateVerificationResult>} Verification outcome.
    */
-  public verify(
-    trustBase: ITrustBaseAuthority,
+  public async verify(
+    trustBase: ITrustBaseHistory,
     inclusionProof: InclusionProof,
-    options?: IUnicityCertificateVerificationOptions,
   ): Promise<UnicityCertificateVerificationResult> {
-    return this.verifyCertificate(trustBase, inclusionProof.unicityCertificate, options);
+    const results: VerificationResult<VerificationStatus>[] = [];
+
+    const seal = inclusionProof.unicityCertificate.unicitySeal;
+    const entryResult = UnicitySealTrustBaseEntryRule.verify(trustBase, seal);
+    results.push(entryResult);
+    if (entryResult.entry === null) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    let result: VerificationResult<VerificationStatus> = UnicityCertificateStructureRule.verify(
+      inclusionProof.unicityCertificate,
+    );
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await UnicitySealHashMatchesWithRootHashRule.verify(inclusionProof.unicityCertificate);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await this.quorumSignaturesRule.verify(entryResult.entry, seal);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    return UnicityCertificateVerificationResult.ok(results);
   }
 
   /**
    * Verify a unicity certificate against the held trust-base history, in the order and with the classes of the native B1 verifier: format and
-   * bounds (`malformed`), structure and partition (`invalid`), the tree path to the seal hash (`invalid`), then the seal against the committee of
-   * its own epoch (`no_entry_for_epoch` for an epoch newer than the latest held one, otherwise `invalid` or `ok`).
+   * bounds (`malformed`), structure and partition (`invalid`), the tree path to the seal hash (`invalid`), then the seal against the entry of its
+   * own epoch (`no_entry_for_epoch` for an epoch newer than the latest held one, otherwise `invalid` or `ok`).
    *
-   * @param {ITrustBaseAuthority} trustBase Held trust-base history.
+   * @param {ITrustBaseHistory} trustBase Trust-base history.
    * @param {UnicityCertificate} certificate Certificate.
    * @param {IUnicityCertificateVerificationOptions} [options] Options.
    * @returns {Promise<UnicityCertificateVerificationResult>} Verification outcome with its class.
    */
   public async verifyCertificate(
-    trustBase: ITrustBaseAuthority,
+    trustBase: ITrustBaseHistory,
     certificate: UnicityCertificate,
     options?: IUnicityCertificateVerificationOptions,
   ): Promise<UnicityCertificateVerificationResult> {
@@ -164,39 +193,25 @@ export class UnicityCertificateVerifier {
       return UnicityCertificateVerificationResult.fail(results);
     }
 
-    result = await this.verifyBody(certificate);
+    result = await UnicitySealHashMatchesWithRootHashRule.verify(certificate);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
       return UnicityCertificateVerificationResult.fail(results);
     }
 
-    result = await this.verifySeal(trustBase, certificate);
+    const entryResult = UnicitySealTrustBaseEntryRule.verify(trustBase, certificate.unicitySeal);
+    results.push(entryResult);
+    if (entryResult.entry === null) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await this.quorumSignaturesRule.verify(entryResult.entry, certificate.unicitySeal);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
       return UnicityCertificateVerificationResult.fail(results);
     }
 
     return UnicityCertificateVerificationResult.ok(results);
-  }
-
-  /**
-   * @param {UnicityCertificate} certificate Certificate.
-   * @returns {Promise<VerificationResult<VerificationStatus>>} The shard and unicity tree path to the seal hash.
-   */
-  protected verifyBody(certificate: UnicityCertificate): Promise<VerificationResult<VerificationStatus>> {
-    return UnicitySealHashMatchesWithRootHashRule.verify(certificate);
-  }
-
-  /**
-   * @param {ITrustBaseAuthority} trustBase Held trust-base history.
-   * @param {UnicityCertificate} certificate Certificate.
-   * @returns {Promise<VerificationResult<VerificationStatus>>} The seal against its epoch committee.
-   */
-  protected verifySeal(
-    trustBase: ITrustBaseAuthority,
-    certificate: UnicityCertificate,
-  ): Promise<VerificationResult<VerificationStatus>> {
-    return this.quorumSignaturesRule.verify(trustBase, certificate.unicitySeal);
   }
 }
 
@@ -228,7 +243,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
 
   private readonly inFlight = new Map<string, Promise<VerificationResult<VerificationStatus>>>();
 
-  private readonly sessions = new Map<ITrustBaseAuthority, SealVerificationSession>();
+  private readonly sessions = new Map<ITrustBaseHistory, SealVerificationSession>();
 
   /**
    * Not constructible by applications: obtain it with {@link UnicityCertificateVerifier.beginOperation}, so that an
@@ -276,28 +291,50 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
    * The operation's seal session for a trust base (created on first use): whoever authenticates seals strictly in this
    * operation, e.g. `verifyNonInclusion`, shares the quorum checks of the proofs verified through this verifier.
    *
-   * @param {ITrustBaseAuthority} trustBase Held trust-base history.
+   * @param {ITrustBaseHistory} trustBase Trusted authority.
    * @returns {SealVerificationSession} The session.
    */
-  public sessionFor(trustBase: ITrustBaseAuthority): SealVerificationSession {
+  public sessionFor(trustBase: ITrustBaseHistory): SealVerificationSession {
     return this.session(trustBase);
   }
 
   /**
    * @inheritDoc
    */
-  protected override verifyBody(certificate: UnicityCertificate): Promise<VerificationResult<VerificationStatus>> {
-    return this.body(certificate);
-  }
+  public override async verify(
+    trustBase: ITrustBaseHistory,
+    inclusionProof: InclusionProof,
+  ): Promise<UnicityCertificateVerificationResult> {
+    const results: VerificationResult<VerificationStatus>[] = [];
+    const certificate = inclusionProof.unicityCertificate;
 
-  /**
-   * @inheritDoc
-   */
-  protected override verifySeal(
-    trustBase: ITrustBaseAuthority,
-    certificate: UnicityCertificate,
-  ): Promise<VerificationResult<VerificationStatus>> {
-    return this.session(trustBase).verifyQuorumSignaturesOnly(certificate.unicitySeal);
+    // the entry of the seal's epoch, with the network and the round inside the epoch; the typed no-entry failure comes from here
+    const entryResult = UnicitySealTrustBaseEntryRule.verify(trustBase, certificate.unicitySeal);
+    results.push(entryResult);
+    if (entryResult.entry === null) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    // before the memo: a certificate of another partition, or a malformed one, is never served from it
+    let result: VerificationResult<VerificationStatus> = UnicityCertificateStructureRule.verify(certificate);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await this.body(certificate);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    result = await this.session(trustBase).verifyQuorum(entryResult.entry, certificate.unicitySeal);
+    results.push(result);
+    if (result.status !== VerificationStatus.OK) {
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
+    return UnicityCertificateVerificationResult.ok(results);
   }
 
   private async body(certificate: UnicityCertificate): Promise<VerificationResult<VerificationStatus>> {
@@ -344,7 +381,7 @@ export class OperationUnicityCertificateVerifier extends UnicityCertificateVerif
     return check;
   }
 
-  private session(trustBase: ITrustBaseAuthority): SealVerificationSession {
+  private session(trustBase: ITrustBaseHistory): SealVerificationSession {
     let session = this.sessions.get(trustBase);
     if (!session) {
       session = new SealVerificationSession(trustBase, this.quorumSignaturesRule);

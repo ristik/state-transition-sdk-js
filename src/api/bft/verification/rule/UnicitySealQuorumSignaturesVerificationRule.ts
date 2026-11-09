@@ -7,43 +7,31 @@ import { CborSerializer } from '../../../../serialization/cbor/CborSerializer.js
 import { HexConverter } from '../../../../util/HexConverter.js';
 import { VerificationResult } from '../../../../verification/VerificationResult.js';
 import { VerificationStatus } from '../../../../verification/VerificationStatus.js';
-import { IEpochCommittee, ITrustBaseAuthority } from '../../trustbase/TrustBaseAuthority.js';
+import { RootTrustBaseV2 } from '../../trustbase/RootTrustBaseV2.js';
 import { UnicitySeal } from '../../UnicitySeal.js';
 import { CertificateVerificationResult } from '../CertificateVerdict.js';
 import { VerifiedSealCache } from '../VerifiedSealCache.js';
 
-const CURVE_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
-const HALF_N = CURVE_N >> 1n;
 const TEXT_ENCODER = new TextEncoder();
 
 /**
- * Rule to verify that a unicity seal is authenticated by the trust-base committee of its own epoch, with upstream's seal rule (also the rule of
- * bft-core `b1ref`, the any-age bridge verifier and the native shard path), so that a wallet accepts exactly the seals the chain accepts:
+ * Rule to verify that the UnicitySeal contains valid quorum signatures.
  *
- * 1. **Format** (the input is refused, `malformed`): at most {@link MAX_SIGNATURES} signatures and signer identifiers of at most
- *    {@link MAX_NODE_ID_BYTES} bytes. A signature value of any other width is a well-formed witness, not a format failure.
- * 2. **Authority**: signatures present; the seal's network; the committee of `seal.epoch` (an epoch after the latest held one is
- *    `no_entry_for_epoch`, retryable; one before the first held epoch is invalid); the root round inside the epoch's interval, `start ≤ r` and `r < end`
- *    once the next epoch is held. An empty signature value or an empty signer identifier is `invalid`: upstream's seal validation refuses it.
- * 3. **Signatures**: each supplied signature is judged alone. An unknown signer, and a signature that is not exactly 65 bytes `r‖s‖v` with
- *    `1 ≤ r < n`, `1 ≤ s ≤ n/2`, `v` in 0..3 and recovering (over the seal hash) to the member's listed key, contribute zero and never fail the
- *    seal. The supplied recovery byte is binding: it is never discarded, normalized or replaced by the other parity. The weights of the valid
- *    signatures must reach the committee threshold.
- *
- * A trust-base ENTRY's witnesses are a different object and stay strict (a bad extra refuses a successor entry). Signature work dominates proof
- * verification and every proof of an aggregator round carries the same seal, so successes can be memoised in a caller-supplied
- * {@link VerifiedSealCache}; its key covers the complete seal encoding, witnesses included.
+ * Signature verification dominates inclusion-proof verification, and every proof
+ * certified in the same aggregator round carries the same seal, so the rule can
+ * memoise verified seals in a caller-supplied {@link VerifiedSealCache}.
  */
 export class UnicitySealQuorumSignaturesVerificationRule {
+  /** Longest signer identifier of a seal's signature map. */
   public static readonly MAX_NODE_ID_BYTES = 128;
   /** Supplied signatures of one seal, counted whoever signed (unknown signers and bad values included): a resource bound, 256 as the committee ceiling (§49). */
-  public static readonly MAX_SIGNATURES = 256;
+  public static readonly MAX_SIGNATURES = UnicitySeal.MAX_WITNESSES;
 
   /** The signature count this rule refuses above ({@link MAX_SIGNATURES} unless configured). */
   public readonly maxSignatures: number;
 
   /**
-   * @param {ISignatureVerifier<Signature>} signatureVerifier Recovering secp256k1 verifier for the root-node signatures.
+   * @param {ISignatureVerifier<Signature>} signatureVerifier Verifier for the root-node signatures.
    * @param {VerifiedSealCache} [cache] Memo for verified seals; omit to verify every seal afresh.
    * @param {object} [options] Options.
    * @param {number} [options.maxSignatures] Most supplied signatures per seal, default {@link MAX_SIGNATURES} (256). The B1 bridge profile keeps 16,
@@ -84,183 +72,135 @@ export class UnicitySealQuorumSignaturesVerificationRule {
   }
 
   /**
-   * Select the committee of the seal's epoch and check the seal's network and root round against it.
+   * Build the cache key for a (trust-base entry, seal) pair.
    *
-   * @param {ITrustBaseAuthority} authority Held trust-base history.
-   * @param {UnicitySeal} seal Seal.
-   * @returns {IEpochCommittee|CertificateVerificationResult} The committee, or the failed check.
-   */
-  public static selectCommittee(
-    authority: ITrustBaseAuthority,
-    seal: UnicitySeal,
-  ): IEpochCommittee | CertificateVerificationResult {
-    const rule = 'UnicitySealAuthorityRule';
-    if (!seal.networkId.equals(authority.networkId)) {
-      return new CertificateVerificationResult(
-        rule,
-        'invalid',
-        `Seal is of network ${seal.networkId.id}, the trust base of network ${authority.networkId.id}.`,
-      );
-    }
-    const committee = authority.committee(seal.epoch);
-    if (committee === null) {
-      if (seal.epoch > authority.tipEpoch) {
-        return new CertificateVerificationResult(
-          rule,
-          'no_entry_for_epoch',
-          `No trust-base entry for epoch ${seal.epoch}; the latest held epoch is ${authority.tipEpoch}.`,
-          [],
-          { epoch: seal.epoch, latest: authority.tipEpoch },
-        );
-      }
-      return new CertificateVerificationResult(
-        rule,
-        'invalid',
-        `Seal epoch ${seal.epoch} precedes the first held epoch ${authority.genesisEpoch}.`,
-      );
-    }
-    if (seal.rootChainRoundNumber < committee.start) {
-      return new CertificateVerificationResult(
-        rule,
-        'invalid',
-        `Seal round ${seal.rootChainRoundNumber} is before the start ${committee.start} of epoch ${committee.epoch}.`,
-      );
-    }
-    if (committee.end !== null && seal.rootChainRoundNumber >= committee.end) {
-      return new CertificateVerificationResult(
-        rule,
-        'invalid',
-        `Seal round ${seal.rootChainRoundNumber} is at or after the end ${committee.end} of epoch ${committee.epoch}.`,
-      );
-    }
-    return committee;
-  }
-
-  /**
-   * The memo key commits to the committee record and its interval (a later held epoch closes an interval) and to the complete seal encoding,
-   * signatures included (`calculateHash` excludes them, so it cannot be the key).
+   * Both halves are addressed by content, and both are load-bearing:
    *
-   * @param {IEpochCommittee} committee Committee of the seal's epoch.
-   * @param {UnicitySeal} unicitySeal Seal.
+   * 1. The seal is keyed on its **complete** encoding.
+   *    {@link UnicitySeal.calculateHash} hashes it *without* the signatures — it
+   *    is the digest the root nodes sign — so keying on that would let a seal's
+   *    valid signatures be swapped for garbage and still hit a cached OK.
+   *    `toCBOR()` encodes the signatures too, so a hit means identical bytes.
+   * 2. The entry decides the outcome through its members, their weights and
+   *    the quorum threshold, and is keyed by content: its complete tagged
+   *    encoding (signatures included), not its identity.
+   *
+   * The signature verifier needs no representation here: a cache is reachable
+   * only through the rule that owns it, and a rule owns exactly one verifier.
+   *
+   * Both are folded into a single digest through a CBOR array: the framing is
+   * what makes one hash safe, since concatenating two variable-length encodings
+   * raw would let a different (trust base, seal) split produce the same bytes.
+   *
+   * @param {RootTrustBaseV2} entry Trust-base entry the seal is verified against.
+   * @param {UnicitySeal} unicitySeal Seal being verified.
    * @returns {Promise<string>} Cache key.
    */
-  private static async cacheKeyFor(committee: IEpochCommittee, unicitySeal: UnicitySeal): Promise<string> {
+  private static async cacheKeyFor(entry: RootTrustBaseV2, unicitySeal: UnicitySeal): Promise<string> {
     const hash = await new DataHasher(HashAlgorithm.SHA256)
       .update(
         CborSerializer.encodeArray(
-          CborSerializer.encodeTextString(JSON.stringify([committee.id, committee.end?.toString() ?? null])),
+          CborSerializer.encodeByteString(entry.encode()),
           CborSerializer.encodeByteString(unicitySeal.toCBOR()),
         ),
       )
       .digest();
+
     return HexConverter.encode(hash.imprint);
   }
 
   /**
-   * Verify the seal against the committee of its epoch in the held history.
+   * Verify the unicity seal carries valid signatures of members whose weight reaches the entry's quorum threshold. A signer that is not a
+   * member, or a signature that does not verify, counts zero (the upstream seal rule); each member counts once, as the signatures are a map.
    *
-   * @param {ITrustBaseAuthority} authority Held trust-base history.
+   * @param {RootTrustBaseV2} entry Trust-base entry of the seal's epoch.
    * @param {UnicitySeal} unicitySeal Seal to verify.
-   * @returns {Promise<CertificateVerificationResult>} Verification outcome with its class.
+   * @returns {Promise<VerificationResult<VerificationStatus>>} Verification outcome.
    */
   public async verify(
-    authority: ITrustBaseAuthority,
+    entry: RootTrustBaseV2,
     unicitySeal: UnicitySeal,
-  ): Promise<CertificateVerificationResult> {
-    const rule = 'UnicitySealQuorumSignaturesVerificationRule';
+  ): Promise<VerificationResult<VerificationStatus>> {
+    // A resource bound before anything is encoded, hashed, keyed or verified: unknown signers and bad values count like any other witness.
     const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(unicitySeal, this.maxSignatures);
     if (malformed !== null) {
-      return new CertificateVerificationResult(rule, 'malformed', malformed);
+      return new CertificateVerificationResult('UnicitySealQuorumSignaturesVerificationRule', 'malformed', malformed);
     }
-    if (!unicitySeal.witnesses?.size) {
-      return new CertificateVerificationResult(rule, 'invalid', 'Seal has no signatures.');
-    }
-    for (const [signer, witness] of unicitySeal.witnesses) {
-      if (witness.length === 0) {
-        return new CertificateVerificationResult(rule, 'invalid', `Signature of "${signer}" is empty.`);
-      }
-      if (signer.length === 0) {
-        return new CertificateVerificationResult(rule, 'invalid', 'Signer identifier is empty.');
-      }
-    }
-    const committee = UnicitySealQuorumSignaturesVerificationRule.selectCommittee(authority, unicitySeal);
-    if (committee instanceof CertificateVerificationResult) {
-      return committee;
-    }
-
     const cacheKey = this.cache
-      ? await UnicitySealQuorumSignaturesVerificationRule.cacheKeyFor(committee, unicitySeal)
+      ? await UnicitySealQuorumSignaturesVerificationRule.cacheKeyFor(entry, unicitySeal)
       : null;
     if (cacheKey !== null) {
       const cached = this.cache?.get(cacheKey) ?? null;
       if (cached !== null) {
-        return cached as CertificateVerificationResult;
+        return cached;
       }
     }
 
     const hash = await unicitySeal.calculateHash();
+
     const results = await Promise.all(
-      Array.from(unicitySeal.witnesses.entries()).map(([nodeId, witness]) =>
-        this.verifySignature(committee, nodeId, witness, hash),
+      Array.from(unicitySeal.signatures?.entries() ?? []).map(([nodeId, signature]) =>
+        this.verifySignature(entry, nodeId, signature, hash),
       ),
     );
 
-    // a signature that does not count contributes zero; only the weight of the valid ones is summed
-    const names = Array.from(unicitySeal.witnesses.keys());
-    const weight = names.reduce(
-      (sum, nodeId, i) =>
-        results[i].status === VerificationStatus.OK ? sum + (committee.members.get(nodeId)?.weight ?? 0n) : sum,
-      0n,
-    );
-    if (weight < committee.threshold) {
-      return new CertificateVerificationResult(
-        rule,
-        'invalid',
-        `Signed weight ${weight} is below the threshold ${committee.threshold} of epoch ${committee.epoch}.`,
+    // The weight of the members whose signature verified, each counted once (the map has one signature per node id).
+    const weights = new Map(entry.members.map((member) => [member.nodeId, member.weight]));
+    let signed = 0n;
+    for (const [index, [nodeId]] of Array.from(unicitySeal.signatures?.entries() ?? []).entries()) {
+      if (results[index].status === VerificationStatus.OK) {
+        signed += weights.get(nodeId) ?? 0n;
+      }
+    }
+    if (signed >= entry.quorumThreshold) {
+      const result = new VerificationResult(
+        'UnicitySealQuorumSignaturesVerificationRule',
+        VerificationStatus.OK,
+        `Unicity quorum weight ${signed} reached the threshold ${entry.quorumThreshold}`,
         results,
       );
+      // Only quorum-reaching outcomes are memoised: a failure is the abnormal
+      // path, and not caching it keeps a flood of bad seals from evicting good
+      // entries.
+      if (cacheKey !== null) {
+        this.cache?.set(cacheKey, result);
+      }
+
+      return result;
     }
-    const result = new CertificateVerificationResult(
-      rule,
-      'ok',
-      'Unicity quorum signatures verification threshold reached',
+
+    return new VerificationResult(
+      'UnicitySealQuorumSignaturesVerificationRule',
+      VerificationStatus.FAIL,
+      `Unicity quorum weight ${signed} is below the threshold ${entry.quorumThreshold}`,
       results,
     );
-    // only successes are memoised: a flood of bad seals cannot evict good entries
-    if (cacheKey !== null) {
-      this.cache?.set(cacheKey, result);
-    }
-    return result;
   }
 
   private async verifySignature(
-    committee: IEpochCommittee,
+    entry: RootTrustBaseV2,
     nodeId: string,
-    witness: Uint8Array,
+    signature: Signature,
     hash: DataHash,
   ): Promise<VerificationResult<VerificationStatus>> {
-    const rule = `SignatureVerificationRule[${nodeId}]`;
-    const member = committee.members.get(nodeId) ?? null;
-    if (member === null) {
-      return new VerificationResult(rule, VerificationStatus.FAIL, 'Signer is not a member of the epoch committee');
-    }
-    if (witness.length !== 65 || witness[64] > 3) {
+    const node = entry.members.find((member) => member.nodeId === nodeId) ?? null;
+    if (node === null) {
       return new VerificationResult(
-        rule,
+        `SignatureVerificationRule[${nodeId}]`,
         VerificationStatus.FAIL,
-        'Signature is not 65 bytes with a recovery ID of 0 to 3',
+        'No root node defined',
       );
     }
-    const r = BigInt(`0x${HexConverter.encode(witness.subarray(0, 32))}`);
-    const s = BigInt(`0x${HexConverter.encode(witness.subarray(32, 64))}`);
-    if (r === 0n || r >= CURVE_N || s === 0n || s > HALF_N) {
-      return new VerificationResult(rule, VerificationStatus.FAIL, 'Signature r or s out of range');
+
+    const result = await this.signatureVerifier.verify(hash, signature, node.sigKey);
+    if (!result) {
+      return new VerificationResult(
+        `SignatureVerificationRule[${nodeId}]`,
+        VerificationStatus.FAIL,
+        'Signature verification failed',
+      );
     }
-    if (
-      await this.signatureVerifier.verify(hash, new Signature(witness.subarray(0, 64), witness[64]), member.signingKey)
-    ) {
-      return new VerificationResult(rule, VerificationStatus.OK);
-    }
-    return new VerificationResult(rule, VerificationStatus.FAIL, 'Signature verification failed');
+
+    return new VerificationResult(`SignatureVerificationRule[${nodeId}]`, VerificationStatus.OK);
   }
 }
