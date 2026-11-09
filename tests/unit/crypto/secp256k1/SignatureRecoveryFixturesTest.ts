@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { RootTrustBase } from '../../../../src/api/bft/RootTrustBase.js';
+import { RootTrustBaseV2 } from '../../../../src/api/bft/trustbase/RootTrustBaseV2.js';
 import { UnicitySeal } from '../../../../src/api/bft/UnicitySeal.js';
 import { UnicitySealQuorumSignaturesVerificationRule } from '../../../../src/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js';
 import { VerifiedSealCache } from '../../../../src/api/bft/verification/VerifiedSealCache.js';
@@ -12,7 +12,7 @@ import { Secp256k1SignatureVerifier } from '../../../../src/crypto/secp256k1/Sec
 import { Signature } from '../../../../src/crypto/secp256k1/Signature.js';
 import { HexConverter } from '../../../../src/util/HexConverter.js';
 import { VerificationStatus } from '../../../../src/verification/VerificationStatus.js';
-import { legacyAuthority } from '../../../utils/EpochListAuthority.js';
+import { createTrustBaseHistoryFromAuthority } from '../../../utils/TrustBaseHistoryFixture.js';
 
 interface IFixture {
   primitive: {
@@ -69,27 +69,22 @@ describe('shared O3 signature recovery fixtures', () => {
   });
 
   describe('seal quorum cases', () => {
-    const trustBase = legacyAuthority(
-      RootTrustBase.fromJSON({
-        changeRecordHash: null,
+    let trustBase: RootTrustBaseV2;
+    beforeAll(async () => {
+      const history = await createTrustBaseHistoryFromAuthority({
         epoch: String(fixture.seal.epoch),
         epochStartRound: '0',
         networkId: fixture.seal.networkId,
-        previousEntryHash: null,
         quorumThreshold: String(fixture.seal.quorumThreshold),
         rootNodes: fixture.seal.nodes.map((n) => ({
           nodeId: n.id,
           sigKey: n.publicKeyCompressed,
           stake: String(n.stake),
         })),
-        signatures: {},
-        stateHash: '00',
-        version: '1',
-      }),
-    );
+      });
+      trustBase = history.tip as RootTrustBaseV2;
+    });
     const rule = new UnicitySealQuorumSignaturesVerificationRule(verifier);
-
-    // Seal acceptance is upstream's O3 rule: every case's `accept` is the expected verdict (the B1 profile no longer overrides any of them).
 
     it('uses the network of the corpus', () => {
       expect(trustBase.networkId.equals(NetworkId.fromId(fixture.seal.networkId))).toBe(true);
@@ -125,7 +120,6 @@ describe('shared O3 signature recovery fixtures', () => {
       const validSeal = UnicitySeal.fromCBOR(HexConverter.decode(valid?.sealCbor ?? ''));
       expect((await cached.verify(trustBase, validSeal)).status).toBe(VerificationStatus.OK);
       expect(HexConverter.encode(validSeal.toCBOR())).not.toBe(HexConverter.encode(seal.toCBOR()));
-      // the malformed witness counts zero and the quorum is met without it, whatever the cache holds
       expect((await cached.verify(trustBase, seal)).status).toBe(VerificationStatus.OK);
     });
   });

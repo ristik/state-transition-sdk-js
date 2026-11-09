@@ -2,10 +2,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { legacyAuthority } from './EpochListAuthority.js';
-import { RootTrustBase } from '../../src/api/bft/RootTrustBase.js';
+import { IAuthorityJson } from './TrustBaseHistoryFixture.js';
 import { ShardId } from '../../src/api/bft/ShardId.js';
-import { ITrustBaseAuthority } from '../../src/api/bft/trustbase/TrustBaseAuthority.js';
 import { CertificationData } from '../../src/api/CertificationData.js';
 import { InclusionProofResponse } from '../../src/api/InclusionProofResponse.js';
 import { NetworkId } from '../../src/api/NetworkId.js';
@@ -63,7 +61,8 @@ export interface IF1Case {
   readonly partitionView: Uint8Array;
   readonly requests: IF1Requests;
   readonly responses: IF1Responses;
-  readonly trustBase: ITrustBaseAuthority;
+  /** The authority the corpus spells; `createTrustBaseHistoryFromAuthority` makes the history of it. */
+  readonly trustBase: IAuthorityJson;
 }
 
 function read(dir: string, file: string): Buffer {
@@ -103,7 +102,7 @@ export function shardIdOf(bits: string): ShardId {
 }
 
 /** Go trust base CBOR: tag 39000 [version, network, epoch, epochStart, [[id, key, stake]...], quorum, ...]. */
-export function trustBaseFromCbor(bytes: Uint8Array): ITrustBaseAuthority {
+export function trustBaseFromCbor(bytes: Uint8Array): IAuthorityJson {
   const data = CborDeserializer.decodeArray(CborDeserializer.decodeTag(bytes).data);
   const nodes = CborDeserializer.decodeArray(data[4]).map((n) => {
     const [id, key, stake] = CborDeserializer.decodeArray(n, 3);
@@ -113,20 +112,13 @@ export function trustBaseFromCbor(bytes: Uint8Array): ITrustBaseAuthority {
       stake: CborDeserializer.decodeUnsignedInteger(stake).toString(),
     };
   });
-  return legacyAuthority(
-    RootTrustBase.fromJSON({
-      changeRecordHash: null,
-      epoch: CborDeserializer.decodeUnsignedInteger(data[2]).toString(),
-      epochStartRound: CborDeserializer.decodeUnsignedInteger(data[3]).toString(),
-      networkId: Number(CborDeserializer.decodeUnsignedInteger(data[1])),
-      previousEntryHash: null,
-      quorumThreshold: CborDeserializer.decodeUnsignedInteger(data[5]).toString(),
-      rootNodes: nodes,
-      signatures: {},
-      stateHash: '00',
-      version: '1',
-    }),
-  );
+  return {
+    epoch: CborDeserializer.decodeUnsignedInteger(data[2]).toString(),
+    epochStartRound: CborDeserializer.decodeUnsignedInteger(data[3]).toString(),
+    networkId: Number(CborDeserializer.decodeUnsignedInteger(data[1])),
+    quorumThreshold: CborDeserializer.decodeUnsignedInteger(data[5]).toString(),
+    rootNodes: nodes,
+  };
 }
 
 export function loadCase(name: string): IF1Case {

@@ -1,8 +1,5 @@
 import config from './config.json' with { type: 'json' };
 import { AggregatorClient } from '../../../src/api/AggregatorClient.js';
-import { RootTrustBase } from '../../../src/api/bft/RootTrustBase.js';
-import { RootTrustBaseV2 } from '../../../src/api/bft/trustbase/RootTrustBaseV2.js';
-import { TrustBaseHistory } from '../../../src/api/bft/trustbase/TrustBaseHistory.js';
 import { CertificationData } from '../../../src/api/CertificationData.js';
 import { NetworkId } from '../../../src/api/NetworkId.js';
 import { SigningService } from '../../../src/crypto/secp256k1/SigningService.js';
@@ -18,17 +15,16 @@ import { TokenIssuanceVerifierService } from '../../../src/transaction/verificat
 import { VerificationContext } from '../../../src/transaction/verification/VerificationContext.js';
 import { HexConverter } from '../../../src/util/HexConverter.js';
 import { waitInclusionProof } from '../../../src/util/InclusionProofUtils.js';
+import { loadTrustBaseHistorySync, requiredEnv } from '../../utils/TrustBaseFile.js';
 import { createUnicityCertificateVerifier } from '../../utils/UnicityCertificateVerifierFixture.js';
-import trustBaseJson from '../trust-base.json' with { type: 'json' };
 
 it('Token minting', async () => {
   const aggregatorClient = new AggregatorClient(config.aggregatorUrl);
-  // the pin is the EntryID of the deployment's version-2 genesis entry, from its authenticated configuration; this local example derives it
-  const legacy = RootTrustBase.fromJSON(trustBaseJson);
-  const trustBase = await TrustBaseHistory.fromLegacyGenesis(
-    legacy,
-    await RootTrustBaseV2.genesisFromLegacy(legacy).entryId(),
+  const { history: trustBase, ready } = loadTrustBaseHistorySync(
+    requiredEnv('TRUST_BASE_PATH'),
+    requiredEnv('TRUST_BASE_GENESIS_PIN'),
   );
+  await ready;
 
   const client = new StateTransitionClient(aggregatorClient);
 

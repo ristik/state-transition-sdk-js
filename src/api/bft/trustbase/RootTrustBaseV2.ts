@@ -1,7 +1,11 @@
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 
-import { TrustBaseError } from './TrustBaseError.js';
-import { DataHash } from '../../../crypto/hash/DataHash.js';
+import {
+  TrustBaseChainError,
+  TrustBaseEncodingError,
+  TrustBaseInvalidError,
+  TrustBaseSignatureError,
+} from './TrustBaseError.js';
 import { DataHasher } from '../../../crypto/hash/DataHasher.js';
 import { HashAlgorithm } from '../../../crypto/hash/HashAlgorithm.js';
 import { Secp256k1SignatureVerifier } from '../../../crypto/secp256k1/Secp256k1SignatureVerifier.js';
@@ -9,517 +13,466 @@ import { Signature } from '../../../crypto/secp256k1/Signature.js';
 import { CborDeserializer } from '../../../serialization/cbor/CborDeserializer.js';
 import { CborMap } from '../../../serialization/cbor/CborMap.js';
 import { CborMapEntry } from '../../../serialization/cbor/CborMapEntry.js';
-import { CborReader } from '../../../serialization/cbor/CborReader.js';
 import { CborSerializer } from '../../../serialization/cbor/CborSerializer.js';
-import { MajorType } from '../../../serialization/cbor/MajorType.js';
-import { areUint8ArraysEqual, compareUint8Arrays } from '../../../util/TypedArrayUtils.js';
-import { RootTrustBase } from '../RootTrustBase.js';
+import { areUint8ArraysEqual } from '../../../util/TypedArrayUtils.js';
+import { NetworkId } from '../../NetworkId.js';
 
-/** One member of an epoch's root committee. */
-export interface IRootTrustBaseV2Member {
-  /** libp2p peer identifier of the member. */
-  readonly nodeId: string;
-  /** Compressed (33-byte) secp256k1 signing key. */
-  readonly signingKey: Uint8Array;
-  /** Voting weight, 1..2^40. */
-  readonly weight: bigint;
-}
-
-const TEXT_ENCODER = new TextEncoder();
-const TEXT_DECODER = new TextDecoder('utf-8', { fatal: true });
-const VERIFIER = new Secp256k1SignatureVerifier();
+const UTF8_ENCODER = new TextEncoder();
 
 /**
- * A Unicity Trust Base entry, record version 2: the root committee of one epoch, signed by the previous epoch's committee.
+ * One member of a trust-base epoch: its node id, compressed secp256k1 signing key and voting weight.
+ */
+export class TrustBaseMember {
+  private readonly _sigKey: Uint8Array;
+
+  public constructor(
+    public readonly nodeId: string,
+    sigKey: Uint8Array,
+    public readonly weight: bigint,
+  ) {
+    this._sigKey = new Uint8Array(sigKey);
+  }
+
+  /** @returns {Uint8Array} Copy of the 33-byte compressed signing key. */
+  public get sigKey(): Uint8Array {
+    return new Uint8Array(this._sigKey);
+  }
+}
+
+/**
+ * Signed Unicity Trust Base entry, record version 2 (CBOR tag 39000), the reference being bft-go-base `types.RootTrustBaseV2`.
  *
- * Wire form (tag 39000, deterministic CBOR): `[2, networkId, epoch, epochStartRound, [[nodeId, signingKey, weight]…], quorumThreshold, stateHash,
- * changeRecordHash, previousEntryId, {nodeId → signature} | null]`. The entry's identity is {@link entryId} = SHA-256 of {@link sigBytes} (the entry
- * with the signature field encoded as null), so two valid signature subsets of one entry have the same identity. The genesis entry has a 32-byte
- * zero `previousEntryId` and null signatures; it is authenticated by a pin on its EntryID, never by signatures.
+ * Wire form: tag 39000 over the 10-element array
+ * `[2, networkId, epoch, epochStartRound, [[nodeId, sigKey, weight]...], quorumThreshold, stateHash|null, changeRecordHash|null,
+ * previousEntryId, {nodeId: signature}|null]`.
  *
- * Mirrors bft-go-base `types.RootTrustBaseV2` (ristik fork, bft-go-base#2): decoding is strict (exact tag, version and arity, canonical encoding
- * only, bounded sizes) and witness signatures follow the strict 65-byte recoverable rule.
+ * Decoding is strict and has exactly one byte form per entry: exact tag, version and arity, bounded sizes, no trailing bytes, an absent hash is
+ * null (never an empty byte string), and the input must equal the deterministic encoding of what was decoded. The entry's identity is
+ * `entryId = SHA-256(sigBytes)` where sigBytes is the entry with the signature field encoded as CBOR null, so two valid signature sets over
+ * the same entry give the same identity. This class checks structure only; signatures are verified by the history that appends the entry.
  */
 export class RootTrustBaseV2 {
+  public static readonly CBOR_TAG = 39000n;
+  /** Length of an entry id and of the hashes when present. */
   public static readonly ID_LENGTH = 32;
-  /**
-   * Largest encoded entry accepted anywhere (bft-core utbstore / GetTrustBase, bft-go-base MaxTrustBaseEntryBytes): 128 KiB. The largest valid entry
-   * (256 members, 128-byte node ids, signatures of all 256 predecessor members) is 95,365 bytes.
-   */
-  public static readonly MAX_ENCODED_LENGTH = 128 * 1024;
-  /**
-   * The committee size, for decoding and for admission alike (§49): one format ceiling of 256 members, which also bounds the signatures an entry
-   * supplies. The 16-member limit of the B1 bridge registry is a gas bound of that registry and is not a bound of the trust base.
-   */
+  /** Slack over the member bound for array and map element counts, as in the reference decoder (MAX_MEMBERS + 16). */
+  public static readonly MAX_ELEMENTS = 272;
+  /** Allocation bound while decoding; deployments admit far fewer. */
   public static readonly MAX_MEMBERS = 256;
-  public static readonly MAX_NODE_ID_LENGTH = 128;
+  public static readonly MAX_NODE_ID_BYTES = 128;
+  /** One member's weight bound, so that the sum over MAX_MEMBERS cannot overflow 64 bits. */
   public static readonly MAX_WEIGHT = 1n << 40n;
-  public static readonly TAG = 39000n;
+  /** Length of a compressed secp256k1 signing key. */
+  public static readonly SIGNING_KEY_LENGTH = 33;
   public static readonly VERSION = 2n;
 
+  private static readonly SIGNATURE_VERIFIER = new Secp256k1SignatureVerifier();
+
   private constructor(
-    public readonly networkId: number,
+    private readonly _network: number,
     public readonly epoch: bigint,
     public readonly epochStartRound: bigint,
-    private readonly _rootNodes: readonly IRootTrustBaseV2Member[],
+    private readonly _members: TrustBaseMember[],
     public readonly quorumThreshold: bigint,
     private readonly _stateHash: Uint8Array | null,
     private readonly _changeRecordHash: Uint8Array | null,
-    private readonly _previousEntryId: Uint8Array | null,
-    private readonly _signatures: ReadonlyMap<string, Uint8Array> | null,
+    private readonly _previousEntryId: Uint8Array,
+    private readonly _signatures: Map<string, Uint8Array> | null,
   ) {}
 
-  /** @returns {Uint8Array|null} Copy of the change-record hash (null or 32 bytes). */
+  /** @returns {Uint8Array|null} Copy of the change record hash, or null when absent. */
   public get changeRecordHash(): Uint8Array | null {
     return this._changeRecordHash ? new Uint8Array(this._changeRecordHash) : null;
   }
 
-  /** @returns {boolean} True when the predecessor id is 32 zero bytes. */
-  public get isGenesis(): boolean {
-    return (
-      this._previousEntryId !== null &&
-      this._previousEntryId.length === RootTrustBaseV2.ID_LENGTH &&
-      this._previousEntryId.every((b) => b === 0)
-    );
+  /** @returns {TrustBaseMember[]} The members, sorted by node id bytes. */
+  public get members(): TrustBaseMember[] {
+    return [...this._members];
   }
 
-  /** @returns {Uint8Array} Copy of the predecessor's EntryID (32 zero bytes for the genesis entry). */
+  /** @returns {NetworkId} The network of the entry (1..65535 on any entry that passed {@link validate}). */
+  public get networkId(): NetworkId {
+    return NetworkId.fromId(this._network);
+  }
+
+  /** @returns {Uint8Array} Copy of the predecessor's entry id; 32 zero bytes for the genesis entry. */
   public get previousEntryId(): Uint8Array {
-    return new Uint8Array(this._previousEntryId ?? []);
+    return new Uint8Array(this._previousEntryId);
   }
 
-  /** @returns {IRootTrustBaseV2Member[]} Copy of the members, sorted by node identifier. */
-  public get rootNodes(): IRootTrustBaseV2Member[] {
-    return this._rootNodes.map((m) => ({
-      nodeId: m.nodeId,
-      signingKey: new Uint8Array(m.signingKey),
-      weight: m.weight,
-    }));
-  }
-
-  /** @returns {Map<string, Uint8Array>|null} Copy of the witness signatures (null for the genesis entry). */
+  /** @returns {Map<string, Uint8Array>|null} Copy of the predecessor members' signatures over sigBytes, null for the genesis entry. */
   public get signatures(): Map<string, Uint8Array> | null {
-    if (this._signatures === null) {
-      return null;
-    }
-    return new Map([...this._signatures].map(([id, sig]) => [id, new Uint8Array(sig)]));
+    return this._signatures
+      ? new Map(Array.from(this._signatures.entries()).map(([id, signature]) => [id, new Uint8Array(signature)]))
+      : null;
   }
 
-  /** @returns {Uint8Array|null} Copy of the state hash (null or 32 bytes). */
+  /** @returns {Uint8Array|null} Copy of the state hash, or null when absent. */
   public get stateHash(): Uint8Array | null {
     return this._stateHash ? new Uint8Array(this._stateHash) : null;
   }
 
-  /** @returns {bigint} Total weight of the committee. */
+  /** @returns {bigint} Total voting weight of the members. */
   public get totalWeight(): bigint {
-    return this._rootNodes.reduce((sum, m) => sum + m.weight, 0n);
+    return this._members.reduce((total, member) => total + member.weight, 0n);
   }
 
   /**
-   * Build an unsigned entry. Members are sorted by node identifier; the threshold is the caller's and is checked by {@link validate}.
+   * Decode and structurally validate a tagged version-2 entry.
    *
-   * @param {object} fields Entry fields.
-   * @param {number} fields.networkId Network identifier.
-   * @param {bigint} fields.epoch Epoch number.
-   * @param {bigint} fields.epochStartRound First root round of the epoch.
-   * @param {IRootTrustBaseV2Member[]} fields.rootNodes Members.
-   * @param {bigint} fields.quorumThreshold Threshold, floor(2W/3)+1.
-   * @param {Uint8Array|null} fields.stateHash State hash (null or 32 bytes).
-   * @param {Uint8Array|null} fields.changeRecordHash Change-record hash (null or 32 bytes).
-   * @param {Uint8Array} fields.previousEntryId Predecessor EntryID (32 zero bytes for a genesis entry).
-   * @returns {RootTrustBaseV2} The unsigned entry, shape-checked (sign it with {@link withSignatures} unless it is a genesis entry).
-   * @throws {TrustBaseError} `invalid` for a structure rule.
+   * @param {Uint8Array} bytes Tagged entry.
+   * @returns {RootTrustBaseV2} Decoded entry.
+   * @throws {TrustBaseEncodingError} If the bytes are not the deterministic encoding of a version-2 entry.
+   * @throws {TrustBaseInvalidError} If a structure rule fails.
    */
-  public static create(fields: {
-    readonly changeRecordHash: Uint8Array | null;
-    readonly epoch: bigint;
-    readonly epochStartRound: bigint;
-    readonly networkId: number;
-    readonly previousEntryId: Uint8Array;
-    readonly quorumThreshold: bigint;
-    readonly rootNodes: readonly IRootTrustBaseV2Member[];
-    readonly stateHash: Uint8Array | null;
-  }): RootTrustBaseV2 {
-    const nodes = fields.rootNodes
-      .map((m) => ({ nodeId: m.nodeId, signingKey: new Uint8Array(m.signingKey), weight: m.weight }))
-      .sort((a, b) => compareUint8Arrays(TEXT_ENCODER.encode(a.nodeId), TEXT_ENCODER.encode(b.nodeId)));
-    const entry = new RootTrustBaseV2(
-      fields.networkId,
-      fields.epoch,
-      fields.epochStartRound,
-      nodes,
-      fields.quorumThreshold,
-      absentAsNull(fields.stateHash),
-      absentAsNull(fields.changeRecordHash),
-      new Uint8Array(fields.previousEntryId),
-      null,
-    );
-    entry.validateShape();
-    return entry;
-  }
-
-  /**
-   * Strictly decode a tagged version-2 entry and check its structure ({@link validate}); signatures are not verified.
-   *
-   * @param {Uint8Array} bytes Tagged CBOR.
-   * @returns {RootTrustBaseV2} The entry.
-   * @throws {TrustBaseError} `malformed` for anything but the canonical encoding of a well-formed entry, `invalid` for a structure rule.
-   */
-  public static fromCBOR(bytes: Uint8Array): RootTrustBaseV2 {
+  public static decode(bytes: Uint8Array): RootTrustBaseV2 {
     let entry: RootTrustBaseV2;
     try {
-      if (bytes.length > RootTrustBaseV2.MAX_ENCODED_LENGTH) {
-        throw new Error(`${bytes.length} bytes exceed ${RootTrustBaseV2.MAX_ENCODED_LENGTH}`);
-      }
-      const tagged = CborDeserializer.decodeTag(bytes);
-      if (tagged.tag !== RootTrustBaseV2.TAG) {
-        throw new Error(`tag ${tagged.tag}, expected ${RootTrustBaseV2.TAG}`);
-      }
-      const data = CborDeserializer.decodeArray(tagged.data, 10);
-      const version = CborDeserializer.decodeUnsignedInteger(data[0]);
-      if (version !== RootTrustBaseV2.VERSION) {
-        throw new Error(`version ${version}, expected ${RootTrustBaseV2.VERSION}`);
-      }
-      const networkId = CborDeserializer.decodeUnsignedInteger(data[1]);
-      if (networkId > 0xffffn) {
-        throw new Error(`network ${networkId}`);
-      }
-      const nodes = CborDeserializer.decodeArray(data[4]);
-      if (nodes.length > RootTrustBaseV2.MAX_MEMBERS) {
-        throw new Error(`${nodes.length} members exceed ${RootTrustBaseV2.MAX_MEMBERS}`);
-      }
-      const signatures = CborDeserializer.decodeNullable(data[9], (map) => {
-        const entries = CborDeserializer.decodeMap(map);
-        if (entries.length > RootTrustBaseV2.MAX_MEMBERS) {
-          throw new Error(`${entries.length} signatures exceed ${RootTrustBaseV2.MAX_MEMBERS}`);
-        }
-        return new Map(entries.map((e) => [decodeText(e.key), CborDeserializer.decodeByteString(e.value)]));
-      });
-      entry = new RootTrustBaseV2(
-        Number(networkId),
-        CborDeserializer.decodeUnsignedInteger(data[2]),
-        CborDeserializer.decodeUnsignedInteger(data[3]),
-        nodes.map((node) => {
-          const [nodeId, key, weight] = CborDeserializer.decodeArray(node, 3);
-          return {
-            nodeId: decodeText(nodeId),
-            signingKey: CborDeserializer.decodeByteString(key),
-            weight: CborDeserializer.decodeUnsignedInteger(weight),
-          };
-        }),
-        CborDeserializer.decodeUnsignedInteger(data[5]),
-        CborDeserializer.decodeNullable(data[6], decodePresentHash),
-        CborDeserializer.decodeNullable(data[7], decodePresentHash),
-        CborDeserializer.decodeNullable(data[8], CborDeserializer.decodeByteString),
-        signatures,
-      );
+      entry = RootTrustBaseV2.parse(bytes);
     } catch (error) {
-      throw new TrustBaseError('malformed', `Not a trust base v2 entry: ${message(error)}.`, { cause: error });
+      if (error instanceof TrustBaseEncodingError) {
+        throw error;
+      }
+      throw new TrustBaseEncodingError(error instanceof Error ? error.message : String(error));
     }
-    if (!areUint8ArraysEqual(entry.toCBOR(), bytes)) {
-      throw new TrustBaseError('malformed', 'Not the deterministic encoding of a trust base v2 entry.');
+
+    // One byte form per entry: the input must be what this decoder would write back.
+    if (!areUint8ArraysEqual(entry.encode(), bytes)) {
+      throw new TrustBaseEncodingError('Not the deterministic encoding.');
     }
+
     entry.validate();
     return entry;
   }
 
-  /**
-   * The version-2 genesis entry of an on-disk (JSON, version 1) genesis trust base, as bft-core derives it (`utb.BuildUnsigned(nil,
-   * utb.FromProjection(v1))`): the same network, epoch, start, members, weights and threshold, a zero predecessor and no signatures. The V1 signatures
-   * are ignored: the genesis is authenticated by the pin on the returned entry's EntryID. Empty state and change-record hashes become CBOR null, the
-   * one byte form of an absent hash.
-   *
-   * @param {RootTrustBase} legacy The JSON genesis trust base.
-   * @returns {RootTrustBaseV2} The unsigned genesis entry.
-   * @throws {TrustBaseError} `invalid` when the result breaks a version-2 rule (for example a threshold other than floor(2W/3)+1).
-   */
-  public static genesisFromLegacy(legacy: RootTrustBase): RootTrustBaseV2 {
-    return RootTrustBaseV2.create({
-      changeRecordHash: legacy.changeRecordHash,
-      epoch: legacy.epoch,
-      epochStartRound: legacy.epochStartRound,
-      networkId: legacy.networkId.id,
-      previousEntryId: new Uint8Array(RootTrustBaseV2.ID_LENGTH),
-      quorumThreshold: legacy.quorumThreshold,
-      rootNodes: [...legacy.rootNodes.values()].map((n) => ({
-        nodeId: n.nodeId,
-        signingKey: n.signingKey,
-        weight: n.stakedAmount,
-      })),
-      stateHash: legacy.stateHash,
+  private static parse(bytes: Uint8Array): RootTrustBaseV2 {
+    const tagged = CborDeserializer.decodeTag(bytes);
+    if (tagged.tag !== RootTrustBaseV2.CBOR_TAG) {
+      throw new TrustBaseEncodingError(`Tag ${tagged.tag}, expected ${RootTrustBaseV2.CBOR_TAG}.`);
+    }
+
+    const fields = CborDeserializer.decodeArray(tagged.data);
+    if (fields.length !== 10) {
+      throw new TrustBaseEncodingError(`Expected 10 fields, got ${fields.length}.`);
+    }
+
+    const uint64 = (data: Uint8Array): bigint => {
+      return CborDeserializer.decodeUnsignedInteger(data);
+    };
+    // An absent hash is null, never an empty byte string: that would be a second byte form (and a second entry id) of the same entry.
+    const hash = (data: Uint8Array): Uint8Array | null =>
+      CborDeserializer.decodeNullable(data, (item) => {
+        const value = CborDeserializer.decodeByteString(item);
+        if (value.length === 0) {
+          throw new TrustBaseEncodingError('An absent hash is null, not an empty byte string.');
+        }
+        return value;
+      });
+
+    const version = uint64(fields[0]);
+    if (version !== RootTrustBaseV2.VERSION) {
+      throw new TrustBaseEncodingError(`Version ${version}, expected ${RootTrustBaseV2.VERSION}.`);
+    }
+
+    const network = uint64(fields[1]);
+    // 0 fits the wire type and is a structure error (validate), as in the Go and Rust references; only a value above 16 bits is a bad encoding.
+    if (network > 0xffffn) {
+      throw new TrustBaseEncodingError(`Network identifier ${network} above 65535.`);
+    }
+
+    const memberItems = CborDeserializer.decodeArray(fields[4]);
+    if (memberItems.length > RootTrustBaseV2.MAX_ELEMENTS) {
+      throw new TrustBaseEncodingError(`${memberItems.length} members exceed the decoding bound.`);
+    }
+    const members = memberItems.map((item) => {
+      const member = CborDeserializer.decodeArray(item, 3);
+      return new TrustBaseMember(
+        CborDeserializer.decodeTextString(member[0]),
+        CborDeserializer.decodeByteString(member[1]),
+        uint64(member[2]),
+      );
     });
-  }
 
-  /**
-   * @returns {Promise<Uint8Array>} The EntryID, SHA-256 of {@link sigBytes}: independent of the signatures.
-   */
-  public async entryId(): Promise<Uint8Array> {
-    return (await this.sigBytesHash()).data;
-  }
+    let signatures: Map<string, Uint8Array> | null = null;
+    const signatureEntries = CborDeserializer.decodeNullable(fields[9], (item) => CborDeserializer.decodeMap(item));
+    if (signatureEntries !== null) {
+      if (signatureEntries.length > RootTrustBaseV2.MAX_ELEMENTS) {
+        throw new TrustBaseEncodingError(`${signatureEntries.length} signatures exceed the decoding bound.`);
+      }
+      signatures = new Map();
+      for (const entry of signatureEntries) {
+        signatures.set(CborDeserializer.decodeTextString(entry.key), CborDeserializer.decodeByteString(entry.value));
+      }
+    }
 
-  /**
-   * @returns {Uint8Array} The signed preimage: the encoding with the signature field as CBOR null (not removed from the array).
-   */
-  public sigBytes(): Uint8Array {
-    return this.encode(null);
-  }
-
-  /**
-   * @returns {Uint8Array} The tagged deterministic CBOR encoding.
-   */
-  public toCBOR(): Uint8Array {
-    return this.encode(this._signatures);
-  }
-
-  /**
-   * {@link validateShape} plus the witness rule: the genesis carries null signatures, every other entry a non-empty signature map.
-   *
-   * @throws {TrustBaseError} `invalid` for the first violated rule.
-   */
-  public validate(): void {
-    this.validateShape();
-    if (this.isGenesis) {
-      if (this._signatures !== null) {
-        throw new TrustBaseError('invalid', 'Invalid trust base v2 entry: the genesis entry carries signatures.');
-      }
-    } else if (this._signatures === null || this._signatures.size === 0) {
-      throw new TrustBaseError('invalid', 'Invalid trust base v2 entry: a non-genesis entry has no signatures.');
-    }
-  }
-
-  /**
-   * Check the entry's shape, without the witness rule (an unsigned entry passes, as bft-core `utbentry.ValidateShape`): epoch ≥ 1, members (sorted by
-   * raw node-identifier bytes, unique, valid compressed keys, unique keys, positive bounded weights, bounded count), the exact threshold
-   * floor(2W/3)+1, hash lengths and a 32-byte predecessor id.
-   *
-   * @throws {TrustBaseError} `invalid` for the first violated rule.
-   */
-  public validateShape(): void {
-    const bad = (text: string): TrustBaseError =>
-      new TrustBaseError('invalid', `Invalid trust base v2 entry: ${text}.`);
-    if (this.epoch === 0n) {
-      throw bad('epoch is zero');
-    }
-    const n = this._rootNodes.length;
-    if (n === 0 || n > RootTrustBaseV2.MAX_MEMBERS) {
-      throw bad(`${n} members (1..${RootTrustBaseV2.MAX_MEMBERS})`);
-    }
-    let total = 0n;
-    const keys = new Set<string>();
-    let previous: Uint8Array | null = null;
-    for (const m of this._rootNodes) {
-      const id = TEXT_ENCODER.encode(m.nodeId);
-      if (id.length === 0 || id.length > RootTrustBaseV2.MAX_NODE_ID_LENGTH) {
-        throw bad('a node identifier is empty or too long');
-      }
-      if (previous !== null && compareUint8Arrays(previous, id) >= 0) {
-        throw bad(`members are not strictly sorted by node identifier at "${m.nodeId}"`);
-      }
-      previous = id;
-      if (m.weight === 0n || m.weight > RootTrustBaseV2.MAX_WEIGHT) {
-        throw bad(`member "${m.nodeId}" weight ${m.weight} outside 1..${RootTrustBaseV2.MAX_WEIGHT}`);
-      }
-      if (!isCompressedKey(m.signingKey)) {
-        throw bad(`member "${m.nodeId}" signing key is not a compressed secp256k1 point`);
-      }
-      const key = Array.from(m.signingKey).join(',');
-      if (keys.has(key)) {
-        throw bad(`member "${m.nodeId}" shares a signing key`);
-      }
-      keys.add(key);
-      total += m.weight;
-    }
-    if (this.quorumThreshold !== (total * 2n) / 3n + 1n) {
-      throw bad(
-        `quorum threshold ${this.quorumThreshold}, expected ${(total * 2n) / 3n + 1n} for total weight ${total}`,
-      );
-    }
-    for (const [name, hash] of [
-      ['state hash', this._stateHash],
-      ['change record hash', this._changeRecordHash],
-    ] as const) {
-      if (hash !== null && hash.length !== 0 && hash.length !== RootTrustBaseV2.ID_LENGTH) {
-        throw bad(`${name} is ${hash.length} bytes (null or ${RootTrustBaseV2.ID_LENGTH})`);
-      }
-    }
-    if (this._previousEntryId === null || this._previousEntryId.length !== RootTrustBaseV2.ID_LENGTH) {
-      throw bad('previous entry id is not 32 bytes');
-    }
-  }
-
-  /**
-   * Check the entry as the genesis: its structure and a zero predecessor. Its authority is a pin on its EntryID, which the caller compares.
-   *
-   * @throws {TrustBaseError} `invalid` or `genesis`.
-   */
-  public verifyGenesis(): void {
-    this.validate();
-    if (!this.isGenesis) {
-      throw new TrustBaseError('genesis', 'Not a genesis entry.');
-    }
-  }
-
-  /**
-   * Check signatures by this entry's members, strictly: every supplied signature must be from a member and valid (an unknown or invalid extra fails
-   * even when the rest reach quorum), and the signers' weight must reach the threshold. A signature is exactly 65 bytes `r‖s‖v`, `1 ≤ r,s < n`,
-   * low-S, `v` in 0..3, and the key it recovers must be the member's key.
-   *
-   * @param {DataHash} hash SHA-256 of the signed bytes.
-   * @param {ReadonlyMap<string, Uint8Array>} signatures Node identifier → signature.
-   * @throws {TrustBaseError} `invalid`.
-   */
-  public async verifyQuorumSignatures(hash: DataHash, signatures: ReadonlyMap<string, Uint8Array>): Promise<void> {
-    let weight = 0n;
-    for (const [nodeId, bytes] of signatures) {
-      const member = this._rootNodes.find((m) => m.nodeId === nodeId);
-      if (!member) {
-        throw new TrustBaseError(
-          'invalid',
-          `Trust base v2 signature check failed: signer "${nodeId}" is not a member.`,
-        );
-      }
-      let signature: Signature;
-      try {
-        signature = Signature.decode(bytes);
-      } catch (error) {
-        throw new TrustBaseError(
-          'invalid',
-          `Trust base v2 signature check failed: signer "${nodeId}": ${message(error)}`,
-          {
-            cause: error,
-          },
-        );
-      }
-      if (!(await VERIFIER.verify(hash, signature, member.signingKey))) {
-        throw new TrustBaseError(
-          'invalid',
-          `Trust base v2 signature check failed: signer "${nodeId}": verification failed.`,
-        );
-      }
-      weight += member.weight;
-    }
-    if (weight < this.quorumThreshold) {
-      throw new TrustBaseError(
-        'invalid',
-        `Trust base v2 signature check failed: quorum not reached, signed weight ${weight}, threshold ${this.quorumThreshold}.`,
-      );
-    }
-  }
-
-  /**
-   * Check that this entry extends `previous`: valid structure, not a genesis, the same network, epoch previous+1, a later start round, the
-   * predecessor's EntryID, and a strict quorum of the predecessor's members signing {@link sigBytes}.
-   *
-   * @param {RootTrustBaseV2} previous The authenticated predecessor.
-   * @throws {TrustBaseError} `invalid`.
-   */
-  public async verifySuccessor(previous: RootTrustBaseV2): Promise<void> {
-    this.validate();
-    const chain = (text: string): TrustBaseError =>
-      new TrustBaseError('invalid', `Trust base v2 entry does not extend the predecessor: ${text}.`);
-    if (this.isGenesis) {
-      throw chain('a genesis entry has no predecessor');
-    }
-    if (this.networkId !== previous.networkId) {
-      throw chain(`network ${this.networkId}, predecessor ${previous.networkId}`);
-    }
-    if (this.epoch !== previous.epoch + 1n) {
-      throw chain(`epoch ${this.epoch}, predecessor ${previous.epoch}`);
-    }
-    if (this.epochStartRound <= previous.epochStartRound) {
-      throw chain(`epoch start ${this.epochStartRound}, predecessor ${previous.epochStartRound}`);
-    }
-    if (!areUint8ArraysEqual(this._previousEntryId, await previous.entryId())) {
-      throw chain('previous entry id does not match');
-    }
-    await previous.verifyQuorumSignatures(await this.sigBytesHash(), this._signatures ?? new Map());
-  }
-
-  /**
-   * @param {ReadonlyMap<string, Uint8Array>|null} signatures Witness signatures.
-   * @returns {RootTrustBaseV2} This entry with the given signature field.
-   */
-  public withSignatures(signatures: ReadonlyMap<string, Uint8Array> | null): RootTrustBaseV2 {
     return new RootTrustBaseV2(
-      this.networkId,
-      this.epoch,
-      this.epochStartRound,
-      this._rootNodes,
-      this.quorumThreshold,
-      this._stateHash,
-      this._changeRecordHash,
-      this._previousEntryId,
-      signatures ? new Map([...signatures].map(([id, sig]) => [id, new Uint8Array(sig)])) : null,
+      Number(network),
+      uint64(fields[2]),
+      uint64(fields[3]),
+      members,
+      uint64(fields[5]),
+      hash(fields[6]),
+      hash(fields[7]),
+      CborDeserializer.decodeByteString(fields[8]),
+      signatures,
     );
   }
 
-  private encode(signatures: ReadonlyMap<string, Uint8Array> | null): Uint8Array {
+  /**
+   * @returns {Uint8Array} The tagged deterministic encoding.
+   */
+  public encode(): Uint8Array {
+    return this.encodeWithSignatures(this._signatures);
+  }
+
+  /**
+   * @returns {Promise<Uint8Array>} The entry id, SHA-256 of sigBytes: independent of the signatures, what a successor links to and a pin names.
+   */
+  public async entryId(): Promise<Uint8Array> {
+    const hash = await new DataHasher(HashAlgorithm.SHA256).update(this.sigBytes()).digest();
+    return hash.data;
+  }
+
+  /** @returns {boolean} Whether the entry has no predecessor (32 zero bytes). */
+  public isGenesis(): boolean {
+    return this._previousEntryId.every((byte) => byte === 0);
+  }
+
+  /**
+   * @returns {Uint8Array} The bytes the predecessor's members sign: the entry with the signature field encoded as CBOR null.
+   */
+  public sigBytes(): Uint8Array {
+    return this.encodeWithSignatures(null);
+  }
+
+  /**
+   * Check the entry's structure, not its signatures: epoch at least 1, the member list (sorted by node id bytes, unique, valid compressed
+   * keys, positive bounded weights, bounded count), the exact quorum threshold, hash lengths, and the genesis (zero predecessor, null
+   * signatures) versus non-genesis (32-byte predecessor, non-empty signature map) shape.
+   *
+   * @throws {TrustBaseInvalidError} If a rule fails.
+   */
+  public validate(): void {
+    if (this._network === 0) {
+      throw new TrustBaseInvalidError('Network identifier is zero.');
+    }
+    if (this.epoch === 0n) {
+      throw new TrustBaseInvalidError('Epoch is zero.');
+    }
+
+    const count = this._members.length;
+    if (count === 0 || count > RootTrustBaseV2.MAX_MEMBERS) {
+      throw new TrustBaseInvalidError(`${count} members (1..${RootTrustBaseV2.MAX_MEMBERS}).`);
+    }
+
+    let total = 0n;
+    const keys = new Map<string, string>();
+    let previousId: Uint8Array | null = null;
+    for (const member of this._members) {
+      const id = UTF8_ENCODER.encode(member.nodeId);
+      if (id.length === 0 || id.length > RootTrustBaseV2.MAX_NODE_ID_BYTES) {
+        throw new TrustBaseInvalidError(`Node id of ${id.length} bytes (1..${RootTrustBaseV2.MAX_NODE_ID_BYTES}).`);
+      }
+      if (previousId !== null && compareBytes(previousId, id) >= 0) {
+        throw new TrustBaseInvalidError(`Members are not strictly sorted by node id at "${member.nodeId}".`);
+      }
+      previousId = id;
+
+      if (member.weight < 1n || member.weight > RootTrustBaseV2.MAX_WEIGHT) {
+        throw new TrustBaseInvalidError(
+          `Member "${member.nodeId}": weight ${member.weight} outside 1..${RootTrustBaseV2.MAX_WEIGHT}.`,
+        );
+      }
+
+      const key = member.sigKey;
+      if (!isCompressedSecp256k1Key(key)) {
+        throw new TrustBaseInvalidError(`Member "${member.nodeId}": not a compressed secp256k1 key.`);
+      }
+      // A compressed key has one encoding per point, so a byte comparison finds a repeated key: one key holder must not count for several members.
+      const keyId = Array.from(key, (byte) => byte.toString(16).padStart(2, '0')).join('');
+      const other = keys.get(keyId);
+      if (other !== undefined) {
+        throw new TrustBaseInvalidError(`Members "${other}" and "${member.nodeId}" share a signing key.`);
+      }
+      keys.set(keyId, member.nodeId);
+
+      total += member.weight;
+    }
+
+    const threshold = (total * 2n) / 3n + 1n;
+    if (this.quorumThreshold !== threshold) {
+      throw new TrustBaseInvalidError(
+        `Quorum threshold ${this.quorumThreshold}, expected ${threshold} for total weight ${total}.`,
+      );
+    }
+
+    for (const [name, value] of [
+      ['stateHash', this._stateHash],
+      ['changeRecordHash', this._changeRecordHash],
+    ] as const) {
+      if (value !== null && value.length !== RootTrustBaseV2.ID_LENGTH) {
+        throw new TrustBaseInvalidError(`${name} is ${value.length} bytes (null or ${RootTrustBaseV2.ID_LENGTH}).`);
+      }
+    }
+
+    if (this._previousEntryId.length !== RootTrustBaseV2.ID_LENGTH) {
+      throw new TrustBaseInvalidError(`Previous entry id is ${this._previousEntryId.length} bytes.`);
+    }
+    if (this.isGenesis()) {
+      if (this._signatures !== null) {
+        throw new TrustBaseInvalidError('The genesis entry carries signatures.');
+      }
+    } else if (this._signatures === null || this._signatures.size === 0) {
+      throw new TrustBaseInvalidError('A non-genesis entry has no signatures.');
+    }
+  }
+
+  /**
+   * Check that this entry is a structurally valid genesis entry (zero predecessor, null signatures). A genesis is authenticated by a pin on its
+   * entry id, never by signatures; the history compares the pin.
+   *
+   * @throws {TrustBaseInvalidError} If the entry is not a genesis entry.
+   */
+  public verifyGenesis(): void {
+    this.validate();
+    if (!this.isGenesis()) {
+      throw new TrustBaseInvalidError('Not a genesis entry.');
+    }
+  }
+
+  /**
+   * Check the signatures of this entry's members over `data`, strictly: every supplied signature must be from a member and valid (a supplied extra
+   * that is unknown or invalid fails the whole check even if the rest reach quorum), and the weight of the signers must reach the threshold.
+   *
+   * @param {Uint8Array} data Signed bytes.
+   * @param {Map<string, Uint8Array>} signatures Signatures by node id.
+   * @throws {TrustBaseSignatureError} If a signature fails or the quorum is not reached.
+   */
+  public async verifyQuorumSignatures(data: Uint8Array, signatures: Map<string, Uint8Array>): Promise<void> {
+    const weights = await Promise.all(
+      Array.from(signatures.entries(), ([nodeId, signature]) => this.verifySignature(data, signature, nodeId)),
+    );
+    const signed = weights.reduce((total, weight) => total + weight, 0n);
+    if (signed < this.quorumThreshold) {
+      throw new TrustBaseSignatureError(
+        `Quorum not reached, signed weight ${signed}, threshold ${this.quorumThreshold}.`,
+      );
+    }
+  }
+
+  /**
+   * Verify one member's signature and return the member's weight. The signature must be a canonical recoverable signature over SHA-256 of
+   * `data`: exactly 65 bytes (`r || s || recovery`), recovery id 0..3, low-S, recovering to the member's key. The 64-byte compact form is not
+   * accepted. This is the rule of the seal verifier, applied to entries.
+   *
+   * @param {Uint8Array} data Signed bytes.
+   * @param {Uint8Array} signature 65-byte signature.
+   * @param {string} nodeId Signer.
+   * @returns {Promise<bigint>} The signer's weight.
+   * @throws {TrustBaseSignatureError} If the signer is not a member or the signature is not valid.
+   */
+  public async verifySignature(data: Uint8Array, signature: Uint8Array, nodeId: string): Promise<bigint> {
+    const member = this._members.find((candidate) => candidate.nodeId === nodeId);
+    if (member === undefined) {
+      throw new TrustBaseSignatureError(`Signer "${nodeId}" is not a member.`);
+    }
+
+    let decoded: Signature;
+    try {
+      decoded = Signature.decode(signature);
+    } catch (error) {
+      throw new TrustBaseSignatureError(
+        `Signer "${nodeId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const hash = await new DataHasher(HashAlgorithm.SHA256).update(data).digest();
+    if (!(await RootTrustBaseV2.SIGNATURE_VERIFIER.verify(hash, decoded, member.sigKey))) {
+      throw new TrustBaseSignatureError(`Signer "${nodeId}": the signature is not valid.`);
+    }
+
+    return member.weight;
+  }
+
+  /**
+   * Check that this entry extends `previous`: not a genesis, same network, epoch previous + 1, a later start round, the predecessor id equal to
+   * the entry id of `previous`, and a strict quorum of `previous`' members signing {@link sigBytes}.
+   *
+   * @param {RootTrustBaseV2} previous The predecessor.
+   * @throws {TrustBaseChainError} If the entry does not extend the predecessor.
+   * @throws {TrustBaseSignatureError} If the predecessor's members did not sign it.
+   */
+  public async verifySuccessor(previous: RootTrustBaseV2): Promise<void> {
+    if (this.isGenesis()) {
+      throw new TrustBaseChainError('A genesis entry has no predecessor.');
+    }
+    if (this.networkId.id !== previous.networkId.id) {
+      throw new TrustBaseChainError(`Network ${this.networkId.id}, predecessor ${previous.networkId.id}.`);
+    }
+    if (this.epoch !== previous.epoch + 1n) {
+      throw new TrustBaseChainError(`Epoch ${this.epoch}, predecessor ${previous.epoch}.`);
+    }
+    if (this.epochStartRound <= previous.epochStartRound) {
+      throw new TrustBaseChainError(`Epoch start ${this.epochStartRound}, predecessor ${previous.epochStartRound}.`);
+    }
+    if (!areUint8ArraysEqual(this._previousEntryId, await previous.entryId())) {
+      throw new TrustBaseChainError('Previous entry id does not match.');
+    }
+
+    // A decoded non-genesis entry always carries a non-empty signature map (validate).
+    await previous.verifyQuorumSignatures(this.sigBytes(), this._signatures ?? new Map<string, Uint8Array>());
+  }
+
+  private encodeWithSignatures(signatures: Map<string, Uint8Array> | null): Uint8Array {
+    const nullable = (bytes: Uint8Array | null): Uint8Array =>
+      bytes === null ? CborSerializer.encodeNull() : CborSerializer.encodeByteString(bytes);
+
+    const map = new CborMap(
+      Array.from(
+        signatures ?? [],
+        ([nodeId, signature]) =>
+          new CborMapEntry(CborSerializer.encodeTextString(nodeId), CborSerializer.encodeByteString(signature)),
+      ),
+    );
+
     return CborSerializer.encodeTag(
-      RootTrustBaseV2.TAG,
+      RootTrustBaseV2.CBOR_TAG,
       CborSerializer.encodeArray(
         CborSerializer.encodeUnsignedInteger(RootTrustBaseV2.VERSION),
-        CborSerializer.encodeUnsignedInteger(this.networkId),
+        CborSerializer.encodeUnsignedInteger(this._network),
         CborSerializer.encodeUnsignedInteger(this.epoch),
         CborSerializer.encodeUnsignedInteger(this.epochStartRound),
         CborSerializer.encodeArray(
-          ...this._rootNodes.map((m) =>
+          ...this._members.map((member) =>
             CborSerializer.encodeArray(
-              CborSerializer.encodeTextString(m.nodeId),
-              CborSerializer.encodeByteString(m.signingKey),
-              CborSerializer.encodeUnsignedInteger(m.weight),
+              CborSerializer.encodeTextString(member.nodeId),
+              CborSerializer.encodeByteString(member.sigKey),
+              CborSerializer.encodeUnsignedInteger(member.weight),
             ),
           ),
         ),
         CborSerializer.encodeUnsignedInteger(this.quorumThreshold),
-        CborSerializer.encodeNullable(absentAsNull(this._stateHash), CborSerializer.encodeByteString),
-        CborSerializer.encodeNullable(absentAsNull(this._changeRecordHash), CborSerializer.encodeByteString),
-        CborSerializer.encodeNullable(this._previousEntryId, CborSerializer.encodeByteString),
-        CborSerializer.encodeNullable(signatures, (map) =>
-          CborSerializer.encodeMap(
-            new CborMap(
-              [...map].map(
-                ([id, sig]) =>
-                  new CborMapEntry(CborSerializer.encodeTextString(id), CborSerializer.encodeByteString(sig)),
-              ),
-            ),
-          ),
-        ),
+        nullable(this._stateHash),
+        nullable(this._changeRecordHash),
+        CborSerializer.encodeByteString(this._previousEntryId),
+        signatures === null ? CborSerializer.encodeNull() : CborSerializer.encodeMap(map),
       ),
     );
   }
+}
 
-  private sigBytesHash(): Promise<DataHash> {
-    return new DataHasher(HashAlgorithm.SHA256).update(this.sigBytes()).digest();
+function compareBytes(a: Uint8Array, b: Uint8Array): number {
+  const length = Math.min(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    if (a[i] !== b[i]) {
+      return a[i] - b[i];
+    }
   }
+  return a.length - b.length;
 }
 
-function decodeText(data: Uint8Array): string {
-  const reader = new CborReader(data);
-  const length = reader.readLength(MajorType.TEXT_STRING);
-  if (length > BigInt(RootTrustBaseV2.MAX_NODE_ID_LENGTH)) {
-    throw new Error(`text of ${length} bytes`);
-  }
-  const text = TEXT_DECODER.decode(reader.read(Number(length)));
-  reader.assertExhausted();
-  return text;
-}
-
-/** An absent hash has one byte form, CBOR null: a present hash must not be an empty byte string (bft-go-base#3). */
-function decodePresentHash(data: Uint8Array): Uint8Array {
-  const hash = CborDeserializer.decodeByteString(data);
-  if (hash.length === 0) {
-    throw new Error('an absent hash is null, not an empty byte string');
-  }
-  return hash;
-}
-
-/** The canonical absent hash is null: an empty value is held (and encoded) as null, so both give the same bytes and EntryID. */
-function absentAsNull(hash: Uint8Array | null): Uint8Array | null {
-  return hash && hash.length > 0 ? new Uint8Array(hash) : null;
-}
-
-function isCompressedKey(key: Uint8Array): boolean {
-  if (key.length !== 33 || (key[0] !== 0x02 && key[0] !== 0x03)) {
+function isCompressedSecp256k1Key(key: Uint8Array): boolean {
+  if (key.length !== RootTrustBaseV2.SIGNING_KEY_LENGTH) {
     return false;
   }
   try {
@@ -528,8 +481,4 @@ function isCompressedKey(key: Uint8Array): boolean {
   } catch {
     return false;
   }
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

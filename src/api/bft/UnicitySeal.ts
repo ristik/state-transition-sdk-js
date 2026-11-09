@@ -13,11 +13,22 @@ import { dedent } from '../../util/StringUtils.js';
 import { areUint8ArraysEqual } from '../../util/TypedArrayUtils.js';
 import { NetworkId } from '../NetworkId.js';
 
+/** Decoding options of a seal. */
+export interface IUnicitySealDecodeOptions {
+  /** Accept a seal whose signature map is CBOR null (the B1 profile's native any-age decoder does); default: refuse it. */
+  readonly allowNullSignatures?: boolean;
+}
+
 /**
  * UnicitySeal represents a seal in the Unicity BFT system, containing metadata and signatures.
  */
 export class UnicitySeal {
   public static readonly CBOR_TAG = 39005n;
+  /**
+   * Most witnesses (supplied signatures) a seal may carry, whoever signed: 256, the ceiling of a committee (§49). It is a resource bound that
+   * holds before anything is hashed, keyed or verified; it is not the quorum rule.
+   */
+  public static readonly MAX_WITNESSES = 256;
   private static readonly VERSION = 1n;
 
   private constructor(
@@ -128,14 +139,13 @@ export class UnicitySeal {
   }
 
   /**
-   * Create unicity seal from CBOR bytes.
+   * Create a seal from CBOR bytes with decoding options.
    *
-   * @param bytes CBOR bytes
-   * @return unicity seal
-   * @throws {CborError} On malformed CBOR. A signature entry that is a byte string of any length is kept as it is,
-   *   including one that is not a valid signature encoding (it counts as zero votes in the quorum rule).
+   * @param {Uint8Array} bytes CBOR bytes.
+   * @param {IUnicitySealDecodeOptions} options Options.
+   * @returns {UnicitySeal} Seal.
    */
-  public static fromCBOR(bytes: Uint8Array): UnicitySeal {
+  public static decodeWithOptions(bytes: Uint8Array, options: IUnicitySealDecodeOptions): UnicitySeal {
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== UnicitySeal.CBOR_TAG) {
       throw new CborError(`Invalid CBOR tag for UnicitySeal: ${tag.tag}`);
@@ -147,6 +157,15 @@ export class UnicitySeal {
       throw new CborError(`Unsupported UnicitySeal version: ${version}`);
     }
 
+    // a null signature map is refused, as the native decoder does; the B1 profile decodes it (and it round-trips): such a seal is shaped but never
+    // authenticated
+    const witnessEntries = options.allowNullSignatures
+      ? CborDeserializer.decodeNullable(data[7], (map) => CborDeserializer.decodeMap(map))
+      : CborDeserializer.decodeMap(data[7]);
+    if (witnessEntries !== null && witnessEntries.length > UnicitySeal.MAX_WITNESSES) {
+      throw new CborError(`${witnessEntries.length} witnesses exceed ${UnicitySeal.MAX_WITNESSES}.`);
+    }
+
     return new UnicitySeal(
       NetworkId.fromId(CborDeserializer.decodeUnsignedInteger(data[1])),
       CborDeserializer.decodeUnsignedInteger(data[2]),
@@ -154,18 +173,27 @@ export class UnicitySeal {
       CborDeserializer.decodeUnsignedInteger(data[4]),
       CborDeserializer.decodeNullable(data[5], CborDeserializer.decodeByteString),
       CborDeserializer.decodeByteString(data[6]),
-      // a null signature map decodes (and round-trips): such a seal is shaped but never authenticated
-      CborDeserializer.decodeNullable(
-        data[7],
-        (map) =>
-          new Map(
-            CborDeserializer.decodeMap(map).map((entry) => [
+      witnessEntries === null
+        ? null
+        : new Map(
+            witnessEntries.map((entry) => [
               UnicitySeal.decodeSignerId(entry.key),
               CborDeserializer.decodeByteString(entry.value),
             ]),
           ),
-      ),
     );
+  }
+
+  /**
+   * Create unicity seal from CBOR bytes.
+   *
+   * @param bytes CBOR bytes
+   * @return unicity seal
+   * @throws {CborError} On malformed CBOR. A signature entry that is a byte string of any length is kept as it is,
+   *   including one that is not a valid signature encoding (it counts as zero votes in the quorum rule).
+   */
+  public static fromCBOR(bytes: Uint8Array): UnicitySeal {
+    return UnicitySeal.decodeWithOptions(bytes, {});
   }
 
   /**

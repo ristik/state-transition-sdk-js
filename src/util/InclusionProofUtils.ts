@@ -1,6 +1,4 @@
-import { verifyWithTrustBaseUpdate } from './TrustBaseUtils.js';
-import { ITrustBaseAuthority } from '../api/bft/trustbase/TrustBaseAuthority.js';
-import { TrustBaseHistory } from '../api/bft/trustbase/TrustBaseHistory.js';
+import { ITrustBaseHistory } from '../api/bft/trustbase/ITrustBaseHistory.js';
 import { UnicityCertificateVerifier } from '../api/bft/verification/UnicityCertificateVerifier.js';
 import { ILongPollOptions } from '../api/ILongPollOptions.js';
 import { InclusionProof } from '../api/InclusionProof.js';
@@ -9,7 +7,6 @@ import {
   InclusionProofExpiredError,
   InclusionProofUnknownError,
 } from '../api/InclusionProofStatusError.js';
-import { ITrustBaseSource } from '../api/ITrustBaseSource.js';
 import { JsonRpcDataError } from '../api/json-rpc/JsonRpcDataError.js';
 import { JsonRpcNetworkError } from '../api/json-rpc/JsonRpcNetworkError.js';
 import { JsonRpcResponseError } from '../api/json-rpc/JsonRpcResponseError.js';
@@ -30,6 +27,7 @@ import {
   InclusionProofVerificationRule,
   InclusionProofVerificationStatus,
 } from '../transaction/verification/rule/InclusionProofVerificationRule.js';
+import { VerificationError } from '../verification/VerificationError.js';
 
 /**
  * Options of {@link waitInclusionProof}.
@@ -65,13 +63,6 @@ export interface IWaitInclusionProofOptions {
    * deadline): the wait then asks for the preferred window and stops when the signal fires.
    */
   readonly timeoutMs?: number;
-  /**
-   * Where newer trust-base entries come from (usually the same `AggregatorClient`). With it, a freshly certified proof whose seal is of an epoch the
-   * held history does not have yet (`NO_ENTRY_FOR_EPOCH`) does not fail the wait: the entries after the latest held one are fetched, authenticated
-   * and appended (see {@link verifyWithTrustBaseUpdate}, same bounds, within this wait's budget), and the same proof is verified again. Needs the
-   * trust base to be a `TrustBaseHistory`. Without it such a proof fails the wait as before.
-   */
-  readonly trustBaseSource?: ITrustBaseSource;
   /**
    * How long an `unknown` hint is tolerated, counted from the start of the wait, before the wait fails with
    * {@link InclusionProofUnknownError}. Defaults to two poll intervals; `0` fails at the first `unknown`. Ignored
@@ -264,7 +255,7 @@ function isSignalLike(value: unknown): value is AbortSignal {
  * answers `unknown`.
  *
  * @param {StateTransitionClient} client Client used to fetch inclusion proofs.
- * @param {ITrustBaseAuthority} trustBase Held trust-base history (verifies each certificate against its own epoch's committee).
+ * @param {ITrustBaseHistory} trustBase Trust-base history used to verify the inclusion certificate.
  * @param {PredicateVerifierService} predicateVerifier Verifier used to check the transaction predicate.
  * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
@@ -280,7 +271,7 @@ function isSignalLike(value: unknown): value is AbortSignal {
  */
 export function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: ITrustBaseAuthority,
+  trustBase: ITrustBaseHistory,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,
@@ -290,7 +281,7 @@ export function waitInclusionProof(
  * @deprecated Positional form, kept (default budget 15 s, no status hints, they need the options form): pass
  *   `{ signal, intervalMs }` instead.
  * @param {StateTransitionClient} client Client used to fetch inclusion proofs.
- * @param {ITrustBaseAuthority} trustBase Held trust-base history (verifies each certificate against its own epoch's committee).
+ * @param {ITrustBaseHistory} trustBase Trust-base history used to verify the inclusion certificate.
  * @param {PredicateVerifierService} predicateVerifier Verifier used to check the transaction predicate.
  * @param {UnicityCertificateVerifier} unicityCertificateVerifier Unicity certificate verifier.
  * @param {ITransaction} transaction Transaction whose inclusion is being awaited.
@@ -300,7 +291,7 @@ export function waitInclusionProof(
  */
 export function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: ITrustBaseAuthority,
+  trustBase: ITrustBaseHistory,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,
@@ -309,7 +300,7 @@ export function waitInclusionProof(
 ): Promise<InclusionProof>;
 export async function waitInclusionProof(
   client: StateTransitionClient,
-  trustBase: ITrustBaseAuthority,
+  trustBase: ITrustBaseHistory,
   predicateVerifier: PredicateVerifierService,
   unicityCertificateVerifier: UnicityCertificateVerifier,
   transaction: ITransaction,
@@ -327,7 +318,6 @@ export async function waitInclusionProof(
   const budgetMs = timeoutMs ?? (callerSignal === undefined ? DEFAULT_BUDGET_MS : undefined);
   const interval = positional ? (positionalInterval ?? 1000) : (options.intervalMs ?? 1000);
   const statusHints = positional ? false : options.statusHints !== false;
-  const trustBaseSource = positional ? undefined : options.trustBaseSource;
   const longPoll = positional ? null : longPollSettings(options.longPoll, true);
   const deadline = new Deadline(callerSignal, timeoutMs, budgetMs);
   const signal = deadline.signal;
@@ -426,30 +416,16 @@ export async function waitInclusionProof(
         return { inclusionProof: null, pendingHint: statusHint !== 'unknown', waitedMs: response.waitedMs };
       }
 
-      const verifyProof = (authority: ITrustBaseAuthority): ReturnType<typeof InclusionProofVerificationRule.verify> =>
-        InclusionProofVerificationRule.verify(
-          authority,
-          predicateVerifier,
-          unicityCertificateVerifier,
-          inclusionProof,
-          transactionHash,
-          transaction.expiresAt,
-          transaction.lockScript,
-          transaction.sourceStateHash,
-        );
-      let verificationStatus = await verifyProof(trustBase);
-      // a freshly certified proof may be sealed by a committee whose entry is not held yet: update the history, verify the same proof again
-      if (
-        verificationStatus.status === InclusionProofVerificationStatus.NO_ENTRY_FOR_EPOCH &&
-        trustBaseSource !== undefined &&
-        trustBase instanceof TrustBaseHistory
-      ) {
-        const left = remainingMs();
-        verificationStatus = await verifyWithTrustBaseUpdate(verifyProof, trustBase, trustBaseSource, {
-          signal: requestSignal,
-          ...(left !== undefined ? { timeoutMs: Math.max(1, Math.floor(Math.min(left, 10_000))) } : {}),
-        });
-      }
+      const verificationStatus = await InclusionProofVerificationRule.verify(
+        trustBase,
+        predicateVerifier,
+        unicityCertificateVerifier,
+        inclusionProof,
+        transactionHash,
+        transaction.expiresAt,
+        transaction.lockScript,
+        transaction.sourceStateHash,
+      );
 
       if (verificationStatus.status !== InclusionProofVerificationStatus.OK) {
         // another request was certified for this state id: typed, so that a conflicting submission is not reported as a
@@ -462,7 +438,7 @@ export async function waitInclusionProof(
           throw new InclusionProofConflictError(verificationStatus.status, stateId, inclusionProof);
         }
         // anything else, including a mismatching proof nobody authenticated, is an invalid response, not a conflict
-        throw new Error(`Invalid inclusion proof status: ${verificationStatus.status}`);
+        throw new VerificationError(`Invalid inclusion proof status: ${verificationStatus.status}`, verificationStatus);
       }
 
       return { inclusionProof, pendingHint: false, waitedMs: response.waitedMs };

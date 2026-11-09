@@ -1,7 +1,7 @@
 import { numberToBytesBE } from '@noble/curves/utils.js';
 
 import { REFERENCE_TIME } from './ReferenceTime.js';
-import { TEST_EPOCH } from './RootTrustBaseFixture.js';
+import { FIXTURE_EPOCH } from './TrustBaseHistoryFixture.js';
 import { AGGREGATION_PARTITION_ID } from '../../src/api/bft/AggregationPartition.js';
 import { InputRecord } from '../../src/api/bft/InputRecord.js';
 import { ShardId } from '../../src/api/bft/ShardId.js';
@@ -22,7 +22,7 @@ export interface IUnicityCertificateOptions {
   readonly blockHash?: Uint8Array | null;
   /** Partition of the certificate. Default: the aggregation partition. */
   readonly partition?: bigint;
-  /** Epoch of the seal. Default {@link TEST_EPOCH}. */
+  /** Epoch of the seal. Default: the epoch of the fixture history. */
   readonly sealEpoch?: bigint;
   /** Round of the seal. Default 1. */
   readonly sealRound?: bigint;
@@ -79,7 +79,7 @@ export async function createUnicityCertificate(
   const seal = await UnicitySeal.create(
     NetworkId.LOCAL,
     options.sealRound ?? 1n,
-    options.sealEpoch ?? BigInt(TEST_EPOCH),
+    options.sealEpoch ?? FIXTURE_EPOCH,
     options.sealTimestamp ?? timestamp,
     null,
     unicitySealHash.data,

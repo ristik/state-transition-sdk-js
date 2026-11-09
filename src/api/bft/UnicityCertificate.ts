@@ -1,7 +1,7 @@
 import { InputRecord } from './InputRecord.js';
 import { ShardTreeCertificate } from './ShardTreeCertificate.js';
 import { UnicityCertificateInterner } from './UnicityCertificateInterner.js';
-import { UnicitySeal } from './UnicitySeal.js';
+import { IUnicitySealDecodeOptions, UnicitySeal } from './UnicitySeal.js';
 import { UnicityTreeCertificate } from './UnicityTreeCertificate.js';
 import { DataHash } from '../../crypto/hash/DataHash.js';
 import { DataHasher } from '../../crypto/hash/DataHasher.js';
@@ -129,12 +129,13 @@ export class UnicityCertificate {
   }
 
   /**
-   * Create unicity certificate from CBOR bytes.
+   * Create unicity certificate from CBOR bytes with seal decoding options (the B1 profile accepts a null signature map).
    *
    * @param bytes CBOR bytes
+   * @param options Seal decoding options.
    * @return unicity certificate
    */
-  public static fromCBOR(bytes: Uint8Array): UnicityCertificate {
+  public static decodeWithOptions(bytes: Uint8Array, options: IUnicitySealDecodeOptions): UnicityCertificate {
     unicityCertificateMetrics.decodes++;
     const tag = CborDeserializer.decodeTag(bytes);
     if (tag.tag !== UnicityCertificate.CBOR_TAG) {
@@ -153,8 +154,18 @@ export class UnicityCertificate {
       CborDeserializer.decodeByteString(data[3]),
       ShardTreeCertificate.fromCBOR(data[4]),
       UnicityTreeCertificate.fromCBOR(data[5]),
-      UnicitySeal.fromCBOR(data[6]),
+      UnicitySeal.decodeWithOptions(data[6], options),
     );
+  }
+
+  /**
+   * Create unicity certificate from CBOR bytes.
+   *
+   * @param bytes CBOR bytes
+   * @return unicity certificate
+   */
+  public static fromCBOR(bytes: Uint8Array): UnicityCertificate {
+    return UnicityCertificate.decodeWithOptions(bytes, {});
   }
 
   /**
