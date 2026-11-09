@@ -187,6 +187,19 @@ export class UnicityCertificateVerifier {
       return UnicityCertificateVerificationResult.fail(results);
     }
 
+    // The configured signature bound is a format property of the seal: it is judged before the entry is selected, so a seal over the limit is
+    // `malformed` whatever the registry holds (B1: ErrTooManySigs), never a retryable `no_entry_for_epoch` or a registry-dependent `invalid`.
+    const malformed = UnicitySealQuorumSignaturesVerificationRule.checkSignatureFormat(
+      certificate.unicitySeal,
+      this.quorumSignaturesRule.maxSignatures,
+    );
+    if (malformed !== null) {
+      results.push(
+        new CertificateVerificationResult('UnicitySealQuorumSignaturesVerificationRule', 'malformed', malformed),
+      );
+      return UnicityCertificateVerificationResult.fail(results);
+    }
+
     result = UnicityCertificateStructureRule.verify(certificate, options?.partitionId ?? AGGREGATION_PARTITION_ID);
     results.push(result);
     if (result.status !== VerificationStatus.OK) {
